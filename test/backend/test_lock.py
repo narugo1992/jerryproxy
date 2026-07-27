@@ -24,6 +24,7 @@ def test_dead_owner_lock_is_recovered(tmp_path, monkeypatch):
     assert not path.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot unlink an open lock file")
 def test_old_owner_cannot_remove_replacement_lock(tmp_path):
     path = tmp_path / "backend.lock"
     first = BackendOperationLock(path)
