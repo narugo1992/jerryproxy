@@ -1,0 +1,101 @@
+name: Code Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install "pip<24.1"
+      - run: python -m pip install -e . -r requirements-dev.txt
+      - run: make lint
+
+  unit:
+    name: Unit (${{ matrix.os }}, Python ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: "3.7.17"
+          - os: ubuntu-22.04
+            python: "3.8"
+          - os: ubuntu-22.04
+            python: "3.9"
+          - os: ubuntu-22.04
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: windows-2022
+            python: "3.7.9"
+          - os: windows-latest
+            python: "3.14"
+          - os: macos-15-intel
+            python: "3.7.17"
+          - os: macos-latest
+            python: "3.14"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Pin pip for Python 3.7
+        if: startsWith(matrix.python, '3.7')
+        run: python -m pip install "pip<24.1"
+      - name: Upgrade pip on maintained Python
+        if: ${{ !startsWith(matrix.python, '3.7') }}
+        run: python -m pip install --upgrade pip
+      - run: python -m pip install -e . -r requirements-test.txt
+      - name: Run unit tests
+        run: >-
+          python -m pytest test -sv -m unittest
+          --junitxml=junit.xml -o junit_family=legacy
+          --cov=jerryproxy --cov-report=term-missing --cov-report=xml
+          --cov-fail-under=85
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            junit.xml
+            coverage.xml
+
+  gate:
+    name: Code test gate
+    if: always()
+    needs: [lint, unit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+        run: |
+          test "$LINT_RESULT" = success
+          test "$UNIT_RESULT" = success

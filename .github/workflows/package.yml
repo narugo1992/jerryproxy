@@ -1,0 +1,38 @@
+name: Package Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -r requirements-build.txt
+      - run: make package
+      - name: Rebuild wheel from generated sdist
+        run: |
+          mkdir -p build/from-sdist
+          tar -xzf dist/jerryproxy-*.tar.gz -C build/from-sdist
+          rm dist/*.whl
+          python -m build --wheel --outdir dist build/from-sdist/jerryproxy-*
+          python -m twine check dist/*.whl dist/*.tar.gz
+      - name: Install and smoke-test wheel
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          jerryproxy --version
+          python -m jerryproxy backend supported
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jerryproxy-python-package
+          path: dist/*
