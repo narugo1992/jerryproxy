@@ -145,8 +145,7 @@ an `__init__.py`, including newly added test-area directories.
 
 The repository owner, primary maintainer, release authority, and PyPI Trusted
 Publisher owner is `narugo1992`. Preserve accurate authorship for all
-contributors, including HansBug contributions; never falsify or rewrite
-contributor attribution.
+contributors; never falsify or rewrite contributor attribution.
 
 For owner-maintenance operations in the configured development environment,
 every `gh` command must be invoked with:

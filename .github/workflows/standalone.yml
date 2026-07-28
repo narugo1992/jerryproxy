@@ -1,31 +1,43 @@
 name: Standalone CLI
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
   workflow_call:
+
+concurrency:
+  group: standalone-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: PyInstaller (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - platform: Linux
+            os: ubuntu-latest
             binary: dist/jerryproxy
-            archive: dist/jerryproxy-linux-amd64.tar.gz
-            name: jerryproxy-linux-amd64
-          - os: windows-2022
+            archive: jerryproxy-linux-amd64.tar.gz
+            artifact: jerryproxy-linux-amd64
+          - platform: Windows
+            os: windows-2022
             binary: dist/jerryproxy.exe
-            archive: dist/jerryproxy-windows-amd64.zip
-            name: jerryproxy-windows-amd64
-          - os: macos-15-intel
+            archive: jerryproxy-windows-amd64.zip
+            artifact: jerryproxy-windows-amd64
+          - platform: macOS
+            os: macos-15-intel
             binary: dist/jerryproxy
-            archive: dist/jerryproxy-macos-amd64.tar.gz
-            name: jerryproxy-macos-amd64
+            archive: jerryproxy-macos-amd64.tar.gz
+            artifact: jerryproxy-macos-amd64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -33,17 +45,63 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install -e . -r requirements-build.txt
-      - run: python -m PyInstaller --clean --onefile --console --name jerryproxy jerryproxy_cli.py
+      - name: Build standalone CLI with PyInstaller
+        run: >-
+          python -m PyInstaller --clean --onefile --console
+          --name jerryproxy jerryproxy_cli.py
       - name: Smoke-test standalone CLI
+        shell: bash
         run: ${{ matrix.binary }} --version
+      - name: Smoke-test standalone backend inventory
+        shell: bash
+        run: ${{ matrix.binary }} backend supported
       - name: Archive Unix standalone CLI
         if: runner.os != 'Windows'
-        run: tar -C dist -czf ${{ matrix.archive }} jerryproxy
+        shell: bash
+        run: |
+          tar -czf "$RUNNER_TEMP/${{ matrix.archive }}" -C dist jerryproxy
+          mv "$RUNNER_TEMP/${{ matrix.archive }}" "dist/${{ matrix.archive }}"
       - name: Archive Windows standalone CLI
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path ${{ matrix.binary }} -DestinationPath ${{ matrix.archive }}
+        run: >-
+          Compress-Archive
+          -Path "${{ matrix.binary }}"
+          -DestinationPath "dist/${{ matrix.archive }}"
+      - name: Record standalone archive digest
+        shell: bash
+        env:
+          ARCHIVE: dist/${{ matrix.archive }}
+        run: |
+          python - "$ARCHIVE" <<'PY' > "${ARCHIVE}.sha256"
+          import hashlib
+          import os
+          import sys
+
+          path = sys.argv[1]
+          digest = hashlib.sha256()
+          with open(path, "rb") as stream:
+              for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                  digest.update(chunk)
+          print("{} {} {}".format(
+              digest.hexdigest(), os.path.getsize(path), os.path.basename(path)
+          ))
+          PY
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.name }}
-          path: ${{ matrix.archive }}
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            dist/${{ matrix.archive }}
+            dist/${{ matrix.archive }}.sha256
+
+  gate:
+    name: Standalone gate
+    if: always()
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all standalone builds
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "$BUILD_RESULT" = success

@@ -6,11 +6,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
-  package:
+  build:
+    name: Build sdist and wheel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -19,20 +24,109 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install -r requirements-build.txt
-      - run: make package
-      - name: Rebuild wheel from generated sdist
+      - name: Build and validate Python distributions
+        run: make package
+      - name: Verify staged artifact set and record digests
+        shell: bash
         run: |
-          mkdir -p build/from-sdist
-          tar -xzf dist/jerryproxy-*.tar.gz -C build/from-sdist
-          rm dist/*.whl
-          python -m build --wheel --outdir dist build/from-sdist/jerryproxy-*
-          python -m twine check dist/*.whl dist/*.tar.gz
-      - name: Install and smoke-test wheel
-        run: |
-          python -m pip install --force-reinstall dist/*.whl
-          jerryproxy --version
-          python -m jerryproxy backend supported
+          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+          python - <<'PY' > dist/artifact-sha256.txt
+          import hashlib
+          import os
+          from glob import glob
+
+          for path in sorted(glob("dist/*.whl") + glob("dist/*.tar.gz")):
+              digest = hashlib.sha256()
+              with open(path, "rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              print("{} {} {}".format(
+                  digest.hexdigest(), os.path.getsize(path), os.path.basename(path)
+              ))
+          PY
       - uses: actions/upload-artifact@v7
         with:
-          name: jerryproxy-python-package
+          name: jerryproxy-python-distributions
+          if-no-files-found: error
           path: dist/*
+
+  sdist-smoke:
+    name: Sdist smoke (Python ${{ matrix.python }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: "3.7.17"
+          - os: ubuntu-latest
+            python: "3.14"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Pin pip for Python 3.7
+        if: startsWith(matrix.python, '3.7')
+        run: python -m pip install "pip<24.1"
+      - name: Upgrade pip on maintained Python
+        if: ${{ !startsWith(matrix.python, '3.7') }}
+        run: python -m pip install --upgrade pip
+      - uses: actions/download-artifact@v8
+        with:
+          name: jerryproxy-python-distributions
+          path: dist
+      - name: Build from and install the staged sdist
+        run: python -m pip install --no-cache-dir dist/*.tar.gz
+      - run: python -m pip check
+      - run: jerryproxy --version
+      - run: python -m jerryproxy backend supported
+
+  wheel-smoke:
+    name: Wheel smoke (Python ${{ matrix.python }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: "3.7.17"
+          - os: ubuntu-latest
+            python: "3.14"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Pin pip for Python 3.7
+        if: startsWith(matrix.python, '3.7')
+        run: python -m pip install "pip<24.1"
+      - name: Upgrade pip on maintained Python
+        if: ${{ !startsWith(matrix.python, '3.7') }}
+        run: python -m pip install --upgrade pip
+      - uses: actions/download-artifact@v8
+        with:
+          name: jerryproxy-python-distributions
+          path: dist
+      - name: Install the staged wheel
+        run: python -m pip install --no-cache-dir dist/*.whl
+      - run: python -m pip check
+      - run: jerryproxy --version
+      - run: python -m jerryproxy backend supported
+
+  gate:
+    name: Package gate
+    if: always()
+    needs: [build, sdist-smoke, wheel-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify staged distribution jobs
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          SDIST_RESULT: ${{ needs.sdist-smoke.result }}
+          WHEEL_RESULT: ${{ needs.wheel-smoke.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$SDIST_RESULT" = success
+          test "$WHEEL_RESULT" = success

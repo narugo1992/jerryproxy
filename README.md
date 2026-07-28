@@ -207,7 +207,7 @@ initial planning issue.
 
 ## Development
 
-Common commands follow the same shape as the `pyfcstm` project:
+The repository exposes the same commands locally and in CI:
 
 ```shell
 make help
@@ -218,6 +218,16 @@ make package
 make build
 make check
 ```
+
+Every main-branch push and pull request runs the following independent gates:
+
+- unit tests on Linux, Windows, and macOS for every supported Python version
+  from 3.7 through 3.14 (24 matrix cells, with no excluded combinations);
+- strict Sphinx HTML documentation with warnings treated as errors;
+- staged sdist and wheel builds, followed by clean artifact-only installation
+  smoke tests on Python 3.7 and 3.14;
+- standalone PyInstaller builds and executable smoke tests on Linux, Windows,
+  and macOS.
 
 Read [CLAUDE.md](CLAUDE.md) before changing architecture, backend metadata,
 download/extraction code, credential handling, or release workflows.

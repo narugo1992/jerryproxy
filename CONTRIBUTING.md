@@ -23,8 +23,8 @@ make check
   secrets, or backend logs in issues, commits, fixtures, or snapshots.
 - Keep README/docs WIP claims aligned with actual behavior.
 - Preserve accurate Git authorship. `narugo1992` owns releases and protected
-  backend-catalog changes; other contributors, including HansBug, participate
-  through normal commits and pull requests.
+  backend-catalog changes; other contributors participate through normal
+  commits and pull requests.
 
 ## Verification
 
