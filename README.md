@@ -170,12 +170,17 @@ digest-pinned official Python 3.7.11 Docker image based on Debian 9 (glibc
 2.24). The build container is an isolated compatibility toolchain; users do
 not need Docker or Python to run the resulting executable.
 
-CI downloads the first-stage archive on a checkout-free runner and executes
-the same binary in digest-pinned Ubuntu 18.04 and Debian 10 containers. It runs
-the ANSI self-check and public read-only backend commands without installing
-Python, JerryProxy, or any dependencies in those containers. This proves the
-current `linux-amd64` artifact on both target distributions rather than
-inferring compatibility from the build host.
+CI downloads the first-stage archive on checkout-free runners and executes the
+same binary in seven digest-pinned containers: Ubuntu 18.04, Ubuntu 20.04,
+Debian 10, Oracle Linux 7, CentOS 7, Amazon Linux 2, and openSUSE Leap 15.0.
+Each job verifies the distribution identity, ANSI self-check, and public
+read-only backend commands without installing Python, JerryProxy, or any
+dependencies. The two Enterprise Linux 7 environments also enforce the
+current glibc 2.17 compatibility boundary.
+
+Several historical targets are upstream-EOL. Their presence in this matrix is
+a binary-compatibility regression check for the staged JerryProxy artifact,
+not a claim that the distribution still receives vendor security maintenance.
 
 ## Backend supply-chain rules
 
@@ -270,9 +275,9 @@ Every main-branch push and pull request runs the following independent gates:
 - two-stage standalone validation: Linux is built in the pinned Python 3.7.11
   Docker toolchain, while Windows and macOS build on `windows-2022` and
   `macos-15-intel`; Stage 2 starts without checkout or dependency installation,
-  verifies the downloaded archives, tests Linux on Ubuntu 18.04 and Debian 10,
-  and exercises every packaged CLI through `self-check --color` and public
-  read-only commands.
+  verifies the downloaded archives, tests Linux on the seven-distribution
+  compatibility matrix documented above, and exercises every packaged CLI
+  through `self-check --color` and public read-only commands.
 
 Read [CLAUDE.md](CLAUDE.md) before changing architecture, backend metadata,
 download/extraction code, credential handling, or release workflows.

@@ -142,9 +142,14 @@ or an unpinned image tag. Windows and macOS use pinned hosted runners with
 Python 3.7. Verification must run on a separate clean runner, download the
 first-stage artifact, avoid source checkout and dependency installation, and
 exercise the packaged binary through `self-check --color` plus public read-only
-commands. The same Linux artifact must pass in pinned Ubuntu 18.04 and Debian
-10 containers. Do not substitute unit tests, ELF inspection, or build-container
+commands. The same Linux artifact must pass in digest-pinned Ubuntu 18.04,
+Ubuntu 20.04, Debian 10, Oracle Linux 7, CentOS 7, Amazon Linux 2, and openSUSE
+Leap 15.0 containers. Each job must verify both distribution ID and version;
+the build ELF gate must reject external glibc symbol requirements newer than
+2.17. Do not substitute unit tests, ELF inspection, or build-container
 execution for clean compatibility-container verification.
+Document EOL compatibility targets as binary regression environments, never as
+a claim of continuing distribution security maintenance.
 
 Generated API documentation is a repository contract. Python source under
 `jerryproxy/` is the source of truth; `docs/source/api_doc.rst` and

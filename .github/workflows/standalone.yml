@@ -76,7 +76,7 @@ jobs:
               sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p'
           } | sort -Vu | tail -n 1)"
           test -n "$required_glibc"
-          oldest="$(printf '%s\n' "$required_glibc" 2.27 | sort -Vu | head -n 1)"
+          oldest="$(printf '%s\n' "$required_glibc" 2.17 | sort -Vu | head -n 1)"
           test "$oldest" = "$required_glibc"
           echo "Highest external GLIBC symbol requirement: $required_glibc"
       - name: Stage binary
@@ -133,14 +133,56 @@ jobs:
             archive: jerryproxy-linux-amd64.tar.gz
             artifact: jerryproxy-linux-amd64
             container_image: ubuntu@sha256:152dc042452c496007f07ca9127571cb9c29697f42acbfad72324b2bb2e43c98
+            distribution_id: ubuntu
             version_id: "18.04"
+          - platform: Linux / Ubuntu 20.04
+            os: ubuntu-22.04
+            staged_binary: jerryproxy
+            archive: jerryproxy-linux-amd64.tar.gz
+            artifact: jerryproxy-linux-amd64
+            container_image: ubuntu@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+            distribution_id: ubuntu
+            version_id: "20.04"
           - platform: Linux / Debian 10
             os: ubuntu-22.04
             staged_binary: jerryproxy
             archive: jerryproxy-linux-amd64.tar.gz
             artifact: jerryproxy-linux-amd64
             container_image: debian@sha256:bb3dc79fddbca7e8903248ab916bb775c96ec61014b3d02b4f06043b604726dc
+            distribution_id: debian
             version_id: "10"
+          - platform: Linux / Oracle Linux 7
+            os: ubuntu-22.04
+            staged_binary: jerryproxy
+            archive: jerryproxy-linux-amd64.tar.gz
+            artifact: jerryproxy-linux-amd64
+            container_image: oraclelinux@sha256:1add6ed8602ea996528110fe75f4b03c2ca7ffdbe9497148dbb46c3cc9ce6acd
+            distribution_id: ol
+            version_id: "7.9"
+          - platform: Linux / CentOS 7
+            os: ubuntu-22.04
+            staged_binary: jerryproxy
+            archive: jerryproxy-linux-amd64.tar.gz
+            artifact: jerryproxy-linux-amd64
+            container_image: centos@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4
+            distribution_id: centos
+            version_id: "7"
+          - platform: Linux / Amazon Linux 2
+            os: ubuntu-22.04
+            staged_binary: jerryproxy
+            archive: jerryproxy-linux-amd64.tar.gz
+            artifact: jerryproxy-linux-amd64
+            container_image: amazonlinux@sha256:30508da01fdcf18d0bfac10a59d86f9e46954233746ee7360d26d77199e773d1
+            distribution_id: amzn
+            version_id: "2"
+          - platform: Linux / openSUSE Leap 15.0
+            os: ubuntu-22.04
+            staged_binary: jerryproxy
+            archive: jerryproxy-linux-amd64.tar.gz
+            artifact: jerryproxy-linux-amd64
+            container_image: opensuse/leap@sha256:064e0f679cebcd854adc1d5b814f6800805da3da9b36adb428d6cdc784b73ef8
+            distribution_id: opensuse-leap
+            version_id: "15.0"
           - platform: Windows
             os: windows-2022
             staged_binary: jerryproxy.exe
@@ -198,14 +240,17 @@ jobs:
         shell: bash
         env:
           CONTAINER_IMAGE: ${{ matrix.container_image }}
+          EXPECTED_ID: ${{ matrix.distribution_id }}
           EXPECTED_VERSION_ID: ${{ matrix.version_id }}
         run: |
           binary="$PWD/extracted/${{ matrix.staged_binary }}"
           docker run --rm \
             --env EXPECTED_VERSION_ID \
+            --env EXPECTED_ID \
             --volume "$binary:/usr/local/bin/jerryproxy:ro" \
             "$CONTAINER_IMAGE" /bin/sh -eu -c '
               . /etc/os-release
+              test "$ID" = "$EXPECTED_ID"
               test "$VERSION_ID" = "$EXPECTED_VERSION_ID"
               /usr/local/bin/jerryproxy --version
               output="$(/usr/local/bin/jerryproxy --home /tmp/self-check-home self-check --color)"

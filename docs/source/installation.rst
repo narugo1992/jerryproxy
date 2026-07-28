@@ -41,9 +41,16 @@ Standalone CI builds Linux entirely inside a digest-pinned official Python
 3.7.11 Docker image based on Debian 9 and glibc 2.24. Windows and macOS use
 Python 3.7 on their pinned hosted runners. A second clean runner downloads and
 verifies the first-stage artifact without checking out the source tree or
-installing Python dependencies. The Linux archive is then exercised in pinned
-Ubuntu 18.04 and Debian 10 containers; both run ``self-check --color`` and
-public read-only CLI commands from the same extracted binary.
+installing Python dependencies. The Linux archive is then exercised in seven
+digest-pinned containers: Ubuntu 18.04, Ubuntu 20.04, Debian 10, Oracle Linux
+7, CentOS 7, Amazon Linux 2, and openSUSE Leap 15.0. Every job verifies the
+distribution identity, runs ``self-check --color``, and exercises public
+read-only CLI commands from the same extracted binary. The Enterprise Linux 7
+jobs enforce the current glibc 2.17 compatibility boundary.
+
+Several historical targets are upstream-EOL. Inclusion in this matrix proves
+binary compatibility for the staged JerryProxy artifact; it does not imply
+that the distribution still receives vendor security maintenance.
 
 The reproducible local Linux build entry point is:
 
