@@ -47,6 +47,13 @@ not download backend archives to calculate catalog fingerprints. Archive
 extraction rejects absolute paths, parent traversal, archive symlinks, and
 special files.
 
+Backend archives stream through ``requests``. A ``tqdm`` byte progress bar on
+stderr reports ``Connecting``, ``Downloading``, transfer speed/ETA,
+``Downloaded``, or ``Download failed`` without changing stdout or JSON output.
+Requests uses the host's standard proxy and CA environment configuration, so a
+configured bootstrap proxy works without a JerryProxy-specific transport
+setting while direct downloads remain usable when no proxy is configured.
+
 The catalog updater exists only in the repository ``tools`` package. It is not
 included in the JerryProxy wheel and is never called by the library or CLI.
 Maintainers run ``make catalog_update``; users run ``pip install -U

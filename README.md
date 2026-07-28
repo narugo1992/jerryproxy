@@ -23,6 +23,8 @@ Implemented now:
   a runtime release API request;
 - mandatory upstream SHA-256 verification, preferring digests supplied
   directly by GitHub's release API;
+- streamed backend downloads through `requests`, with a `tqdm` byte progress
+  bar showing connection, transfer speed/ETA, completion, and failure status;
 - bounded HTTPS downloads and safe ZIP/TAR/GZip extraction;
 - immutable installations under
   `~/.jerryproxy/backends/<backend>/<version>/`;
@@ -219,11 +221,17 @@ at runtime. The manager:
 1. validates the packaged stable-release catalog;
 2. selects one exact recorded asset for the detected OS and architecture;
 3. rejects assets without accepted upstream SHA-256 evidence;
-4. downloads over HTTPS with size bounds;
+4. downloads over HTTPS through `requests` with size bounds and visible
+   `tqdm` connection/byte progress on stderr;
 5. verifies size and SHA-256 before extraction;
 6. rejects archive traversal, symlinks, and special files;
 7. installs into an immutable version directory;
 8. changes the active backend only after installation succeeds.
+
+The progress bar is written to stderr, so stdout remains stable for ordinary
+CLI output and machine-readable JSON. `requests` honors the host's standard
+proxy and CA environment configuration while direct connections remain the
+default when no proxy is configured.
 
 Official upstream repositories currently registered:
 

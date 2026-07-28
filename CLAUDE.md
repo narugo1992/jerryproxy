@@ -89,6 +89,10 @@ authentication, extraction, process, or permission errors to warnings.
   metadata. HTTPS alone is not integrity evidence.
 - Keep download and extraction size bounds. Reject path traversal, archive
   symlinks, device files, duplicate executables, and unexpected layouts.
+- Backend archive transport uses streamed `requests` responses and a `tqdm`
+  byte progress/status display on stderr. Preserve system proxy/CA behavior,
+  keep stdout machine-readable, and retain deterministic injection points for
+  unit tests.
 - Install through a private staging directory and atomically rename only after
   validation succeeds.
 - Never overwrite an installed version with different bytes.

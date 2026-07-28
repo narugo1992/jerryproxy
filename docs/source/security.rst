@@ -10,6 +10,8 @@ Current enforced backend invariants:
   digest supplied directly by GitHub's release API and using official checksum
   text only for legacy assets without that field;
 * bounded HTTPS download and bounded extraction;
+* streamed ``requests`` downloads with byte-oriented ``tqdm`` status on
+  stderr, preserving stdout for structured output;
 * archive traversal, symlink, and special-file rejection;
 * private staging, executable fingerprint verification, and a bounded native
   version probe before atomic immutable publication;
