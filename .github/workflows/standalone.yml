@@ -61,6 +61,7 @@ jobs:
         if: runner.os != 'Linux'
         run: >-
           python -m PyInstaller --clean --onefile --console
+          --collect-data jerryproxy
           --name jerryproxy jerryproxy_cli.py
       - name: Build Linux CLI in pinned Python 3.7 Docker image
         if: runner.os == 'Linux'
@@ -260,6 +261,9 @@ jobs:
               /usr/local/bin/jerryproxy --home /tmp/self-check-home home
               /usr/local/bin/jerryproxy --home /tmp/self-check-home doctor
               /usr/local/bin/jerryproxy backend supported
+              /usr/local/bin/jerryproxy backend available
+              /usr/local/bin/jerryproxy backend versions mihomo --limit 2
+              /usr/local/bin/jerryproxy backend artifact mihomo
               /usr/local/bin/jerryproxy --home /tmp/self-check-home backend list
               /usr/local/bin/jerryproxy --home /tmp/self-check-home backend current
               test -d /tmp/self-check-home/backends
@@ -282,6 +286,9 @@ jobs:
           "$binary" --home self-check-home home
           "$binary" --home self-check-home doctor
           "$binary" backend supported
+          "$binary" backend available
+          "$binary" backend versions mihomo --limit 2
+          "$binary" backend artifact mihomo
           "$binary" --home self-check-home backend list
           "$binary" --home self-check-home backend current
           test -d self-check-home/backends

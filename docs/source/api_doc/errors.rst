@@ -24,10 +24,10 @@ UnsupportedBackendError
 .. autoclass:: UnsupportedBackendError
 
 
-ReleaseResolutionError
+BackendCatalogError
 -----------------------------------------------------
 
-.. autoclass:: ReleaseResolutionError
+.. autoclass:: BackendCatalogError
 
 
 DownloadError

@@ -10,8 +10,8 @@ jerryproxy.backend
    :maxdepth: 3
 
    archive
+   catalog
    download
-   github
    lock
    manager
    model

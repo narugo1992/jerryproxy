@@ -64,6 +64,20 @@ authentication, extraction, process, or permission errors to warnings.
 
 ## Backend supply-chain invariants
 
+- Backend release catalogs are four flat, static resources under
+  `jerryproxy/data/`: `mihomo.json`, `sing-box.json`, `v2ray.json`, and
+  `xray.json`. They contain official stable releases only and use no catalog
+  format-version or migration mechanism.
+- Runtime catalog reads must go through `from jerryproxy.data import ...`.
+  Runtime modules must not open those JSON paths directly.
+- Catalog refresh logic belongs only in the repository `tools` package. It is
+  maintainer tooling, is excluded from the JerryProxy wheel, and must never be
+  invoked by the library or CLI at runtime. Users refresh available resources
+  by upgrading JerryProxy with `pip install -U jerryproxy`.
+- Prefer SHA-256 digests returned directly by the GitHub release API. For old
+  assets without that field, maintenance tooling may reuse unchanged recorded
+  evidence or read official upstream checksum text files. It must not download
+  backend archives to calculate catalog fingerprints itself.
 - Backend versions install into immutable
   `~/.jerryproxy/backends/<name>/<version>/` directories.
 - Active commands live at `~/.jerryproxy/bin/<name>` (`.exe` on Windows).
@@ -99,7 +113,9 @@ authentication, extraction, process, or permission errors to warnings.
 
 - `jerryproxy.backend.registry`: built-in backend identity and exact asset
   naming.
-- `jerryproxy.backend.github`: read-only upstream release metadata.
+- `jerryproxy.data`: the only reader for packaged static catalog resources.
+- `jerryproxy.backend.catalog`: strict offline catalog validation and artifact
+  selection. It performs no release API request.
 - `jerryproxy.backend.download`: bounded HTTPS and digest verification.
 - `jerryproxy.backend.archive`: safe extraction only.
 - `jerryproxy.backend.manager`: immutable installation, activation, rollback,
@@ -140,6 +156,11 @@ assert the resulting public behavior. Model GitHub responses locally because
 unit tests must not depend on external network availability. Real backend
 integration tests belong in an explicit credential-free integration lane and
 must pin versions and asset digests.
+
+The product unit-test boundary is the `jerryproxy` package. Do not create a
+`test/tools` package, import repository maintenance modules from tests, or
+unit-test scripts below `tools/`. Validate maintenance tools through their
+dedicated Make targets and repository workflows instead.
 
 Every unit-test matrix cell must produce its own `coverage.xml` and upload it to
 Codecov with the shared `python` aggregation flag and a unique environment

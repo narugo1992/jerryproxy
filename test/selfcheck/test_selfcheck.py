@@ -8,7 +8,7 @@ def test_self_check_validates_an_empty_private_home(tmp_path):
     exit_code = run_self_check(JerryProxyPaths(tmp_path), output=lines.append)
 
     assert exit_code == 0
-    assert "Summary: 7 OK, 0 FAIL" in lines
+    assert "Summary: 8 OK, 0 FAIL" in lines
     assert lines[-1] == "Self-check PASSED"
     assert not list(tmp_path.glob(".self-check-*"))
     for name in ("active", "backends", "bin", "downloads", "locks", "logs", "providers", "runtimes"):

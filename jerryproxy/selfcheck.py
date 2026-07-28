@@ -5,7 +5,7 @@ import platform
 import sys
 import tempfile
 
-from .backend import BackendManager, iter_backends
+from .backend import BackendCatalog, BackendManager, iter_backends
 from .backend.platform import detect_platform
 from .config.meta import __VERSION__
 from .errors import UnsupportedPlatformError
@@ -127,6 +127,24 @@ def _check_backend_registry():
     )
 
 
+def _check_backend_catalog():
+    catalog = BackendCatalog.load()
+    platform_info = detect_platform()
+    missing = []
+    total_releases = 0
+    for spec in iter_backends():
+        versions = catalog.versions(spec.name)
+        total_releases += len(versions)
+        if not catalog.available_versions(spec.name, platform_info):
+            missing.append(spec.name)
+    if missing:
+        raise RuntimeError(
+            "catalog has no verified stable %s asset for: %s"
+            % (platform_info.key, ", ".join(missing))
+        )
+    return "%d releases; 4/4 compatible; snapshot %s" % (total_releases, catalog.generated_at)
+
+
 def _check_backend_inventory(paths):
     manager = BackendManager(paths)
     installed = manager.list_installed()
@@ -145,6 +163,7 @@ def build_checks(paths):
         ("home write access", lambda: _check_home_writable(paths)),
         ("private directory permissions", lambda: _check_private_permissions(paths)),
         ("backend registry", _check_backend_registry),
+        ("packaged backend catalog", _check_backend_catalog),
         ("backend inventory", lambda: _check_backend_inventory(paths)),
     )
 

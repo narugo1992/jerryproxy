@@ -13,8 +13,8 @@ class UnsupportedBackendError(JerryProxyError):
     """Raised when a backend name is not registered."""
 
 
-class ReleaseResolutionError(JerryProxyError):
-    """Raised when upstream release metadata cannot be resolved safely."""
+class BackendCatalogError(JerryProxyError):
+    """Raised when the packaged backend catalog is missing or invalid."""
 
 
 class DownloadError(JerryProxyError):

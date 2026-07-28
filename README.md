@@ -18,8 +18,11 @@ Implemented now:
 - one cross-platform state root at `~/.jerryproxy`, overridable with
   `JERRYPROXY_HOME` or `--home`;
 - built-in backend definitions for Mihomo, sing-box, Xray, and V2Ray;
-- exact official GitHub release-asset selection for the current OS/CPU;
-- mandatory GitHub-provided SHA-256 digest verification;
+- four packaged, stable-only offline backend catalogs;
+- exact official GitHub release-asset selection for the current OS/CPU without
+  a runtime release API request;
+- mandatory upstream SHA-256 verification, preferring digests supplied
+  directly by GitHub's release API;
 - bounded HTTPS downloads and safe ZIP/TAR/GZip extraction;
 - immutable installations under
   `~/.jerryproxy/backends/<backend>/<version>/`;
@@ -73,6 +76,13 @@ When published, the intended entry point will be:
 pip install jerryproxy
 ```
 
+Backend catalogs are static package resources. Upgrade JerryProxy itself to
+refresh the available release inventory:
+
+```shell
+python -m pip install -U jerryproxy
+```
+
 The same CLI is available through either form:
 
 ```shell
@@ -89,13 +99,31 @@ jerryproxy home
 jerryproxy backend supported
 jerryproxy doctor
 jerryproxy self-check
+jerryproxy backend available
+jerryproxy backend versions mihomo --limit 5
+jerryproxy backend artifact mihomo
 ```
 
-Install and activate one exact upstream version:
+Install and activate the newest verified stable version for this host:
+
+```shell
+jerryproxy backend install mihomo
+jerryproxy backend current mihomo
+```
+
+Install and activate one exact catalog version:
 
 ```shell
 jerryproxy backend install mihomo 1.19.29
 jerryproxy backend current mihomo
+```
+
+Update to the newest packaged stable version and verify installed executable
+fingerprints:
+
+```shell
+jerryproxy backend update mihomo
+jerryproxy backend verify
 ```
 
 Install another version without activating it, then switch atomically:
@@ -184,11 +212,13 @@ not a claim that the distribution still receives vendor security maintenance.
 
 ## Backend supply-chain rules
 
-JerryProxy does not bundle or import backend implementations. The manager:
+JerryProxy does not bundle or import backend implementations. The installed
+release reads its four catalogs locally and never queries GitHub's release API
+at runtime. The manager:
 
-1. requests one exact upstream release tag;
-2. selects one exact asset name for the detected OS and architecture;
-3. rejects assets without a valid `sha256:` digest in GitHub metadata;
+1. validates the packaged stable-release catalog;
+2. selects one exact recorded asset for the detected OS and architecture;
+3. rejects assets without accepted upstream SHA-256 evidence;
 4. downloads over HTTPS with size bounds;
 5. verifies size and SHA-256 before extraction;
 6. rejects archive traversal, symlinks, and special files;
@@ -207,6 +237,12 @@ Official upstream repositories currently registered:
 The backend binaries keep their upstream licenses. They are downloaded from
 upstream after installation and are not conveyed inside the Apache-2.0
 JerryProxy wheel.
+
+Catalog maintenance is repository work, not a user command. A weekly workflow
+runs `tools.backend_catalog`, accepts only official non-draft stable releases,
+prefers GitHub API digests, and reads official checksum text only for legacy
+assets where the API has no digest. It never downloads backend archives to
+calculate catalog fingerprints. The updater is not included in the wheel.
 
 ## Planned user experience
 
@@ -235,7 +271,7 @@ and report the loopback HTTP/SOCKS endpoint.
 - [x] Implement exact release-asset resolution and digest-verified downloads.
 - [x] Implement safe archive extraction and immutable manifests.
 - [x] Add lightweight self-check and clean-runner standalone artifact gates.
-- [ ] Add a signed/tested backend catalog and configurable trusted mirrors.
+- [x] Add tested stable-only offline backend catalogs and weekly maintenance.
 - [ ] Add offline archive installation with an explicit digest.
 - [ ] Implement managed subscription fetch and private file providers.
 - [ ] Implement the Mihomo runtime driver and authenticated controller client.
@@ -262,6 +298,8 @@ make docs
 make package
 make build
 make build_linux
+make catalog_check
+make catalog_update
 make check
 ```
 
@@ -273,6 +311,8 @@ Every main-branch push and pull request runs the following independent gates:
 - strict Sphinx HTML documentation with warnings treated as errors;
 - staged sdist and wheel builds, followed by clean artifact-only installation
   smoke tests on Python 3.7 and 3.14;
+- weekly catalog maintenance plus real four-backend lifecycle jobs on Linux,
+  Windows, and macOS;
 - two-stage standalone validation: Linux is built in the pinned Python 3.7.11
   Docker toolchain, while Windows and macOS build on `windows-2022` and
   `macos-15-intel`; Stage 2 starts without checkout or dependency installation,

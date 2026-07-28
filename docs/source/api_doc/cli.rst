@@ -49,6 +49,24 @@ backend\_supported
 .. autofunction:: backend_supported
 
 
+backend\_available
+-----------------------------------------------------
+
+.. autofunction:: backend_available
+
+
+backend\_versions
+-----------------------------------------------------
+
+.. autofunction:: backend_versions
+
+
+backend\_artifact
+-----------------------------------------------------
+
+.. autofunction:: backend_artifact
+
+
 backend\_list
 -----------------------------------------------------
 
@@ -59,6 +77,18 @@ backend\_install
 -----------------------------------------------------
 
 .. autofunction:: backend_install
+
+
+backend\_update
+-----------------------------------------------------
+
+.. autofunction:: backend_update
+
+
+backend\_verify
+-----------------------------------------------------
+
+.. autofunction:: backend_verify
 
 
 backend\_switch

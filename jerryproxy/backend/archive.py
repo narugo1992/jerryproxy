@@ -77,6 +77,9 @@ def _extract_zip(archive, destination, maximum_bytes):  # type: (Path, Path, int
                 mode = member.external_attr >> 16
                 if stat.S_ISLNK(mode):
                     raise ArchiveError("symbolic links are not allowed in backend archives")
+                file_type = stat.S_IFMT(mode)
+                if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+                    raise ArchiveError("special files are not allowed in backend archives")
                 target = destination.joinpath(*parts)
                 if member.is_dir():
                     ensure_private_directory(target)

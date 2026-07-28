@@ -29,6 +29,8 @@ setup(
     license="Apache-2.0",
     python_requires=">=3.7",
     packages=find_packages(include=("jerryproxy", "jerryproxy.*")),
+    package_data={"jerryproxy.data": ["*.json"]},
+    include_package_data=True,
     install_requires=load_requirements("requirements.txt"),
     extras_require={
         "test": load_requirements("requirements-test.txt"),

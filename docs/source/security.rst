@@ -6,11 +6,15 @@ Backend binaries and subscription URLs are high-value inputs.
 Current enforced backend invariants:
 
 * exact upstream repository, tag, platform, and asset name;
-* GitHub-provided SHA-256 digest required before automatic install;
+* verified upstream SHA-256 required before automatic install, preferring the
+  digest supplied directly by GitHub's release API and using official checksum
+  text only for legacy assets without that field;
 * bounded HTTPS download and bounded extraction;
 * archive traversal, symlink, and special-file rejection;
-* private staging followed by atomic immutable install;
-* atomic activation that preserves the previous version on failure;
+* private staging, executable fingerprint verification, and a bounded native
+  version probe before atomic immutable publication;
+* activation-time executable re-verification and probing while holding the
+  backend lock, preserving the previous version on failure;
 * private home directories and private JSON manifests on POSIX.
 
 Planned runtime invariants:

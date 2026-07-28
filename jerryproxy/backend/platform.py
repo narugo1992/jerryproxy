@@ -1,5 +1,7 @@
 """Normalize host operating-system and CPU names for release assets."""
 
+import glob
+import os
 import platform
 import sys
 
@@ -34,6 +36,24 @@ _ARCHITECTURES = {
 }
 
 
+def _detect_linux_libc():  # type: () -> Optional[str]
+    libc_name = (platform.libc_ver()[0] or "").lower()
+    if "musl" in libc_name:
+        return "musl"
+    if libc_name:
+        return "glibc"
+    if glob.glob("/lib/ld-musl-*.so.1") or glob.glob("/usr/lib/ld-musl-*.so.1"):
+        return "musl"
+    try:
+        glibc_version = os.confstr("CS_GNU_LIBC_VERSION")
+    except (AttributeError, OSError, ValueError):
+        # confstr is absent or unsupported on non-glibc Linux runtimes.
+        glibc_version = None
+    if glibc_version:
+        return "glibc"
+    return None
+
+
 def detect_platform(system_platform=None, machine=None):  # type: (str, str) -> PlatformInfo
     raw_os = (system_platform or sys.platform).lower()
     os_name = None
@@ -49,11 +69,5 @@ def detect_platform(system_platform=None, machine=None):  # type: (str, str) -> 
     if architecture is None:
         raise UnsupportedPlatformError("unsupported CPU architecture: %s" % raw_machine)
 
-    libc = None
-    if os_name == "linux":
-        libc_name = (platform.libc_ver()[0] or "").lower()
-        if "musl" in libc_name:
-            libc = "musl"
-        elif libc_name:
-            libc = "glibc"
+    libc = _detect_linux_libc() if os_name == "linux" else None
     return PlatformInfo(os_name=os_name, architecture=architecture, libc=libc)

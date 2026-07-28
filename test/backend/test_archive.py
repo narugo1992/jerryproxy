@@ -82,6 +82,18 @@ def test_zip_extraction_rejects_symlink(tmp_path):
         extract_archive(archive, tmp_path / "output", "xray")
 
 
+def test_zip_extraction_rejects_special_file(tmp_path):
+    archive = tmp_path / "device.zip"
+    info = zipfile.ZipInfo("device")
+    info.create_system = 3
+    info.external_attr = stat.S_IFCHR << 16
+    with zipfile.ZipFile(str(archive), "w") as stream:
+        stream.writestr(info, b"")
+
+    with pytest.raises(ArchiveError, match="special files"):
+        extract_archive(archive, tmp_path / "output", "xray")
+
+
 def test_zip_extraction_preserves_nested_executable(tmp_path):
     archive = tmp_path / "xray.zip"
     with zipfile.ZipFile(str(archive), "w") as stream:

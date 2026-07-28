@@ -1,4 +1,4 @@
-.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 check
+.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check check
 
 PYTHON ?= $(shell which python)
 PYTHON37 ?= python3.7
@@ -13,6 +13,7 @@ BUILD_DIR     := ${PROJ_DIR}/build
 DIST_DIR      := ${PROJ_DIR}/dist
 TEST_DIR      := ${PROJ_DIR}/test
 SRC_DIR       := ${PROJ_DIR}/jerryproxy
+TOOLS_DIR     := ${PROJ_DIR}/tools
 
 RANGE_DIR      ?= .
 RANGE_TEST_DIR := ${TEST_DIR}/${RANGE_DIR}
@@ -56,6 +57,8 @@ help:
 	@echo "  make pdocs        - Build docs with production warnings enabled"
 	@echo "  make rst_auto     - Generate English RST API docs from Python source"
 	@echo "                      RANGE_DIR=<path>"
+	@echo "  make catalog_update - Refresh the packaged backend catalog from GitHub"
+	@echo "  make catalog_check  - Validate the packaged catalog without network access"
 
 install_dev:
 	$(PYTHON) -m pip install -e .
@@ -65,13 +68,13 @@ install_dev:
 	$(PYTHON) -m pip install -r requirements-build.txt
 
 package:
-	rm -rf ${DIST_DIR}
+	rm -rf ${DIST_DIR} ${BUILD_DIR} *.egg-info
 	mkdir -p ${DIST_DIR}
 	$(PYTHON) -m build --sdist --wheel --outdir ${DIST_DIR}
 	$(PYTHON) -m twine check ${DIST_DIR}/*.whl ${DIST_DIR}/*.tar.gz
 
 build:
-	$(PYTHON) -m PyInstaller --clean --onefile --console --name jerryproxy jerryproxy_cli.py
+	$(PYTHON) -m PyInstaller --clean --onefile --console --collect-data jerryproxy --name jerryproxy jerryproxy_cli.py
 
 build_linux:
 	mkdir -p ${DIST_DIR}
@@ -86,6 +89,7 @@ build_linux:
 			/tmp/jerryproxy-build/bin/python -m pip install /workspace -r /workspace/requirements-build.txt; \
 			cd /tmp; \
 			/tmp/jerryproxy-build/bin/python -m PyInstaller --clean --onefile --console \
+				--collect-data jerryproxy \
 				--name jerryproxy --distpath /dist --workpath /tmp/pyinstaller-build \
 				--specpath /tmp /workspace/jerryproxy_cli.py; \
 			/dist/jerryproxy --version'
@@ -109,10 +113,10 @@ python37:
 	$(PYTHON37) -m pytest ${TEST_DIR} -sv -m unittest
 
 lint:
-	ruff check ${SRC_DIR} ${TEST_DIR} jerryproxy_cli.py setup.py auto_rst.py auto_rst_top_index.py
+	ruff check ${SRC_DIR} ${TEST_DIR} ${TOOLS_DIR} jerryproxy_cli.py setup.py auto_rst.py auto_rst_top_index.py
 
 format:
-	ruff format ${SRC_DIR} ${TEST_DIR} jerryproxy_cli.py setup.py auto_rst.py auto_rst_top_index.py
+	ruff format ${SRC_DIR} ${TEST_DIR} ${TOOLS_DIR} jerryproxy_cli.py setup.py auto_rst.py auto_rst_top_index.py
 
 docs: rst_auto
 	$(MAKE) -C "${DOC_DIR}" build
@@ -140,5 +144,14 @@ test_cli:
 	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" home
 	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" self-check --color
 	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend supported
+	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend available
+	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend versions mihomo --limit 2
+	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend artifact mihomo
 
-check: lint unittest pdocs package test_cli
+catalog_update:
+	$(PYTHON) -m tools.backend_catalog
+
+catalog_check:
+	$(PYTHON) -m tools.backend_catalog --validate-only
+
+check: lint catalog_check unittest pdocs package test_cli

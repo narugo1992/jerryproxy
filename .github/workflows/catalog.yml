@@ -1,0 +1,108 @@
+name: Backend Catalog Update
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: backend-catalog-update
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    name: Refresh stable backend catalogs
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install maintenance and validation dependencies
+        run: >-
+          python -m pip install -e .
+          -r requirements-test.txt
+          -r requirements-dev.txt
+          -r requirements-doc.txt
+          -r requirements-build.txt
+      - name: Refresh four stable-release catalogs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: make catalog_update
+      - name: Detect catalog changes
+        id: changes
+        shell: bash
+        run: |
+          if git diff --quiet -- jerryproxy/data/*.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify maintenance scope
+        if: steps.changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          changed="$(git diff --name-only)"
+          unexpected="$(printf '%s\n' "$changed" | grep -Ev '^jerryproxy/data/(mihomo|sing-box|v2ray|xray)\.json$' || true)"
+          test -z "$unexpected"
+          test "$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l)" -ge 1
+      - name: Validate exact generated tree
+        if: steps.changes.outputs.changed == 'true'
+        run: make check
+      - name: Verify frozen CLI contains the catalogs
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          make build
+          ./dist/jerryproxy backend available
+          ./dist/jerryproxy backend versions mihomo --limit 2
+          ./dist/jerryproxy backend artifact mihomo
+          ./dist/jerryproxy --home build/catalog-self-check self-check
+      - name: Publish catalog refresh branch
+        id: publish
+        if: steps.changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          branch="automation/backend-catalog-${GITHUB_RUN_ID}"
+          git switch -c "$branch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add jerryproxy/data/mihomo.json
+          git add jerryproxy/data/sing-box.json
+          git add jerryproxy/data/v2ray.json
+          git add jerryproxy/data/xray.json
+          git commit -m "chore: refresh backend catalogs"
+          git push --set-upstream origin "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Open maintainer-review pull request
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.publish.outputs.branch }}
+        shell: bash
+        run: >-
+          gh pr create
+          --base main
+          --head "$BRANCH"
+          --title "chore: refresh backend catalogs"
+          --body "Automated stable-release catalog refresh. Merge only after the dispatched validation workflows pass and a narugo1992 maintainer reviews the upstream changes."
+      - name: Dispatch branch validation
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.publish.outputs.branch }}
+        shell: bash
+        run: |
+          gh workflow run test.yml --ref "$BRANCH"
+          gh workflow run docs.yml --ref "$BRANCH"
+          gh workflow run package.yml --ref "$BRANCH"
+          gh workflow run standalone.yml --ref "$BRANCH"
+          gh workflow run backend-integration.yml --ref "$BRANCH"

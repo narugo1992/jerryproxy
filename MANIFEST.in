@@ -5,3 +5,5 @@ include auto_rst_top_index.py
 include requirements.txt
 include requirements-*.txt
 recursive-include docs *.rst *.py Makefile
+recursive-include jerryproxy/data *.json
+prune tools

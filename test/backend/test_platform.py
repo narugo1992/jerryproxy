@@ -37,3 +37,42 @@ def test_linux_musl_is_reported_through_public_platform_detection(monkeypatch):
     result = detect_platform(system_platform="linux", machine="x86_64")
     assert result.libc == "musl"
     assert result.key == "linux-amd64-musl"
+
+
+def test_linux_musl_loader_is_used_when_python_reports_no_libc(monkeypatch):
+    monkeypatch.setattr("jerryproxy.backend.platform.platform.libc_ver", lambda: ("", ""))
+    monkeypatch.setattr("jerryproxy.backend.platform.glob.glob", lambda pattern: ["/lib/ld-musl-test.so.1"])
+
+    result = detect_platform(system_platform="linux", machine="x86_64")
+
+    assert result.libc == "musl"
+
+
+def test_linux_glibc_confstr_is_used_when_python_reports_no_libc(monkeypatch):
+    monkeypatch.setattr("jerryproxy.backend.platform.platform.libc_ver", lambda: ("", ""))
+    monkeypatch.setattr("jerryproxy.backend.platform.glob.glob", lambda pattern: [])
+    monkeypatch.setattr(
+        "jerryproxy.backend.platform.os.confstr",
+        lambda name: "glibc 2.27",
+        raising=False,
+    )
+
+    result = detect_platform(system_platform="linux", machine="x86_64")
+
+    assert result.libc == "glibc"
+    assert result.key == "linux-amd64-glibc"
+
+
+def test_linux_unknown_libc_fails_closed_when_confstr_is_unsupported(monkeypatch):
+    monkeypatch.setattr("jerryproxy.backend.platform.platform.libc_ver", lambda: ("", ""))
+    monkeypatch.setattr("jerryproxy.backend.platform.glob.glob", lambda pattern: [])
+
+    def unsupported_confstr(name):
+        raise ValueError(name)
+
+    monkeypatch.setattr("jerryproxy.backend.platform.os.confstr", unsupported_confstr, raising=False)
+
+    result = detect_platform(system_platform="linux", machine="x86_64")
+
+    assert result.libc is None
+    assert result.key == "linux-amd64"

@@ -83,6 +83,9 @@ jobs:
       - run: jerryproxy --version
       - run: jerryproxy --home package-smoke-home self-check --color
       - run: python -m jerryproxy backend supported
+      - run: python -m jerryproxy backend available
+      - run: python -m jerryproxy backend versions mihomo --limit 2
+      - run: python -m jerryproxy backend artifact mihomo
 
   publish:
     name: Publish through PyPI Trusted Publishing

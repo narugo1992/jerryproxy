@@ -10,7 +10,7 @@ import pytest
 import jerryproxy.backend.manager as manager_module
 from jerryproxy.backend.lock import BackendOperationLock
 from jerryproxy.backend.manager import BackendManager
-from jerryproxy.backend.model import PlatformInfo, ReleaseAsset
+from jerryproxy.backend.model import CatalogArtifact, PlatformInfo
 from jerryproxy.errors import (
     ArchiveError,
     BackendActiveError,
@@ -33,6 +33,7 @@ def manager_for(tmp_path):
     return BackendManager(
         JerryProxyPaths(tmp_path / ".jerryproxy"),
         platform_info=PlatformInfo("linux", "amd64", "glibc"),
+        probe_runner=lambda installed: None,
     )
 
 
@@ -76,6 +77,20 @@ def test_install_and_switch_versions(tmp_path):
     value = read_json(manager.paths.active / "mihomo.json")
     assert value["version"] == "2.0.0"
     assert value["link_mode"] in ("symlink", "copy")
+    assert set(value) == {"activated_at", "executable", "link", "link_mode", "name", "version"}
+    installed_value = read_json(second.manifest)
+    assert set(installed_value) == {
+        "asset_name",
+        "catalog_generated_at",
+        "executable",
+        "executable_sha256",
+        "installed_at",
+        "name",
+        "platform",
+        "sha256",
+        "source_url",
+        "version",
+    }
 
     rolled_back = manager.switch("mihomo", "1.0.0")
     assert rolled_back.link.read_bytes() == b"version one"
@@ -159,20 +174,32 @@ def test_missing_install_and_missing_executable_fail_through_public_lookup(tmp_p
 
 def test_install_resolves_downloads_and_activates_exact_release(tmp_path):
     source = tmp_path / "upstream.gz"
-    digest = make_gzip_archive(source, b"downloaded mihomo")
+    payload = b"#!/bin/sh\nprintf 'Mihomo Meta v1.19.29\\n'\n"
+    digest = make_gzip_archive(source, payload)
     asset_name = "mihomo-linux-amd64-v1.19.29.gz"
-    asset = ReleaseAsset(
+    asset = CatalogArtifact(
+        backend="mihomo",
+        version="1.19.29",
+        platform="linux-amd64",
+        asset_id=1,
         name=asset_name,
         url="https://example.test/%s" % asset_name,
         sha256=digest,
         size=source.stat().st_size,
+        updated_at="2026-01-01T00:00:00Z",
+        verification="github-release-digest",
+        archive_format="gz",
+        executable="mihomo",
     )
 
-    class ReleaseClient(object):
-        def release_assets(self, repository, tag):
-            assert repository == "MetaCubeX/mihomo"
-            assert tag == "v1.19.29"
-            return [asset]
+    class Catalog(object):
+        generated_at = "2026-01-01T00:00:00Z"
+
+        def resolve(self, name, version, platform_info):
+            assert name == "mihomo"
+            assert version == "v1.19.29"
+            assert platform_info.asset_key == "linux-amd64-glibc"
+            return asset
 
     class Downloader(object):
         def download(self, url, destination, expected_sha256, expected_size=None):
@@ -190,16 +217,113 @@ def test_install_resolves_downloads_and_activates_exact_release(tmp_path):
     manager = BackendManager(
         paths,
         platform_info=PlatformInfo("linux", "amd64", "glibc"),
-        release_client=ReleaseClient(),
+        catalog=Catalog(),
         downloader=Downloader(),
+        probe_runner=lambda installed: None,
     )
     installed = manager.install("mihomo", "v1.19.29")
 
     assert installed.version == "1.19.29"
-    assert installed.executable.read_bytes() == b"downloaded mihomo"
+    assert installed.executable.read_bytes() == payload
     assert installed.asset_name == asset_name
     assert manager.current("mihomo").version == "1.19.29"
     assert cached_archive.read_bytes() == source.read_bytes()
+
+
+def test_verify_detects_installed_executable_tampering(tmp_path):
+    manager = manager_for(tmp_path)
+    installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"original", activate=False)
+
+    assert manager.verify("mihomo") == [installed]
+    installed.executable.write_bytes(b"tampered")
+    with pytest.raises(IntegrityError, match="executable SHA-256 mismatch"):
+        manager.verify("mihomo")
+    with pytest.raises(IntegrityError, match="executable SHA-256 mismatch"):
+        manager.switch("mihomo", "1.0.0")
+    assert manager.current("mihomo") is None
+
+
+def test_install_probes_the_staged_executable_before_publication(tmp_path, monkeypatch):
+    calls = []
+
+    def run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return manager_module.subprocess.CompletedProcess(arguments, 0, stdout="Mihomo Meta v1.0.0\n")
+
+    monkeypatch.setattr(manager_module.subprocess, "run", run)
+    manager = BackendManager(
+        JerryProxyPaths(tmp_path / ".jerryproxy"),
+        platform_info=PlatformInfo("linux", "amd64", "glibc"),
+    )
+    installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"backend", activate=False)
+
+    assert installed.manifest.is_file()
+    assert calls[0][0][-1] == "-v"
+    assert calls[0][1]["timeout"] == 20
+    manager.switch("mihomo", "1.0.0")
+    assert len(calls) == 2
+
+
+def test_failed_staging_probe_leaves_no_installed_version(tmp_path):
+    def reject(installed):
+        raise IntegrityError("probe rejected")
+
+    manager = BackendManager(
+        JerryProxyPaths(tmp_path / ".jerryproxy"),
+        platform_info=PlatformInfo("linux", "amd64", "glibc"),
+        probe_runner=reject,
+    )
+
+    with pytest.raises(IntegrityError, match="probe rejected"):
+        install_fake_mihomo(manager, tmp_path, "1.0.0", b"backend", activate=False)
+    assert manager.list_installed("mihomo") == []
+
+
+def test_copied_home_cannot_activate_another_platform_binary(tmp_path):
+    manager = manager_for(tmp_path)
+    installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"linux", activate=False)
+    value = read_json(installed.manifest)
+    value["platform"] = "windows-amd64"
+    manager_module.atomic_write_json(installed.manifest, value)
+
+    with pytest.raises(BackendNotInstalledError, match="was installed for windows-amd64"):
+        manager.switch("mihomo", "1.0.0")
+
+
+def test_installed_manifest_identity_must_match_its_directory(tmp_path):
+    manager = manager_for(tmp_path)
+    installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"backend", activate=False)
+    value = read_json(installed.manifest)
+    value["version"] = "2.0.0"
+    manager_module.atomic_write_json(installed.manifest, value)
+
+    with pytest.raises(BackendNotInstalledError, match="does not match its directory"):
+        manager.list_installed("mihomo")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink containment behavior")
+def test_installed_manifest_rejects_an_executable_symlink_escape(tmp_path):
+    manager = manager_for(tmp_path)
+    installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"backend", activate=False)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    installed.executable.unlink()
+    installed.executable.symlink_to(outside)
+
+    with pytest.raises(BackendNotInstalledError, match="escapes its version directory"):
+        manager.get_installed("mihomo", "1.0.0")
+
+
+def test_active_manifest_rejects_paths_outside_the_home(tmp_path):
+    manager = manager_for(tmp_path)
+    install_fake_mihomo(manager, tmp_path, "1.0.0", b"backend", activate=True)
+    manifest = manager.paths.active / "mihomo.json"
+    value = read_json(manifest)
+    value["executable"] = "../outside"
+    manager_module.atomic_write_json(manifest, value)
+
+    with pytest.raises(BackendNotInstalledError, match="unsafe executable path"):
+        manager.current("mihomo")
 
 
 def test_install_sing_box_from_nested_release_archive(tmp_path):

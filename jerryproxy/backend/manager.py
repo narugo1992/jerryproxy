@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,16 +12,18 @@ from ..errors import (
     BackendAlreadyInstalledError,
     BackendNotInstalledError,
     IntegrityError,
+    UnsupportedBackendError,
+    UnsupportedPlatformError,
 )
 from ..home import JerryProxyPaths
 from ..utils.fs import atomic_write_json, ensure_private_directory, read_json, sha256_file
 from .archive import extract_archive, find_executable
+from .catalog import BackendCatalog
 from .download import AssetDownloader
-from .github import GitHubReleaseClient, select_release_asset
 from .lock import BackendOperationLock
 from .model import ActiveBackend, InstalledBackend
 from .platform import detect_platform
-from .registry import get_backend, iter_backends
+from .registry import get_backend, iter_backend_platforms, iter_backends, version_sort_key
 
 
 class BackendManager(object):
@@ -30,14 +33,16 @@ class BackendManager(object):
         self,
         paths,
         platform_info=None,
-        release_client=None,
+        catalog=None,
         downloader=None,
+        probe_runner=None,
     ):
-        # type: (JerryProxyPaths, Optional[PlatformInfo], GitHubReleaseClient, AssetDownloader) -> None
+        # type: (JerryProxyPaths, Optional[PlatformInfo], BackendCatalog, AssetDownloader, Callable) -> None
         self.paths = paths
         self.platform_info = platform_info or detect_platform()
-        self.release_client = release_client or GitHubReleaseClient()
+        self.catalog = catalog or BackendCatalog.load()
         self.downloader = downloader or AssetDownloader()
+        self.probe_runner = probe_runner or self._probe_installed
         self.paths.ensure()
 
     @classmethod
@@ -47,12 +52,18 @@ class BackendManager(object):
     def supported(self):  # type: () -> Iterable[BackendSpec]
         return iter_backends()
 
-    def install(self, name, version, activate=True):  # type: (str, str, bool) -> InstalledBackend
+    def available(self, name):  # type: (str) -> tuple
+        return self.catalog.available_versions(name, self.platform_info)
+
+    def resolve_artifact(self, name, version=None):
+        # type: (str, Optional[str]) -> CatalogArtifact
+        return self.catalog.resolve(name, version, self.platform_info)
+
+    def install(self, name, version=None, activate=True):
+        # type: (str, Optional[str], bool) -> InstalledBackend
         spec = get_backend(name)
-        normalized_version = spec.normalize_version(version)
-        tag = spec.tag_for(normalized_version)
-        assets = self.release_client.release_assets(spec.repository, tag)
-        asset = select_release_asset(spec, normalized_version, self.platform_info, assets)
+        asset = self.resolve_artifact(spec.name, version)
+        normalized_version = asset.version
         download_directory = self.paths.downloads / spec.name / normalized_version
         ensure_private_directory(download_directory)
         archive = download_directory / asset.name
@@ -72,11 +83,37 @@ class BackendManager(object):
             expected_sha256=asset.sha256,
             asset_name=asset.name,
             source_url=asset.url,
+            asset_platform=asset.platform,
+            archive_executable=asset.executable,
             activate=False,
         )
         if activate:
             self.switch(spec.name, normalized_version)
         return installed
+
+    def _probe_installed(self, installed):  # type: (InstalledBackend) -> None
+        spec = get_backend(installed.name)
+        arguments = [str(installed.executable)] + list(spec.version_arguments)
+        try:
+            completed = subprocess.run(
+                arguments,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            # Launch failures and bounded timeouts mean the selected binary is unusable.
+            raise IntegrityError("%s %s executable probe failed: %s" % (installed.name, installed.version, error))
+        if completed.returncode != 0:
+            raise IntegrityError(
+                "%s %s executable probe exited with status %d"
+                % (installed.name, installed.version, completed.returncode)
+            )
+        if installed.version not in (completed.stdout or ""):
+            raise IntegrityError(
+                "%s executable probe did not report expected version %s" % (installed.name, installed.version)
+            )
 
     def install_from_archive(
         self,
@@ -86,11 +123,14 @@ class BackendManager(object):
         expected_sha256,
         asset_name=None,
         source_url=None,
+        asset_platform=None,
+        archive_executable=None,
         activate=False,
     ):
-        # type: (str, str, Path, str, Optional[str], Optional[str], bool) -> InstalledBackend
+        # type: (str, str, Path, str, Optional[str], Optional[str], Optional[str], Optional[str], bool) -> InstalledBackend
         spec = get_backend(name)
         normalized_version = spec.normalize_version(version)
+        selected_platform = asset_platform or self._default_asset_platform(spec.name)
         archive = Path(archive)
         actual_sha256 = sha256_file(archive)
         if actual_sha256.lower() != expected_sha256.lower():
@@ -107,6 +147,8 @@ class BackendManager(object):
                     raise BackendAlreadyInstalledError(
                         "%s %s already exists with a different digest" % (spec.name, normalized_version)
                     )
+                self._verify_installed_executable(installed)
+                self.probe_runner(installed)
             else:
                 installed = self._install_new_version(
                     spec,
@@ -115,6 +157,8 @@ class BackendManager(object):
                     actual_sha256,
                     asset_name or archive.name,
                     source_url,
+                    selected_platform,
+                    archive_executable,
                     target,
                 )
         if activate:
@@ -129,29 +173,41 @@ class BackendManager(object):
         sha256,
         asset_name,
         source_url,
+        asset_platform,
+        archive_executable,
         target,
     ):
-        # type: (BackendSpec, str, Path, str, str, Optional[str], Path) -> InstalledBackend
+        # type: (BackendSpec, str, Path, str, str, Optional[str], str, Optional[str], Path) -> InstalledBackend
         ensure_private_directory(target.parent)
         staging = target.parent / (".%s.tmp-%s" % (version, uuid.uuid4().hex))
         ensure_private_directory(staging)
         try:
             executable_name = spec.executable_filename(self.platform_info)
-            extract_archive(archive, staging, executable_name)
-            executable = find_executable(staging, executable_name)
+            source_executable_name = archive_executable or executable_name
+            extract_archive(archive, staging, source_executable_name)
+            executable = find_executable(staging, source_executable_name)
+            if executable.name != executable_name:
+                normalized_executable = executable.with_name(executable_name)
+                os.replace(str(executable), str(normalized_executable))
+                executable = normalized_executable
             relative_executable = executable.relative_to(staging)
             manifest_value = {
-                "schema": "jerryproxy/installed-backend/v1",
                 "name": spec.name,
                 "version": version,
-                "platform": self.platform_info.key,
+                "platform": asset_platform,
                 "asset_name": asset_name,
                 "sha256": sha256,
+                "executable_sha256": sha256_file(executable),
                 "source_url": source_url,
+                "catalog_generated_at": self.catalog.generated_at,
                 "executable": str(relative_executable).replace(os.sep, "/"),
                 "installed_at": datetime.now(timezone.utc).isoformat(),
             }
-            atomic_write_json(staging / "manifest.json", manifest_value)
+            staging_manifest = staging / "manifest.json"
+            atomic_write_json(staging_manifest, manifest_value)
+            staged = InstalledBackend.from_manifest(staging_manifest, manifest_value)
+            self._verify_installed_executable(staged)
+            self.probe_runner(staged)
             os.replace(str(staging), str(target))
         finally:
             if staging.exists():
@@ -170,7 +226,11 @@ class BackendManager(object):
                 continue
             manifests.extend(sorted(root.glob("*/manifest.json")))
         installed = [self._load_installed_manifest(manifest) for manifest in manifests]
-        return sorted(installed, key=lambda item: (item.name, item.version))
+        grouped = []
+        for spec in iter_backends():
+            versions = [item for item in installed if item.name == spec.name]
+            grouped.extend(sorted(versions, key=lambda item: version_sort_key(item.version), reverse=True))
+        return grouped
 
     def get_installed(self, name, version):  # type: (str, str) -> InstalledBackend
         spec = get_backend(name)
@@ -179,9 +239,25 @@ class BackendManager(object):
         if not manifest.is_file():
             raise BackendNotInstalledError("%s %s is not installed" % (spec.name, normalized_version))
         installed = self._load_installed_manifest(manifest)
+        if installed.platform not in self.platform_info.compatible_asset_keys:
+            raise BackendNotInstalledError(
+                "%s %s was installed for %s, not %s"
+                % (spec.name, normalized_version, installed.platform, self.platform_info.asset_key)
+            )
         if not installed.executable.is_file():
             raise BackendNotInstalledError("%s %s executable is missing" % (spec.name, normalized_version))
         return installed
+
+    def verify(self, name=None):  # type: (Optional[str]) -> List[InstalledBackend]
+        """Re-hash installed executables and return every verified version."""
+        installed = self.list_installed(name=name)
+        for item in installed:
+            self._verify_installed_executable(item)
+        return installed
+
+    def update(self, name):  # type: (str) -> InstalledBackend
+        """Install and activate the newest compatible catalog release."""
+        return self.install(name, version=None, activate=True)
 
     def switch(self, name, version):  # type: (str, str) -> ActiveBackend
         spec = get_backend(name)
@@ -189,6 +265,8 @@ class BackendManager(object):
         active_manifest = self.paths.active / ("%s.json" % spec.name)
         with BackendOperationLock(self._lock_path(spec.name)):
             installed = self.get_installed(spec.name, version)
+            self._verify_installed_executable(installed)
+            self.probe_runner(installed)
             link_backup = link.with_name(".%s.%s.rollback" % (link.name, uuid.uuid4().hex))
             manifest_backup = active_manifest.with_name(".%s.%s.rollback" % (active_manifest.name, uuid.uuid4().hex))
             had_link = os.path.lexists(str(link))
@@ -198,7 +276,6 @@ class BackendManager(object):
             if had_manifest:
                 shutil.copy2(str(active_manifest), str(manifest_backup))
             value = {
-                "schema": "jerryproxy/active-backend/v1",
                 "name": spec.name,
                 "version": installed.version,
                 "executable": str(installed.executable.relative_to(self.paths.root)).replace(os.sep, "/"),
@@ -255,15 +332,40 @@ class BackendManager(object):
         if not manifest.is_file():
             return None
         value = read_json(manifest)
-        executable = self.paths.root / str(value["executable"])
-        link = self.paths.root / str(value["link"])
-        if not executable.is_file() or not os.path.lexists(str(link)):
+        required = ("name", "version", "executable", "link", "link_mode")
+        if any(not isinstance(value.get(key), str) or not value[key] for key in required):
+            raise BackendNotInstalledError("invalid active backend manifest: %s" % manifest)
+        if value["name"] != spec.name:
+            raise BackendNotInstalledError("active backend manifest has the wrong backend name: %s" % manifest)
+        try:
+            version = spec.normalize_version(value["version"])
+        except ValueError:
+            raise BackendNotInstalledError("active backend manifest has an invalid version: %s" % manifest)
+        if version != value["version"] or value["link_mode"] not in ("symlink", "copy"):
+            raise BackendNotInstalledError("invalid active backend manifest: %s" % manifest)
+        executable_path = self._safe_relative_path(value["executable"], manifest, "executable")
+        link_path = self._safe_relative_path(value["link"], manifest, "link")
+        try:
+            installed = self.get_installed(spec.name, version)
+        except BackendNotInstalledError:
             raise BackendNotInstalledError("active %s backend is incomplete" % spec.name)
+        expected_link = self.paths.bin / spec.executable_filename(self.platform_info)
+        if executable_path != installed.executable or link_path != expected_link:
+            raise BackendNotInstalledError("active backend manifest paths do not match %s %s" % (spec.name, version))
+        if not os.path.lexists(str(link_path)):
+            raise BackendNotInstalledError("active %s backend is incomplete" % spec.name)
+        if value["link_mode"] == "symlink":
+            if not link_path.is_symlink() or link_path.resolve() != installed.executable.resolve():
+                raise BackendNotInstalledError("active %s backend link is invalid" % spec.name)
+        elif link_path.is_symlink() or not link_path.is_file():
+            raise BackendNotInstalledError("active %s backend copy is invalid" % spec.name)
+        elif sha256_file(link_path) != installed.executable_sha256:
+            raise BackendNotInstalledError("active %s backend copy failed integrity verification" % spec.name)
         return ActiveBackend(
             name=spec.name,
-            version=str(value["version"]),
-            executable=executable,
-            link=link,
+            version=version,
+            executable=installed.executable,
+            link=link_path,
             link_mode=str(value["link_mode"]),
         )
 
@@ -295,6 +397,13 @@ class BackendManager(object):
     def _lock_path(self, name):  # type: (str) -> Path
         return self.paths.locks / ("backend-%s.lock" % name)
 
+    def _default_asset_platform(self, name):  # type: (str) -> str
+        supported = {item.asset_key for item in iter_backend_platforms(name)}
+        for key in self.platform_info.compatible_asset_keys:
+            if key in supported:
+                return key
+        raise UnsupportedPlatformError("%s has no catalog platform for %s" % (name, self.platform_info.key))
+
     @staticmethod
     def _backup_path(source, backup):  # type: (Path, Path) -> None
         if source.is_symlink():
@@ -314,6 +423,71 @@ class BackendManager(object):
         if os.path.lexists(str(path)):
             path.unlink()
 
-    @staticmethod
-    def _load_installed_manifest(manifest):  # type: (Path) -> InstalledBackend
-        return InstalledBackend.from_manifest(manifest, read_json(manifest))
+    def _load_installed_manifest(self, manifest):  # type: (Path) -> InstalledBackend
+        manifest = Path(manifest)
+        value = read_json(manifest)
+        required = (
+            "name",
+            "version",
+            "platform",
+            "asset_name",
+            "sha256",
+            "executable_sha256",
+            "executable",
+        )
+        if any(not isinstance(value.get(key), str) or not value[key] for key in required):
+            raise BackendNotInstalledError("invalid installed backend manifest: %s" % manifest)
+        try:
+            spec = get_backend(value["name"])
+            normalized_version = spec.normalize_version(value["version"])
+        except (UnsupportedBackendError, ValueError):
+            raise BackendNotInstalledError("invalid installed backend identity: %s" % manifest)
+        expected_manifest = self.paths.backends / spec.name / normalized_version / "manifest.json"
+        if value["version"] != normalized_version or manifest.absolute() != expected_manifest.absolute():
+            raise BackendNotInstalledError("installed backend manifest does not match its directory: %s" % manifest)
+        try:
+            manifest.resolve().relative_to(self.paths.backends.resolve())
+        except ValueError:
+            raise BackendNotInstalledError("installed backend manifest escapes the backend home: %s" % manifest)
+        supported_platforms = {item.asset_key for item in iter_backend_platforms(spec.name)}
+        if value["platform"] not in supported_platforms:
+            raise BackendNotInstalledError("invalid platform in installed backend manifest: %s" % manifest)
+        executable = Path(str(value["executable"]))
+        if executable.is_absolute() or ".." in executable.parts:
+            raise BackendNotInstalledError("unsafe executable path in installed backend manifest: %s" % manifest)
+        try:
+            (manifest.parent / executable).resolve().relative_to(manifest.parent.resolve())
+        except ValueError:
+            raise BackendNotInstalledError("installed backend executable escapes its version directory: %s" % manifest)
+        for digest_key in ("sha256", "executable_sha256"):
+            digest = str(value[digest_key]).lower()
+            if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+                raise BackendNotInstalledError("invalid %s in installed backend manifest: %s" % (digest_key, manifest))
+        return InstalledBackend.from_manifest(manifest, value)
+
+    def _verify_installed_executable(self, installed):  # type: (InstalledBackend) -> None
+        if installed.platform not in self.platform_info.compatible_asset_keys:
+            raise IntegrityError(
+                "%s %s targets %s, not %s"
+                % (installed.name, installed.version, installed.platform, self.platform_info.asset_key)
+            )
+        if not installed.executable.is_file():
+            raise IntegrityError("%s %s executable is missing" % (installed.name, installed.version))
+        actual = sha256_file(installed.executable)
+        if actual != installed.executable_sha256:
+            raise IntegrityError(
+                "%s %s executable SHA-256 mismatch: expected %s, got %s"
+                % (installed.name, installed.version, installed.executable_sha256, actual)
+            )
+
+    def _safe_relative_path(self, value, manifest, field):
+        # type: (str, Path, str) -> Path
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise BackendNotInstalledError("unsafe %s path in active backend manifest: %s" % (field, manifest))
+        path = self.paths.root / relative
+        try:
+            path.absolute().relative_to(self.paths.root.absolute())
+        except ValueError:
+            raise BackendNotInstalledError("unsafe %s path in active backend manifest: %s" % (field, manifest))
+        return path

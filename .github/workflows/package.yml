@@ -45,6 +45,20 @@ jobs:
                   digest.hexdigest(), os.path.getsize(path), os.path.basename(path)
               ))
           PY
+      - name: Verify all four catalogs are packaged
+        shell: bash
+        run: |
+          for name in mihomo sing-box v2ray xray; do
+            unzip -l dist/*.whl | grep -F "jerryproxy/data/$name.json"
+            tar -tzf dist/*.tar.gz | grep -E "/jerryproxy/data/$name\.json$"
+          done
+      - name: Verify repository maintenance tools are not packaged
+        shell: bash
+        run: |
+          ! unzip -Z1 dist/*.whl | grep -E '(^|/)tools/'
+          ! tar -tzf dist/*.tar.gz | grep -E '(^|/)tools/'
+          ! unzip -Z1 dist/*.whl | grep -F 'jerryproxy/backend/github.py'
+          ! tar -tzf dist/*.tar.gz | grep -E '/jerryproxy/backend/github\.py$'
       - uses: actions/upload-artifact@v7
         with:
           name: jerryproxy-python-distributions
@@ -83,6 +97,9 @@ jobs:
       - run: jerryproxy --version
       - run: jerryproxy --home package-smoke-home self-check --color
       - run: python -m jerryproxy backend supported
+      - run: python -m jerryproxy backend available
+      - run: python -m jerryproxy backend versions mihomo --limit 2
+      - run: python -m jerryproxy backend artifact mihomo
 
   wheel-smoke:
     name: Wheel smoke (Python ${{ matrix.python }})
@@ -116,6 +133,9 @@ jobs:
       - run: jerryproxy --version
       - run: jerryproxy --home package-smoke-home self-check --color
       - run: python -m jerryproxy backend supported
+      - run: python -m jerryproxy backend available
+      - run: python -m jerryproxy backend versions mihomo --limit 2
+      - run: python -m jerryproxy backend artifact mihomo
 
   gate:
     name: Package gate
