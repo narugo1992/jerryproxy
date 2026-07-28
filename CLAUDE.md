@@ -119,6 +119,8 @@ make unittest
 make unittest RANGE_DIR=./backend
 make unittest MIN_COVERAGE=85
 make lint
+make rst_auto
+make rst_auto RANGE_DIR=backend
 make docs
 make package
 make build
@@ -139,12 +141,24 @@ checkout and dependency installation, and exercise the packaged binary through
 `self-check` plus public read-only commands. Do not substitute unit tests for
 the clean-runner artifact verification stage.
 
+Generated API documentation is a repository contract. Python source under
+`jerryproxy/` is the source of truth; `docs/source/api_doc.rst` and
+`docs/source/api_doc/` are generated English-only outputs and must not be
+edited by hand. Before committing public Python module, class, function, or
+data-object changes, run `make rst_auto` and include every intentional RST
+change in the same commit. Use `make rst_auto RANGE_DIR=<package>` for focused
+iteration, then run the unrestricted target before commit. Removing or moving a
+source module also requires removing any obsolete generated page. Docs CI must
+force regeneration and fail when tracked or untracked generated output differs.
+
 ## Documentation policy
 
 - README begins with a prominent WIP boundary until proxy runtime works.
 - Keep current behavior and roadmap items separate.
 - Every public command, state file, environment variable, and security default
   needs documentation before stable release.
+- Generated Python API pages are part of the English Sphinx toctree and must
+  remain reproducible through `make rst_auto`.
 - Do not use copied Tom and Jerry artwork. Any mouse/cheese visual identity
   must be original; logo assets are not part of the initial scaffold.
 

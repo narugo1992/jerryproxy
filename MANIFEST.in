@@ -1,5 +1,7 @@
 include LICENSE
 include README.md
+include auto_rst.py
+include auto_rst_top_index.py
 include requirements.txt
 include requirements-*.txt
 recursive-include docs *.rst *.py Makefile

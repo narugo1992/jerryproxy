@@ -11,6 +11,7 @@ from .errors import JerryProxyError
 from .home import JerryProxyPaths
 from .selfcheck import run_self_check
 
+#: Click context settings used by the root command.
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 

@@ -1,4 +1,4 @@
-.PHONY: help install_dev package build clean test unittest lint format docs pdocs test_cli python37 check
+.PHONY: help install_dev package build clean test unittest lint format docs pdocs rst_auto test_cli python37 check
 
 PYTHON ?= $(shell which python)
 PYTHON37 ?= python3.7
@@ -15,6 +15,13 @@ RANGE_TEST_DIR := ${TEST_DIR}/${RANGE_DIR}
 RANGE_SRC_DIR  := ${SRC_DIR}/${RANGE_DIR}
 
 COV_TYPES ?= xml term-missing
+
+PYTHON_CODE_DIR   := ${SRC_DIR}
+RST_DOC_DIR       := ${DOC_DIR}/source/api_doc
+PYTHON_CODE_FILES := $(shell find ${RANGE_SRC_DIR} -name "*.py" ! -name "__*.py" 2>/dev/null)
+RST_DOC_FILES     := $(patsubst ${PYTHON_CODE_DIR}/%.py,${RST_DOC_DIR}/%.rst,${PYTHON_CODE_FILES})
+PYTHON_INIT_FILES := $(shell find ${RANGE_SRC_DIR} -name "__init__.py" 2>/dev/null)
+RST_INIT_FILES    := $(foreach file,${PYTHON_INIT_FILES},$(patsubst %/__init__.py,%/index.rst,$(patsubst ${PYTHON_CODE_DIR}/%,${RST_DOC_DIR}/%,$(patsubst ${PYTHON_CODE_DIR}/__init__.py,${RST_DOC_DIR}/index.rst,${file}))))
 
 help:
 	@echo "JerryProxy Build System"
@@ -41,6 +48,8 @@ help:
 	@echo "Documentation:"
 	@echo "  make docs         - Build Sphinx HTML documentation"
 	@echo "  make pdocs        - Build docs with production warnings enabled"
+	@echo "  make rst_auto     - Generate English RST API docs from Python source"
+	@echo "                      RANGE_DIR=<path>"
 
 install_dev:
 	$(PYTHON) -m pip install -e .
@@ -77,16 +86,31 @@ python37:
 	$(PYTHON37) -m pytest ${TEST_DIR} -sv -m unittest
 
 lint:
-	ruff check ${SRC_DIR} ${TEST_DIR} jerryproxy_cli.py setup.py
+	ruff check ${SRC_DIR} ${TEST_DIR} jerryproxy_cli.py setup.py auto_rst.py auto_rst_top_index.py
 
 format:
-	ruff format ${SRC_DIR} ${TEST_DIR} jerryproxy_cli.py setup.py
+	ruff format ${SRC_DIR} ${TEST_DIR} jerryproxy_cli.py setup.py auto_rst.py auto_rst_top_index.py
 
-docs:
+docs: rst_auto
 	$(MAKE) -C "${DOC_DIR}" build
 
-pdocs:
+pdocs: rst_auto
 	SPHINXOPTS="-W --keep-going" $(MAKE) -C "${DOC_DIR}" build
+
+rst_auto: ${RST_DOC_FILES} ${RST_INIT_FILES} auto_rst_top_index.py
+	$(PYTHON) auto_rst_top_index.py -i ${PYTHON_CODE_DIR} -o ${DOC_DIR}/source
+
+${RST_DOC_DIR}/%.rst: ${PYTHON_CODE_DIR}/%.py auto_rst.py Makefile
+	@mkdir -p $(dir $@)
+	$(PYTHON) auto_rst.py -i $< -o $@ --source-root ${PROJ_DIR}
+
+${RST_DOC_DIR}/%/index.rst: ${PYTHON_CODE_DIR}/%/__init__.py auto_rst.py Makefile
+	@mkdir -p $(dir $@)
+	$(PYTHON) auto_rst.py -i $< -o $@ --source-root ${PROJ_DIR}
+
+${RST_DOC_DIR}/index.rst: ${PYTHON_CODE_DIR}/__init__.py auto_rst.py Makefile
+	@mkdir -p $(dir $@)
+	$(PYTHON) auto_rst.py -i $< -o $@ --source-root ${PROJ_DIR}
 
 test_cli:
 	$(PYTHON) -m jerryproxy --version
