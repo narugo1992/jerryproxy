@@ -81,17 +81,18 @@ jobs:
       - name: Record binary and archive digests
         shell: bash
         run: |
-          python - "out/${{ matrix.staged_binary }}" "out/${{ matrix.archive }}" <<'PY' > out/artifact-sha256.txt
+          python - "out/${{ matrix.staged_binary }}" "out/${{ matrix.archive }}" <<'PY'
           import hashlib
           import os
           import sys
 
-          for path in sys.argv[1:]:
-              digest = hashlib.sha256()
-              with open(path, "rb") as stream:
-                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                      digest.update(chunk)
-              print("{}  {}".format(digest.hexdigest(), os.path.basename(path)))
+          with open("out/artifact-sha256.txt", "w", encoding="ascii", newline="\n") as manifest:
+              for path in sys.argv[1:]:
+                  digest = hashlib.sha256()
+                  with open(path, "rb") as stream:
+                      for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                          digest.update(chunk)
+                  manifest.write("{}  {}\n".format(digest.hexdigest(), os.path.basename(path)))
           PY
       - uses: actions/upload-artifact@v7
         with:
