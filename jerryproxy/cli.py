@@ -9,6 +9,7 @@ from .backend import BackendManager, get_backend, iter_backends
 from .config.meta import __VERSION__
 from .errors import JerryProxyError
 from .home import JerryProxyPaths
+from .selfcheck import run_self_check
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
@@ -58,6 +59,15 @@ def doctor_command(context):  # type: (click.Context) -> None
     click.echo("Active backends: %d" % len(active))
     for item in active:
         click.echo("  %s %s -> %s (%s)" % (item.name, item.version, item.link, item.link_mode))
+
+
+@cli.command("self-check")
+@click.pass_context
+def self_check_command(context):  # type: (click.Context) -> None
+    """Run isolated local checks and report every detected failure."""
+
+    if run_self_check(_paths(context), output=click.echo):
+        raise click.ClickException("self-check failed; inspect the diagnostics above")
 
 
 @cli.group("backend")

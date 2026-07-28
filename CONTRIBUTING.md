@@ -33,6 +33,7 @@ make unittest
 make lint
 make docs
 make package
+jerryproxy --home ./test_self_check self-check
 ```
 
 Use `make unittest RANGE_DIR=./backend` for a focused backend-manager pass.

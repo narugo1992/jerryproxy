@@ -1,0 +1,1 @@
+"""JerryProxy self-check tests."""

@@ -16,24 +16,30 @@ permissions:
 
 jobs:
   build:
-    name: PyInstaller (${{ matrix.platform }})
+    name: Build with Python 3.7 (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: Linux
-            os: ubuntu-latest
+            os: ubuntu-22.04
+            python: "3.7.17"
             binary: dist/jerryproxy
+            staged_binary: jerryproxy
             archive: jerryproxy-linux-amd64.tar.gz
             artifact: jerryproxy-linux-amd64
           - platform: Windows
             os: windows-2022
+            python: "3.7.9"
             binary: dist/jerryproxy.exe
+            staged_binary: jerryproxy.exe
             archive: jerryproxy-windows-amd64.zip
             artifact: jerryproxy-windows-amd64
           - platform: macOS
             os: macos-15-intel
+            python: "3.7.17"
             binary: dist/jerryproxy
+            staged_binary: jerryproxy
             archive: jerryproxy-macos-amd64.tar.gz
             artifact: jerryproxy-macos-amd64
     runs-on: ${{ matrix.os }}
@@ -42,66 +48,152 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
           cache: pip
-      - run: python -m pip install -e . -r requirements-build.txt
-      - name: Build standalone CLI with PyInstaller
+      - name: Install Python 3.7 build dependencies
+        shell: bash
+        run: |
+          python -m pip install "pip<24.1"
+          python -m pip install -e . -r requirements-build.txt
+          python --version
+      - name: Build one-file CLI with PyInstaller
         run: >-
           python -m PyInstaller --clean --onefile --console
           --name jerryproxy jerryproxy_cli.py
-      - name: Smoke-test standalone CLI
-        shell: bash
-        run: ${{ matrix.binary }} --version
-      - name: Smoke-test standalone backend inventory
-        shell: bash
-        run: ${{ matrix.binary }} backend supported
-      - name: Archive Unix standalone CLI
-        if: runner.os != 'Windows'
+      - name: Stage binary
         shell: bash
         run: |
-          tar -czf "$RUNNER_TEMP/${{ matrix.archive }}" -C dist jerryproxy
-          mv "$RUNNER_TEMP/${{ matrix.archive }}" "dist/${{ matrix.archive }}"
-      - name: Archive Windows standalone CLI
+          mkdir -p out
+          cp "${{ matrix.binary }}" "out/${{ matrix.staged_binary }}"
+      - name: Archive Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: >-
+          tar -czf "out/${{ matrix.archive }}"
+          -C out "${{ matrix.staged_binary }}"
+      - name: Archive Windows binary
         if: runner.os == 'Windows'
         shell: pwsh
         run: >-
           Compress-Archive
-          -Path "${{ matrix.binary }}"
-          -DestinationPath "dist/${{ matrix.archive }}"
-      - name: Record standalone archive digest
+          -Path "out/${{ matrix.staged_binary }}"
+          -DestinationPath "out/${{ matrix.archive }}"
+      - name: Record binary and archive digests
         shell: bash
-        env:
-          ARCHIVE: dist/${{ matrix.archive }}
         run: |
-          python - "$ARCHIVE" <<'PY' > "${ARCHIVE}.sha256"
+          python - "out/${{ matrix.staged_binary }}" "out/${{ matrix.archive }}" <<'PY' > out/artifact-sha256.txt
           import hashlib
           import os
           import sys
 
-          path = sys.argv[1]
-          digest = hashlib.sha256()
-          with open(path, "rb") as stream:
-              for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                  digest.update(chunk)
-          print("{} {} {}".format(
-              digest.hexdigest(), os.path.getsize(path), os.path.basename(path)
-          ))
+          for path in sys.argv[1:]:
+              digest = hashlib.sha256()
+              with open(path, "rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              print("{}  {}".format(digest.hexdigest(), os.path.basename(path)))
           PY
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           if-no-files-found: error
-          path: |
-            dist/${{ matrix.archive }}
-            dist/${{ matrix.archive }}.sha256
+          retention-days: 14
+          path: out/*
+
+  verify:
+    name: Verify downloaded artifact (${{ matrix.platform }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            os: ubuntu-22.04
+            staged_binary: jerryproxy
+            archive: jerryproxy-linux-amd64.tar.gz
+            artifact: jerryproxy-linux-amd64
+          - platform: Windows
+            os: windows-2022
+            staged_binary: jerryproxy.exe
+            archive: jerryproxy-windows-amd64.zip
+            artifact: jerryproxy-windows-amd64
+          - platform: macOS
+            os: macos-15-intel
+            staged_binary: jerryproxy
+            archive: jerryproxy-macos-amd64.tar.gz
+            artifact: jerryproxy-macos-amd64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Show clean runner environment
+        shell: bash
+        run: |
+          uname -a || true
+          command -v python || true
+          command -v python3 || true
+          test ! -e jerryproxy_cli.py
+          test ! -d jerryproxy
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: downloaded
+      - name: Inspect and verify staged artifacts
+        shell: bash
+        run: |
+          ls -lh downloaded
+          cd downloaded
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum --check artifact-sha256.txt
+          else
+            shasum -a 256 --check artifact-sha256.txt
+          fi
+      - name: Extract Unix release archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p extracted
+          tar -xzf "downloaded/${{ matrix.archive }}" -C extracted
+      - name: Extract Windows release archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          Expand-Archive
+          -Path "downloaded/${{ matrix.archive }}"
+          -DestinationPath extracted
+      - name: Make extracted binary executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x "extracted/${{ matrix.staged_binary }}"
+      - name: Run packaged self-check
+        shell: bash
+        run: >-
+          "extracted/${{ matrix.staged_binary }}"
+          --home self-check-home self-check
+      - name: Exercise packaged CLI commands
+        shell: bash
+        run: |
+          binary="extracted/${{ matrix.staged_binary }}"
+          "$binary" --version
+          "$binary" --help >/dev/null
+          "$binary" --home self-check-home home
+          "$binary" --home self-check-home doctor
+          "$binary" backend supported
+          "$binary" --home self-check-home backend list
+          "$binary" --home self-check-home backend current
+          test -d self-check-home/backends
+          test -d self-check-home/bin
+          test -d self-check-home/active
 
   gate:
-    name: Standalone gate
+    name: Standalone two-stage gate
     if: always()
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [build, verify]
+    runs-on: ubuntu-22.04
     steps:
-      - name: Verify all standalone builds
+      - name: Verify build and clean-runner stages
         env:
           BUILD_RESULT: ${{ needs.build.result }}
-        run: test "$BUILD_RESULT" = success
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$VERIFY_RESULT" = success

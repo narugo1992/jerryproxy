@@ -80,6 +80,7 @@ jobs:
       - run: python -m pip install dist/${{ matrix.pattern }}
       - run: python -m pip check
       - run: jerryproxy --version
+      - run: jerryproxy --home package-smoke-home self-check
       - run: python -m jerryproxy backend supported
 
   publish:

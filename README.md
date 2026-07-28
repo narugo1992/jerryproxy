@@ -27,6 +27,9 @@ Implemented now:
 - relative symbolic links on supported systems and an atomic executable-copy
   fallback where Windows symlink privileges are unavailable;
 - an active-version manifest that records the selected version and link mode;
+- a lightweight packaged-CLI self-check with isolated failure diagnostics;
+- two-stage standalone validation that builds on Python 3.7 and executes the
+  downloaded artifact on a separate clean runner for each supported OS;
 - deterministic offline unit tests, Sphinx documentation, packaging checks,
   and Linux/Windows/macOS CI definitions.
 
@@ -84,6 +87,7 @@ Inspect built-in backend drivers and the selected home:
 jerryproxy home
 jerryproxy backend supported
 jerryproxy doctor
+jerryproxy self-check
 ```
 
 Install and activate one exact upstream version:
@@ -139,6 +143,21 @@ files are written atomically as `0600`. Windows ACL hardening is part of the
 runtime security roadmap; the current design keeps every path beneath the
 current user's profile.
 
+## Self-check
+
+`jerryproxy self-check` actively validates the packaged Python runtime, host
+platform mapping, private home layout and write access, POSIX directory modes,
+backend registry, and installed/active backend inventory. Each check is
+isolated: a failure prints its check name, exception type, and message, while
+the remaining checks continue. The final summary exits nonzero when any check
+fails.
+
+The check is local and network-free. It does not download or start a backend:
+
+```shell
+jerryproxy --home ./test_self_check self-check
+```
+
 ## Backend supply-chain rules
 
 JerryProxy does not bundle or import backend implementations. The manager:
@@ -190,6 +209,7 @@ and report the loopback HTTP/SOCKS endpoint.
 - [x] Implement versioned backend storage and active-link switching.
 - [x] Implement exact release-asset resolution and digest-verified downloads.
 - [x] Implement safe archive extraction and immutable manifests.
+- [x] Add lightweight self-check and clean-runner standalone artifact gates.
 - [ ] Add a signed/tested backend catalog and configurable trusted mirrors.
 - [ ] Add offline archive installation with an explicit digest.
 - [ ] Implement managed subscription fetch and private file providers.
@@ -226,8 +246,12 @@ Every main-branch push and pull request runs the following independent gates:
 - strict Sphinx HTML documentation with warnings treated as errors;
 - staged sdist and wheel builds, followed by clean artifact-only installation
   smoke tests on Python 3.7 and 3.14;
-- standalone PyInstaller builds and executable smoke tests on Linux, Windows,
-  and macOS.
+- two-stage standalone validation on `ubuntu-22.04`, `windows-2022`, and
+  `macos-15-intel`: Stage 1 builds with Python 3.7 and uploads the binary;
+  Stage 2 starts a clean runner without checkout, Python setup, or dependency
+  installation, downloads that exact artifact, verifies its digests, extracts
+  the release archive, runs `self-check`, and exercises the packaged CLI
+  commands from the extracted binary.
 
 Read [CLAUDE.md](CLAUDE.md) before changing architecture, backend metadata,
 download/extraction code, credential handling, or release workflows.

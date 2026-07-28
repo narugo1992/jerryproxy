@@ -9,6 +9,7 @@ Complete in the initial scaffold
 * Mihomo/Xray/V2Ray backend registry;
 * exact release resolution and digest-verified downloads;
 * safe extraction, immutable manifests, active links, removal;
+* lightweight packaged-CLI self-check and two-stage clean-runner validation;
 * deterministic tests, package, docs, and CI definitions.
 
 Required before the first usable proxy alpha

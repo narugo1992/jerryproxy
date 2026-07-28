@@ -26,7 +26,7 @@ help:
 	@echo "Building and packaging:"
 	@echo "  make package      - Build source and wheel distributions"
 	@echo "  make build        - Build one standalone CLI with PyInstaller"
-	@echo "  make test_cli     - Smoke-test source and standalone CLI entry points"
+	@echo "  make test_cli     - Smoke-test source CLI entry points"
 	@echo "  make clean        - Remove generated artifacts"
 	@echo ""
 	@echo "Testing and quality:"
@@ -50,6 +50,8 @@ install_dev:
 	$(PYTHON) -m pip install -r requirements-build.txt
 
 package:
+	rm -rf ${DIST_DIR}
+	mkdir -p ${DIST_DIR}
 	$(PYTHON) -m build --sdist --wheel --outdir ${DIST_DIR}
 	$(PYTHON) -m twine check ${DIST_DIR}/*.whl ${DIST_DIR}/*.tar.gz
 
@@ -89,7 +91,7 @@ pdocs:
 test_cli:
 	$(PYTHON) -m jerryproxy --version
 	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" home
+	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" self-check
 	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend supported
-	$(if $(wildcard ${DIST_DIR}/jerryproxy*),${DIST_DIR}/jerryproxy --version,true)
 
 check: lint unittest pdocs package test_cli

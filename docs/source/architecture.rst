@@ -6,6 +6,7 @@ JerryProxy separates backend distribution from backend runtime behavior:
 .. code-block:: text
 
    CLI
+    ├── Self-check (isolated local runtime and state diagnostics)
     ├── Backend registry (identity and exact asset names)
     ├── Release client (read-only upstream metadata)
     ├── Downloader (HTTPS, size, SHA-256)

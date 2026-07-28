@@ -132,6 +132,13 @@ credential-free integration lane and must pin versions and asset digests.
 The `test` tree is a Python package: every directory below `test/` must contain
 an `__init__.py`, including newly added test-area directories.
 
+Standalone CI is a two-stage contract. Build on Python 3.7 using the oldest
+non-deprecated standard hosted runner pinned for each OS. Verification must run
+on a separate clean runner, download the first-stage artifact, avoid source
+checkout and dependency installation, and exercise the packaged binary through
+`self-check` plus public read-only commands. Do not substitute unit tests for
+the clean-runner artifact verification stage.
+
 ## Documentation policy
 
 - README begins with a prominent WIP boundary until proxy runtime works.

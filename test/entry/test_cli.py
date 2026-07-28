@@ -58,6 +58,37 @@ def test_doctor_reports_platform_and_counts(tmp_path):
     assert "Active backends: 0" in result.output
 
 
+def test_self_check_reports_each_check_and_summary(tmp_path):
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "self-check"])
+
+    assert result.exit_code == 0
+    assert "[1/7] Python runtime: OK" in result.output
+    assert "[7/7] backend inventory: OK" in result.output
+    assert "Summary: 7 OK, 0 FAIL" in result.output
+    assert "Self-check PASSED" in result.output
+
+
+def test_self_check_failure_reaches_console_exit_code(tmp_path, monkeypatch, capsys):
+    def failed_check(paths, output):
+        output("[1/1] home write access: FAIL - OSError: read-only state directory")
+        output("Summary: 0 OK, 1 FAIL")
+        output("Self-check FAILED")
+        return 1
+
+    monkeypatch.setattr("jerryproxy.cli.run_self_check", failed_check)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["jerryproxy", "--home", str(tmp_path), "self-check"],
+    )
+
+    assert main() == 1
+    captured = capsys.readouterr()
+    assert "OSError: read-only state directory" in captured.out
+    assert "Self-check FAILED" in captured.out
+    assert "Error: self-check failed; inspect the diagnostics above" in captured.err
+
+
 def test_install_unknown_backend_reports_domain_error(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         sys,
