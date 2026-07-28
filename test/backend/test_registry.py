@@ -20,6 +20,24 @@ from jerryproxy.errors import UnsupportedBackendError, UnsupportedPlatformError
             "v1.19.29",
             "mihomo-windows-arm64-v1.19.29.zip",
         ),
+        (
+            "sing-box",
+            PlatformInfo("linux", "amd64", "glibc"),
+            "1.13.14",
+            "sing-box-1.13.14-linux-amd64.tar.gz",
+        ),
+        (
+            "sing-box",
+            PlatformInfo("windows", "arm64"),
+            "v1.13.14",
+            "sing-box-1.13.14-windows-arm64.zip",
+        ),
+        (
+            "sing-box",
+            PlatformInfo("darwin", "arm64"),
+            "1.13.14",
+            "sing-box-1.13.14-darwin-arm64.tar.gz",
+        ),
         ("xray", PlatformInfo("darwin", "arm64"), "26.3.27", "Xray-macos-arm64-v8a.zip"),
         ("v2ray", PlatformInfo("linux", "amd64"), "5.51.2", "v2ray-linux-64.zip"),
     ],
@@ -29,7 +47,7 @@ def test_exact_asset_names(backend, platform_info, version, expected):
 
 
 def test_registry_order_is_stable():
-    assert [spec.name for spec in iter_backends()] == ["mihomo", "v2ray", "xray"]
+    assert [spec.name for spec in iter_backends()] == ["mihomo", "sing-box", "v2ray", "xray"]
 
 
 def test_unknown_backend_is_rejected():
@@ -56,6 +74,7 @@ def test_unsafe_versions_are_rejected(version):
     [
         ("mihomo", PlatformInfo("darwin", "armv7")),
         ("mihomo", PlatformInfo("linux", "loong64")),
+        ("sing-box", PlatformInfo("freebsd", "amd64")),
         ("xray", PlatformInfo("windows", "armv7")),
         ("v2ray", PlatformInfo("linux", "s390x")),
         ("v2ray", PlatformInfo("linux", "ppc64le")),

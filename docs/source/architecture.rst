@@ -15,13 +15,15 @@ JerryProxy separates backend distribution from backend runtime behavior:
     ├── Subscription manager (planned)
     └── Runtime drivers (planned)
           ├── MihomoDriver
+          ├── SingBoxDriver
           ├── XrayDriver
           └── V2RayDriver
 
 The first runtime implementation will target Mihomo. Making it the shipped
 default remains gated on the documented compatibility/security PoC. Xray and
-V2Ray runtime drivers remain optional compatibility work; their binaries can
-already be installed and version-switched by the generic manager.
+V2Ray runtime drivers remain optional compatibility work. sing-box is also an
+optional runtime candidate for native profiles; all four binaries can already
+be installed and version-switched by the generic manager.
 
 Backend protocol schemas remain owned by the external cores. Python may build
 top-level configs and bounded subscription containers, but must not become a

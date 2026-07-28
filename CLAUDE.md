@@ -8,7 +8,7 @@ independently.
 JerryProxy is a Python 3.7+ command-line application that manages external
 proxy backend binaries and will provide an out-of-the-box runtime experience.
 The package must not implement evolving proxy protocols in Python and must not
-bundle Mihomo, Xray, V2Ray, or other backend binaries in its wheel.
+bundle Mihomo, sing-box, Xray, V2Ray, or other backend binaries in its wheel.
 
 The canonical technical identifiers are all `jerryproxy`:
 
@@ -124,6 +124,7 @@ make rst_auto RANGE_DIR=backend
 make docs
 make package
 make build
+make build_linux
 make check
 python3.7 -m pytest test -m unittest
 ```
@@ -134,12 +135,16 @@ credential-free integration lane and must pin versions and asset digests.
 The `test` tree is a Python package: every directory below `test/` must contain
 an `__init__.py`, including newly added test-area directories.
 
-Standalone CI is a two-stage contract. Build on Python 3.7 using the oldest
-non-deprecated standard hosted runner pinned for each OS. Verification must run
-on a separate clean runner, download the first-stage artifact, avoid source
-checkout and dependency installation, and exercise the packaged binary through
-`self-check` plus public read-only commands. Do not substitute unit tests for
-the clean-runner artifact verification stage.
+Standalone CI is a two-stage contract. Linux must build through
+`make build_linux` inside the digest-pinned official Python 3.7.11 Docker image
+declared in the Makefile; do not silently replace it with a hosted-runner build
+or an unpinned image tag. Windows and macOS use pinned hosted runners with
+Python 3.7. Verification must run on a separate clean runner, download the
+first-stage artifact, avoid source checkout and dependency installation, and
+exercise the packaged binary through `self-check --color` plus public read-only
+commands. The same Linux artifact must pass in pinned Ubuntu 18.04 and Debian
+10 containers. Do not substitute unit tests, ELF inspection, or build-container
+execution for clean compatibility-container verification.
 
 Generated API documentation is a repository contract. Python source under
 `jerryproxy/` is the source of truth; `docs/source/api_doc.rst` and

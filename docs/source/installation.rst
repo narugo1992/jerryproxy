@@ -32,8 +32,24 @@ runtime, platform mapping, private state tree, write access, backend registry,
 and backend inventory. Every check reports ``OK`` or an exception type and
 message; all checks run before the command returns a nonzero status on failure.
 
-Standalone CI builds on Python 3.7 using ``ubuntu-22.04``, ``windows-2022``,
-and ``macos-15-intel``. A second clean runner downloads and verifies the
-first-stage artifact without checking out the source tree or installing Python
-dependencies, extracts the release archive, then runs this self-check and the
-public read-only CLI commands from the extracted binary.
+ANSI colors are selected automatically for terminal output. ``NO_COLOR``
+disables colors, ``FORCE_COLOR=1`` enables them for redirected output, and
+``self-check --color`` or ``self-check --no-color`` explicitly overrides the
+automatic choice.
+
+Standalone CI builds Linux entirely inside a digest-pinned official Python
+3.7.11 Docker image based on Debian 9 and glibc 2.24. Windows and macOS use
+Python 3.7 on their pinned hosted runners. A second clean runner downloads and
+verifies the first-stage artifact without checking out the source tree or
+installing Python dependencies. The Linux archive is then exercised in pinned
+Ubuntu 18.04 and Debian 10 containers; both run ``self-check --color`` and
+public read-only CLI commands from the same extracted binary.
+
+The reproducible local Linux build entry point is:
+
+.. code-block:: shell
+
+   make build_linux
+
+Docker is only a build requirement for this target. The resulting
+``dist/jerryproxy`` executable does not require a local Python installation.

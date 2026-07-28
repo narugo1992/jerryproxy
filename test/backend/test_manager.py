@@ -1,7 +1,9 @@
 import gzip
 import hashlib
+import io
 import os
 import shutil
+import tarfile
 
 import pytest
 
@@ -138,6 +140,29 @@ def test_install_resolves_downloads_and_activates_exact_release(tmp_path):
     assert installed.executable.read_bytes() == b"downloaded mihomo"
     assert installed.asset_name == asset_name
     assert manager.current("mihomo").version == "1.19.29"
+
+
+def test_install_sing_box_from_nested_release_archive(tmp_path):
+    manager = manager_for(tmp_path)
+    archive = tmp_path / "sing-box-1.13.14-linux-amd64.tar.gz"
+    payload = b"sing-box executable"
+    member = tarfile.TarInfo("sing-box-1.13.14-linux-amd64/sing-box")
+    member.size = len(payload)
+    with tarfile.open(str(archive), "w:gz") as stream:
+        stream.addfile(member, io.BytesIO(payload))
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    installed = manager.install_from_archive(
+        "sing-box",
+        "1.13.14",
+        archive,
+        expected_sha256=digest,
+        activate=True,
+    )
+
+    assert installed.executable.name == "sing-box"
+    assert installed.executable.read_bytes() == payload
+    assert manager.current("sing-box").version == "1.13.14"
 
 
 def test_switch_rolls_back_link_and_manifest_on_write_failure(tmp_path, monkeypatch):

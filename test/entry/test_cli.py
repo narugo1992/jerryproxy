@@ -39,6 +39,7 @@ def test_supported_backends():
     result = CliRunner().invoke(cli, ["backend", "supported"])
     assert result.exit_code == 0
     assert "mihomo" in result.output
+    assert "sing-box" in result.output
     assert "xray" in result.output
     assert "v2ray" in result.output
 
@@ -68,8 +69,21 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     assert "Self-check PASSED" in result.output
 
 
+def test_self_check_can_force_ansi_color(tmp_path):
+    result = CliRunner().invoke(
+        cli,
+        ["--home", str(tmp_path), "self-check", "--color"],
+        color=True,
+    )
+
+    assert result.exit_code == 0
+    assert "\033[1;32mOK\033[0m" in result.output
+    assert "\033[1;32mSelf-check PASSED\033[0m" in result.output
+
+
 def test_self_check_failure_reaches_console_exit_code(tmp_path, monkeypatch, capsys):
-    def failed_check(paths, output):
+    def failed_check(paths, output, color):
+        assert color is False
         output("[1/1] home write access: FAIL - OSError: read-only state directory")
         output("Summary: 0 OK, 1 FAIL")
         output("Self-check FAILED")

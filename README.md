@@ -17,7 +17,7 @@ Implemented now:
 - a pure-Python package and CLI compatible with Python 3.7+;
 - one cross-platform state root at `~/.jerryproxy`, overridable with
   `JERRYPROXY_HOME` or `--home`;
-- built-in backend definitions for Mihomo, Xray, and V2Ray;
+- built-in backend definitions for Mihomo, sing-box, Xray, and V2Ray;
 - exact official GitHub release-asset selection for the current OS/CPU;
 - mandatory GitHub-provided SHA-256 digest verification;
 - bounded HTTPS downloads and safe ZIP/TAR/GZip extraction;
@@ -28,8 +28,8 @@ Implemented now:
   fallback where Windows symlink privileges are unavailable;
 - an active-version manifest that records the selected version and link mode;
 - a lightweight packaged-CLI self-check with isolated failure diagnostics;
-- two-stage standalone validation that builds on Python 3.7 and executes the
-  downloaded artifact on a separate clean runner for each supported OS;
+- two-stage standalone validation that builds Linux in a pinned Python 3.7
+  Docker image and executes every downloaded artifact in clean environments;
 - deterministic offline unit tests, Sphinx documentation, packaging checks,
   and Linux/Windows/macOS CI definitions.
 
@@ -41,7 +41,8 @@ Not implemented yet:
   runtime commands;
 - safe foreground/detached process supervision and runtime descriptors;
 - the legacy `V2RAY_*` environment and option compatibility layer;
-- Xray/V2Ray runtime drivers beyond binary installation and activation;
+- sing-box/Xray/V2Ray runtime drivers beyond binary installation and
+  activation;
 - PyPI publication, signed standalone executables, and Read the Docs hosting.
 
 ## Why JerryProxy exists
@@ -158,6 +159,24 @@ The check is local and network-free. It does not download or start a backend:
 jerryproxy --home ./test_self_check self-check
 ```
 
+ANSI colors are enabled automatically on terminals. `NO_COLOR` disables them,
+`FORCE_COLOR=1` enables them for redirected output, and `--color` or
+`--no-color` provides an explicit per-command override.
+
+## Standalone Linux compatibility
+
+`make build_linux` creates the x86-64 Linux executable entirely inside a
+digest-pinned official Python 3.7.11 Docker image based on Debian 9 (glibc
+2.24). The build container is an isolated compatibility toolchain; users do
+not need Docker or Python to run the resulting executable.
+
+CI downloads the first-stage archive on a checkout-free runner and executes
+the same binary in digest-pinned Ubuntu 18.04 and Debian 10 containers. It runs
+the ANSI self-check and public read-only backend commands without installing
+Python, JerryProxy, or any dependencies in those containers. This proves the
+current `linux-amd64` artifact on both target distributions rather than
+inferring compatibility from the build host.
+
 ## Backend supply-chain rules
 
 JerryProxy does not bundle or import backend implementations. The manager:
@@ -176,6 +195,7 @@ Official upstream repositories currently registered:
 | Backend | Upstream | Planned role |
 |---|---|---|
 | Mihomo | `MetaCubeX/mihomo` | Preferred default candidate pending compatibility/security PoC |
+| sing-box | `SagerNet/sing-box` | Optional backend for native sing-box profiles |
 | Xray | `XTLS/Xray-core` | Optional Xray-family specialist backend |
 | V2Ray | `v2fly/v2ray-core` | Legacy compatibility backend |
 
@@ -236,6 +256,7 @@ make lint
 make docs
 make package
 make build
+make build_linux
 make check
 ```
 
@@ -246,12 +267,12 @@ Every main-branch push and pull request runs the following independent gates:
 - strict Sphinx HTML documentation with warnings treated as errors;
 - staged sdist and wheel builds, followed by clean artifact-only installation
   smoke tests on Python 3.7 and 3.14;
-- two-stage standalone validation on `ubuntu-22.04`, `windows-2022`, and
-  `macos-15-intel`: Stage 1 builds with Python 3.7 and uploads the binary;
-  Stage 2 starts a clean runner without checkout, Python setup, or dependency
-  installation, downloads that exact artifact, verifies its digests, extracts
-  the release archive, runs `self-check`, and exercises the packaged CLI
-  commands from the extracted binary.
+- two-stage standalone validation: Linux is built in the pinned Python 3.7.11
+  Docker toolchain, while Windows and macOS build on `windows-2022` and
+  `macos-15-intel`; Stage 2 starts without checkout or dependency installation,
+  verifies the downloaded archives, tests Linux on Ubuntu 18.04 and Debian 10,
+  and exercises every packaged CLI through `self-check --color` and public
+  read-only commands.
 
 Read [CLAUDE.md](CLAUDE.md) before changing architecture, backend metadata,
 download/extraction code, credential handling, or release workflows.

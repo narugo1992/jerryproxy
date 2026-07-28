@@ -6,6 +6,12 @@ jerryproxy.selfcheck
 .. automodule:: jerryproxy.selfcheck
 
 
+ansi\_color\_enabled
+-----------------------------------------------------
+
+.. autofunction:: ansi_color_enabled
+
+
 build\_checks
 -----------------------------------------------------
 

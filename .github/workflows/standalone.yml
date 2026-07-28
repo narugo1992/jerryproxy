@@ -23,7 +23,6 @@ jobs:
         include:
           - platform: Linux
             os: ubuntu-22.04
-            python: "3.7.17"
             binary: dist/jerryproxy
             staged_binary: jerryproxy
             archive: jerryproxy-linux-amd64.tar.gz
@@ -43,23 +42,43 @@ jobs:
             archive: jerryproxy-macos-amd64.tar.gz
             artifact: jerryproxy-macos-amd64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
+        if: runner.os != 'Linux'
         with:
           python-version: ${{ matrix.python }}
           cache: pip
       - name: Install Python 3.7 build dependencies
+        if: runner.os != 'Linux'
         shell: bash
         run: |
           python -m pip install "pip<24.1"
           python -m pip install -e . -r requirements-build.txt
           python --version
       - name: Build one-file CLI with PyInstaller
+        if: runner.os != 'Linux'
         run: >-
           python -m PyInstaller --clean --onefile --console
           --name jerryproxy jerryproxy_cli.py
+      - name: Build Linux CLI in pinned Python 3.7 Docker image
+        if: runner.os == 'Linux'
+        run: make build_linux
+      - name: Verify Linux ELF loader baseline
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          file "${{ matrix.binary }}"
+          readelf --version-info "${{ matrix.binary }}"
+          required_glibc="$({
+            readelf --version-info "${{ matrix.binary }}" |
+              sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p'
+          } | sort -Vu | tail -n 1)"
+          test -n "$required_glibc"
+          oldest="$(printf '%s\n' "$required_glibc" 2.27 | sort -Vu | head -n 1)"
+          test "$oldest" = "$required_glibc"
+          echo "Highest external GLIBC symbol requirement: $required_glibc"
       - name: Stage binary
         shell: bash
         run: |
@@ -108,11 +127,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: Linux
+          - platform: Linux / Ubuntu 18.04
             os: ubuntu-22.04
             staged_binary: jerryproxy
             archive: jerryproxy-linux-amd64.tar.gz
             artifact: jerryproxy-linux-amd64
+            container_image: ubuntu@sha256:152dc042452c496007f07ca9127571cb9c29697f42acbfad72324b2bb2e43c98
+            version_id: "18.04"
+          - platform: Linux / Debian 10
+            os: ubuntu-22.04
+            staged_binary: jerryproxy
+            archive: jerryproxy-linux-amd64.tar.gz
+            artifact: jerryproxy-linux-amd64
+            container_image: debian@sha256:bb3dc79fddbca7e8903248ab916bb775c96ec61014b3d02b4f06043b604726dc
+            version_id: "10"
           - platform: Windows
             os: windows-2022
             staged_binary: jerryproxy.exe
@@ -165,12 +193,42 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: chmod +x "extracted/${{ matrix.staged_binary }}"
+      - name: Run Linux artifact in clean compatibility container
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CONTAINER_IMAGE: ${{ matrix.container_image }}
+          EXPECTED_VERSION_ID: ${{ matrix.version_id }}
+        run: |
+          binary="$PWD/extracted/${{ matrix.staged_binary }}"
+          docker run --rm \
+            --env EXPECTED_VERSION_ID \
+            --volume "$binary:/usr/local/bin/jerryproxy:ro" \
+            "$CONTAINER_IMAGE" /bin/sh -eu -c '
+              . /etc/os-release
+              test "$VERSION_ID" = "$EXPECTED_VERSION_ID"
+              /usr/local/bin/jerryproxy --version
+              output="$(/usr/local/bin/jerryproxy --home /tmp/self-check-home self-check --color)"
+              printf "%s\n" "$output"
+              printf "%s" "$output" | grep -F "$(printf "\033[1;32mOK\033[0m")" >/dev/null
+              /usr/local/bin/jerryproxy --help >/dev/null
+              /usr/local/bin/jerryproxy --home /tmp/self-check-home home
+              /usr/local/bin/jerryproxy --home /tmp/self-check-home doctor
+              /usr/local/bin/jerryproxy backend supported
+              /usr/local/bin/jerryproxy --home /tmp/self-check-home backend list
+              /usr/local/bin/jerryproxy --home /tmp/self-check-home backend current
+              test -d /tmp/self-check-home/backends
+              test -d /tmp/self-check-home/bin
+              test -d /tmp/self-check-home/active
+            '
       - name: Run packaged self-check
+        if: runner.os != 'Linux'
         shell: bash
         run: >-
           "extracted/${{ matrix.staged_binary }}"
-          --home self-check-home self-check
+          --home self-check-home self-check --color
       - name: Exercise packaged CLI commands
+        if: runner.os != 'Linux'
         shell: bash
         run: |
           binary="extracted/${{ matrix.staged_binary }}"

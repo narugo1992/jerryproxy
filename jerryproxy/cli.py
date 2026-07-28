@@ -9,7 +9,7 @@ from .backend import BackendManager, get_backend, iter_backends
 from .config.meta import __VERSION__
 from .errors import JerryProxyError
 from .home import JerryProxyPaths
-from .selfcheck import run_self_check
+from .selfcheck import ansi_color_enabled, run_self_check
 
 #: Click context settings used by the root command.
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -63,11 +63,21 @@ def doctor_command(context):  # type: (click.Context) -> None
 
 
 @cli.command("self-check")
+@click.option(
+    "--color/--no-color",
+    default=None,
+    help="Override automatic ANSI color detection.",
+)
 @click.pass_context
-def self_check_command(context):  # type: (click.Context) -> None
+def self_check_command(context, color):  # type: (click.Context, bool) -> None
     """Run isolated local checks and report every detected failure."""
 
-    if run_self_check(_paths(context), output=click.echo):
+    use_color = ansi_color_enabled(click.get_text_stream("stdout"), requested=color)
+
+    def output(message):
+        click.echo(message, color=use_color)
+
+    if run_self_check(_paths(context), output=output, color=use_color):
         raise click.ClickException("self-check failed; inspect the diagnostics above")
 
 

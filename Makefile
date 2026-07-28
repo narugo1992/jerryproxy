@@ -1,7 +1,11 @@
-.PHONY: help install_dev package build clean test unittest lint format docs pdocs rst_auto test_cli python37 check
+.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 check
 
 PYTHON ?= $(shell which python)
 PYTHON37 ?= python3.7
+DOCKER ?= docker
+DOCKER_RUN_ARGS ?=
+
+LINUX_BUILD_IMAGE ?= python@sha256:f678e6659fcd0a3fd4e3426f46b0b534253b0971da34dca6ce5b0c6e49b7cd64
 
 PROJ_DIR      := .
 DOC_DIR       := ${PROJ_DIR}/docs
@@ -33,6 +37,7 @@ help:
 	@echo "Building and packaging:"
 	@echo "  make package      - Build source and wheel distributions"
 	@echo "  make build        - Build one standalone CLI with PyInstaller"
+	@echo "  make build_linux  - Build Linux CLI in the pinned Python 3.7 Docker image"
 	@echo "  make test_cli     - Smoke-test source CLI entry points"
 	@echo "  make clean        - Remove generated artifacts"
 	@echo ""
@@ -66,6 +71,23 @@ package:
 
 build:
 	$(PYTHON) -m PyInstaller --clean --onefile --console --name jerryproxy jerryproxy_cli.py
+
+build_linux:
+	mkdir -p ${DIST_DIR}
+	$(DOCKER) run --rm $(DOCKER_RUN_ARGS) \
+		--user "$$(id -u):$$(id -g)" \
+		--env HOME=/tmp \
+		--volume "$(CURDIR):/workspace:ro" \
+		--volume "$(abspath ${DIST_DIR}):/dist" \
+		${LINUX_BUILD_IMAGE} /bin/sh -eu -c '\
+			python -m venv /tmp/jerryproxy-build; \
+			/tmp/jerryproxy-build/bin/python -m pip install "pip<24.1"; \
+			/tmp/jerryproxy-build/bin/python -m pip install /workspace -r /workspace/requirements-build.txt; \
+			cd /tmp; \
+			/tmp/jerryproxy-build/bin/python -m PyInstaller --clean --onefile --console \
+				--name jerryproxy --distpath /dist --workpath /tmp/pyinstaller-build \
+				--specpath /tmp /workspace/jerryproxy_cli.py; \
+			/dist/jerryproxy --version'
 
 clean:
 	rm -rf ${DIST_DIR} ${BUILD_DIR} *.egg-info .pytest_cache .ruff_cache
@@ -115,7 +137,7 @@ ${RST_DOC_DIR}/index.rst: ${PYTHON_CODE_DIR}/__init__.py auto_rst.py Makefile
 test_cli:
 	$(PYTHON) -m jerryproxy --version
 	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" home
-	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" self-check
+	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" self-check --color
 	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend supported
 
 check: lint unittest pdocs package test_cli

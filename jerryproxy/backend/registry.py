@@ -29,6 +29,25 @@ _SUPPORTED_PLATFORM_PAIRS = {
             ("freebsd", "arm64"),
         }
     ),
+    "sing-box": frozenset(
+        {
+            ("linux", "386"),
+            ("linux", "amd64"),
+            ("linux", "arm64"),
+            ("linux", "armv5"),
+            ("linux", "armv6"),
+            ("linux", "armv7"),
+            ("linux", "loong64"),
+            ("linux", "ppc64le"),
+            ("linux", "riscv64"),
+            ("linux", "s390x"),
+            ("windows", "386"),
+            ("windows", "amd64"),
+            ("windows", "arm64"),
+            ("darwin", "amd64"),
+            ("darwin", "arm64"),
+        }
+    ),
     "xray": frozenset(
         {
             ("linux", "386"),
@@ -116,6 +135,8 @@ class BackendSpec:
             raise UnsupportedPlatformError("%s has no registered asset rule for %s" % (self.name, platform_info.key))
         if self.asset_family == "mihomo":
             return _mihomo_asset_name(platform_info, normalized)
+        if self.asset_family == "sing-box":
+            return _sing_box_asset_name(platform_info, normalized)
         if self.asset_family in ("xray", "v2ray"):
             return _v2ray_family_asset_name(self.asset_family, platform_info)
         raise UnsupportedPlatformError("unknown asset family: %s" % self.asset_family)
@@ -127,6 +148,16 @@ def _mihomo_asset_name(platform_info, version):  # type: (PlatformInfo, str) -> 
         platform_info.os_name,
         platform_info.architecture,
         version,
+        extension,
+    )
+
+
+def _sing_box_asset_name(platform_info, version):  # type: (PlatformInfo, str) -> str
+    extension = "zip" if platform_info.os_name == "windows" else "tar.gz"
+    return "sing-box-%s-%s-%s.%s" % (
+        version,
+        platform_info.os_name,
+        platform_info.architecture,
         extension,
     )
 
@@ -166,6 +197,13 @@ _BACKENDS = {
         executable="mihomo",
         asset_family="mihomo",
         description="Preferred default candidate pending compatibility/security PoC.",
+    ),
+    "sing-box": BackendSpec(
+        name="sing-box",
+        repository="SagerNet/sing-box",
+        executable="sing-box",
+        asset_family="sing-box",
+        description="Optional backend for native sing-box profiles.",
     ),
     "xray": BackendSpec(
         name="xray",
