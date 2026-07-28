@@ -70,3 +70,9 @@ BackendBusyError
 -----------------------------------------------------
 
 .. autoclass:: BackendBusyError
+
+
+CleanupScopeError
+-----------------------------------------------------
+
+.. autoclass:: CleanupScopeError

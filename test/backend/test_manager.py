@@ -413,6 +413,130 @@ def test_mutating_operations_share_one_backend_lock(tmp_path):
             manager.switch("mihomo", "2.0.0")
         with pytest.raises(BackendBusyError):
             manager.remove("mihomo", "2.0.0")
+        with pytest.raises(BackendBusyError):
+            manager.remove_all("mihomo")
+        with pytest.raises(BackendBusyError):
+            manager.clean("mihomo")
+
+
+def test_clean_download_cache_by_version_backend_and_all(tmp_path):
+    manager = manager_for(tmp_path)
+    paths = manager.paths
+    first = paths.downloads / "mihomo" / "1.0.0" / "first.gz"
+    second = paths.downloads / "mihomo" / "2.0.0" / "second.gz"
+    other = paths.downloads / "xray" / "1.0.0" / "other.zip"
+    for path, payload in ((first, b"one"), (second, b"two"), (other, b"other")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    exact = manager.clean("mihomo", "1.0.0")
+    assert exact.targets_removed == 1
+    assert exact.bytes_reclaimed == 3
+    assert not first.exists()
+    assert second.is_file()
+    assert other.is_file()
+
+    backend = manager.clean("mihomo")
+    assert backend.targets_removed == 1
+    assert backend.bytes_reclaimed == 3
+    assert not second.exists()
+    assert other.is_file()
+
+    everything = manager.clean()
+    assert everything.areas == ("downloads",)
+    assert everything.targets_removed == 1
+    assert everything.bytes_reclaimed == 5
+    assert list(paths.downloads.iterdir()) == []
+
+
+def test_clean_global_areas_preserves_installs_active_links_and_locks(tmp_path):
+    manager = manager_for(tmp_path)
+    installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"backend", activate=True)
+    for root, filename in (
+        (manager.paths.downloads, "archive"),
+        (manager.paths.logs, "backend.log"),
+        (manager.paths.providers, "provider.yaml"),
+        (manager.paths.runtimes, "runtime.json"),
+    ):
+        (root / filename).write_bytes(b"data")
+
+    result = manager.clean(areas=("downloads", "logs", "providers", "runtimes"))
+
+    assert result.targets_removed == 4
+    assert result.bytes_reclaimed == 16
+    assert installed.manifest.is_file()
+    assert manager.current("mihomo").version == "1.0.0"
+    assert manager.paths.locks.is_dir()
+
+
+def test_clean_is_idempotent_and_lists_cached_versions(tmp_path):
+    manager = manager_for(tmp_path)
+    cache = manager.paths.downloads / "mihomo" / "2.0.0" / "asset.gz"
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(b"asset")
+
+    assert manager.list_cached_versions("mihomo")["mihomo"] == ("2.0.0",)
+    assert manager.clean("mihomo", "2.0.0").targets_removed == 1
+    assert manager.clean("mihomo", "2.0.0").targets_removed == 0
+    assert manager.list_cached_versions("mihomo")["mihomo"] == ()
+
+
+@pytest.mark.parametrize(
+    ("name", "version", "areas", "message"),
+    [
+        (None, None, (), "cleanup areas"),
+        (None, None, ("downloads", "downloads"), "duplicates"),
+        (None, "1.0.0", ("downloads",), "requires a backend"),
+        ("mihomo", None, ("logs",), "only target downloads"),
+        (None, None, ("unknown",), "cleanup areas"),
+    ],
+)
+def test_clean_rejects_invalid_public_scopes(tmp_path, name, version, areas, message):
+    manager = manager_for(tmp_path)
+    with pytest.raises(manager_module.CleanupScopeError, match=message):
+        manager.clean(name=name, version=version, areas=areas)
+
+
+def test_cached_version_inventory_omits_unrecognized_entries(tmp_path):
+    manager = manager_for(tmp_path)
+    backend_cache = manager.paths.downloads / "mihomo"
+    (backend_cache / "not-a-release").mkdir(parents=True)
+    (backend_cache / "1.0.0").mkdir()
+
+    assert manager.list_cached_versions("mihomo")["mihomo"] == ("1.0.0",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink containment behavior")
+def test_clean_rejects_managed_symlink_without_touching_external_data(tmp_path):
+    manager = manager_for(tmp_path)
+    outside = tmp_path / "outside"
+    target = outside / "1.0.0"
+    target.mkdir(parents=True)
+    (target / "asset.gz").write_bytes(b"outside")
+    backend_cache = manager.paths.downloads / "mihomo"
+    backend_cache.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(manager_module.CleanupScopeError, match="managed symlink"):
+        manager.clean("mihomo", "1.0.0")
+    assert (target / "asset.gz").is_file()
+
+
+def test_remove_all_and_download_cleanup_share_one_result(tmp_path):
+    manager = manager_for(tmp_path)
+    install_fake_mihomo(manager, tmp_path, "1.0.0", b"one", activate=True)
+    install_fake_mihomo(manager, tmp_path, "2.0.0", b"two", activate=False)
+    cached = manager.paths.downloads / "mihomo" / "1.0.0" / "archive.gz"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"cache")
+
+    result = manager.remove_all("mihomo", downloads=True)
+
+    assert result.name == "mihomo"
+    assert set(result.versions) == {"1.0.0", "2.0.0"}
+    assert result.cleanup.targets_removed == 1
+    assert manager.list_installed("mihomo") == []
+    assert manager.current("mihomo") is None
+    assert not cached.exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink failure behavior")

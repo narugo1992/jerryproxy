@@ -39,3 +39,17 @@ ActiveBackend
 
 .. autoclass:: ActiveBackend
    :members: name,version,executable,link,link_mode
+
+
+CleanupResult
+-----------------------------------------------------
+
+.. autoclass:: CleanupResult
+   :members: areas,targets_removed,bytes_reclaimed
+
+
+RemovalResult
+-----------------------------------------------------
+
+.. autoclass:: RemovalResult
+   :members: name,versions,cleanup

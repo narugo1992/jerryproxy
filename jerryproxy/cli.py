@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 
 import click
+from InquirerPy import inquirer
+from InquirerPy.base.control import Choice
 from tabulate import tabulate
 
 from .backend import BackendManager, get_backend, iter_backends
@@ -28,6 +30,85 @@ def _paths(context):  # type: (click.Context) -> JerryProxyPaths
 
 def _manager(context):  # type: (click.Context) -> BackendManager
     return BackendManager(_paths(context))
+
+
+def _confirm_dangerous_operation(message, assume_yes):  # type: (str, bool) -> bool
+    """Confirm a destructive command through the same TUI used by v2raycli."""
+    if assume_yes:
+        return True
+    try:
+        return bool(inquirer.confirm(message=message, default=False).execute())
+    except EOFError:
+        # InquirerPy raises EOFError when no interactive input stream is available.
+        raise click.ClickException("interactive confirmation unavailable; rerun with --yes")
+    except KeyboardInterrupt:
+        # InquirerPy reports an interrupted prompt as a cancelled operation.
+        return False
+
+
+def _select(message, choices):  # type: (str, list) -> object
+    """Run one guided InquirerPy selection for an incomplete command."""
+    try:
+        return inquirer.select(message=message, choices=choices).execute()
+    except EOFError:
+        # InquirerPy raises EOFError when an incomplete command has no terminal input.
+        raise click.ClickException("interactive selection unavailable; provide complete command arguments")
+    except KeyboardInterrupt:
+        # InquirerPy reports an interrupted selection as a cancelled command.
+        raise click.ClickException("interactive selection cancelled")
+
+
+def _prompt_confirm(message, default=False):  # type: (str, bool) -> bool
+    """Collect a non-destructive boolean preference during guided mode."""
+    try:
+        return bool(inquirer.confirm(message=message, default=default).execute())
+    except EOFError:
+        # InquirerPy raises EOFError when an incomplete command has no terminal input.
+        raise click.ClickException("interactive selection unavailable; provide complete command options")
+    except KeyboardInterrupt:
+        # InquirerPy reports an interrupted preference prompt as a cancelled command.
+        raise click.ClickException("interactive selection cancelled")
+
+
+def _select_backend(message, names=None):  # type: (str, Optional[Iterable[str]]) -> str
+    allowed = set(names) if names is not None else None
+    choices = [
+        Choice(spec.name, name="%s - %s" % (spec.name, spec.description))
+        for spec in iter_backends()
+        if allowed is None or spec.name in allowed
+    ]
+    if not choices:
+        raise click.ClickException("no backend matches this interactive operation")
+    return str(_select(message, choices))
+
+
+def _select_catalog_version(manager, name):  # type: (BackendManager, str) -> Optional[str]
+    versions = manager.available(name)
+    if not versions:
+        raise click.ClickException("no compatible stable version is available for %s" % name)
+    choices = [Choice("", name="Latest compatible (%s)" % versions[0].version)]
+    choices.extend(Choice(item.version, name=item.version) for item in versions)
+    selected = str(_select("Select a stable version:", choices))
+    return selected or None
+
+
+def _select_installed_version(manager, name, allow_all=False):
+    # type: (BackendManager, str, bool) -> str
+    installed = manager.list_installed(name)
+    if not installed:
+        raise click.ClickException("no installed versions found for %s" % name)
+    active = manager.current(name)
+    choices = []
+    if allow_all:
+        choices.append(Choice("__all__", name="All installed versions"))
+    choices.extend(
+        Choice(
+            item.version,
+            name="%s%s" % (item.version, " (active)" if active and active.version == item.version else ""),
+        )
+        for item in installed
+    )
+    return str(_select("Select an installed version:", choices))
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
@@ -102,9 +183,37 @@ def self_check_command(context, color):  # type: (click.Context, bool) -> None
         raise click.ClickException("self-check failed; inspect the diagnostics above")
 
 
-@cli.group("backend")
-def backend_group():  # type: () -> None
+@cli.group("backend", invoke_without_command=True)
+@click.pass_context
+def backend_group(context):  # type: (click.Context) -> None
     """Install, inspect, switch, and remove backend versions."""
+
+    if context.invoked_subcommand is not None:
+        return
+    action = str(
+        _select(
+            "Select a backend operation:",
+            [
+                Choice("available", name="Browse available backends"),
+                Choice("versions", name="Browse stable versions"),
+                Choice("artifact", name="Inspect an exact release artifact"),
+                Choice("install", name="Install a backend"),
+                Choice("list", name="List installed backends"),
+                Choice("current", name="Show active backends"),
+                Choice("switch", name="Switch the active version"),
+                Choice("verify", name="Verify installed backends"),
+                Choice("update", name="Update a backend"),
+                Choice("remove", name="Remove installed backends"),
+                Choice("clean", name="Clean disposable backend data"),
+                Choice("supported", name="Show supported backend cores"),
+            ],
+        )
+    )
+    command = backend_group.get_command(context, action)
+    if command is None:
+        raise click.ClickException("interactive backend operation is unavailable: %s" % action)
+    with command.make_context(action, [], parent=context) as command_context:
+        command.invoke(command_context)
 
 
 @backend_group.command("supported")
@@ -181,16 +290,18 @@ def backend_available(context, as_json):
 
 
 @backend_group.command("versions")
-@click.argument("name")
+@click.argument("name", required=False)
 @click.option("--all-platforms", is_flag=True, help="List stable releases with any verified platform asset.")
 @click.option("--limit", type=click.IntRange(min=0), default=20, show_default=True, help="Maximum rows; 0 means all.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_context
 def backend_versions(context, name, all_platforms, limit, as_json):
-    # type: (click.Context, str, bool, int, bool) -> None
+    # type: (click.Context, Optional[str], bool, int, bool) -> None
     """List installable stable versions for one backend."""
 
     manager = _manager(context)
+    if name is None:
+        name = _select_backend("Select a backend to browse:")
     backend_name = get_backend(name).name
     records = []
     if all_platforms:
@@ -240,14 +351,17 @@ def backend_versions(context, name, all_platforms, limit, as_json):
 
 
 @backend_group.command("artifact")
-@click.argument("name")
+@click.argument("name", required=False)
 @click.argument("version", required=False)
 @click.pass_context
 def backend_artifact(context, name, version):
-    # type: (click.Context, str, str) -> None
+    # type: (click.Context, Optional[str], Optional[str]) -> None
     """Explain the exact artifact automatically selected for this host."""
 
     manager = _manager(context)
+    if name is None:
+        name = _select_backend("Select a backend artifact:")
+        version = _select_catalog_version(manager, name)
     artifact = manager.resolve_artifact(name, version)
     click.echo("Catalog snapshot: %s" % manager.catalog.generated_at)
     click.echo("Backend: %s" % artifact.backend)
@@ -283,15 +397,19 @@ def backend_list(context, name):  # type: (click.Context, str) -> None
 
 
 @backend_group.command("install")
-@click.argument("name")
+@click.argument("name", required=False)
 @click.argument("version", required=False)
 @click.option("--activate/--no-activate", default=True, show_default=True)
 @click.pass_context
 def backend_install(context, name, version, activate):
-    # type: (click.Context, str, str, bool) -> None
+    # type: (click.Context, Optional[str], Optional[str], bool) -> None
     """Download, verify, install, and optionally activate a backend release."""
 
     manager = _manager(context)
+    if name is None:
+        name = _select_backend("Select a backend to install:")
+        version = _select_catalog_version(manager, name)
+        activate = _prompt_confirm("Activate this version after installation?", default=activate)
     asset = manager.resolve_artifact(name, version)
     click.echo("Selected %s %s for %s" % (asset.backend, asset.version, manager.platform_info.key))
     click.echo("Official asset: %s" % asset.name)
@@ -305,11 +423,13 @@ def backend_install(context, name, version, activate):
 
 
 @backend_group.command("update")
-@click.argument("name")
+@click.argument("name", required=False)
 @click.pass_context
-def backend_update(context, name):  # type: (click.Context, str) -> None
+def backend_update(context, name):  # type: (click.Context, Optional[str]) -> None
     """Install and activate the newest compatible catalog release."""
 
+    if name is None:
+        name = _select_backend("Select a backend to update:")
     installed = _manager(context).update(name)
     click.echo("Updated and active: %s %s" % (installed.name, installed.version))
 
@@ -331,13 +451,20 @@ def backend_verify(context, name):  # type: (click.Context, str) -> None
 
 
 @backend_group.command("switch")
-@click.argument("name")
-@click.argument("version")
+@click.argument("name", required=False)
+@click.argument("version", required=False)
 @click.pass_context
-def backend_switch(context, name, version):  # type: (click.Context, str, str) -> None
+def backend_switch(context, name, version):
+    # type: (click.Context, Optional[str], Optional[str]) -> None
     """Atomically activate an installed backend version."""
 
-    active = _manager(context).switch(name, version)
+    manager = _manager(context)
+    if name is None:
+        installed_names = {item.name for item in manager.list_installed()}
+        name = _select_backend("Select an installed backend:", installed_names)
+    if version is None:
+        version = _select_installed_version(manager, name)
+    active = manager.switch(name, version)
     click.echo("Active: %s %s" % (active.name, active.version))
     click.echo("Link: %s (%s)" % (active.link, active.link_mode))
 
@@ -361,16 +488,140 @@ def backend_current(context, name):  # type: (click.Context, str) -> None
 
 
 @backend_group.command("remove")
-@click.argument("name")
-@click.argument("version")
+@click.argument("name", required=False)
+@click.argument("version", required=False)
+@click.option("-A", "--all", "all_versions", is_flag=True, help="Remove every installed version of this backend.")
 @click.option("--force", is_flag=True, help="Also deactivate this exact version.")
+@click.option("--downloads", is_flag=True, help="Also remove matching cached release downloads.")
+@click.option("-y", "--yes", is_flag=True, help="Skip the destructive-operation confirmation.")
 @click.pass_context
-def backend_remove(context, name, version, force):
-    # type: (click.Context, str, str, bool) -> None
-    """Remove one immutable installed backend version."""
+def backend_remove(context, name, version, all_versions, force, downloads, yes):
+    # type: (click.Context, Optional[str], Optional[str], bool, bool, bool, bool) -> None
+    """Remove one or all immutable installed backend versions."""
 
-    _manager(context).remove(name, version, force=force)
-    click.echo("Removed: %s %s" % (name, version))
+    manager = _manager(context)
+    guided = name is None or (version is None and not all_versions)
+    if name is None:
+        installed_names = {item.name for item in manager.list_installed()}
+        name = _select_backend("Select a backend to remove:", installed_names)
+    if version is not None and all_versions:
+        raise click.UsageError("provide VERSION or -A/--all, but not both")
+    if version is None and not all_versions:
+        selected = _select_installed_version(manager, name, allow_all=True)
+        if selected == "__all__":
+            all_versions = True
+        else:
+            version = selected
+    if guided and not downloads:
+        downloads = _prompt_confirm("Also remove matching cached downloads?", default=False)
+    if all_versions and force:
+        raise click.UsageError("--force only applies to one exact VERSION")
+    if guided and not all_versions:
+        active = manager.current(name)
+        if active is not None and active.version == version:
+            force = True
+    target = "%s (all installed versions)" % name if all_versions else "%s %s" % (name, version)
+    extras = " and matching downloads" if downloads else ""
+    if not _confirm_dangerous_operation("Remove %s%s?" % (target, extras), yes):
+        click.echo("Cancelled.")
+        return
+
+    if all_versions:
+        result = manager.remove_all(name, downloads=downloads)
+    else:
+        result = manager.remove(name, version, force=force, downloads=downloads)
+    versions = ", ".join(result.versions) if result.versions else "none"
+    click.echo("Removed %s installed version(s): %s" % (len(result.versions), versions))
+    if downloads:
+        click.echo(
+            "Cleaned downloads: %d target(s), %s reclaimed"
+            % (result.cleanup.targets_removed, _format_size(result.cleanup.bytes_reclaimed))
+        )
+
+
+@backend_group.command("clean")
+@click.argument("name", required=False)
+@click.argument("version", required=False)
+@click.option("--downloads", is_flag=True, help="Clean verified release archives (the default area).")
+@click.option("--logs", is_flag=True, help="Clean all JerryProxy and backend logs.")
+@click.option("--providers", is_flag=True, help="Clean all stored subscription provider data.")
+@click.option("--runtimes", is_flag=True, help="Clean all generated runtime data.")
+@click.option("-A", "--all", "all_areas", is_flag=True, help="Clean downloads, logs, providers, and runtimes.")
+@click.option("-y", "--yes", is_flag=True, help="Skip the destructive-operation confirmation.")
+@click.pass_context
+def backend_clean(context, name, version, downloads, logs, providers, runtimes, all_areas, yes):
+    # type: (click.Context, Optional[str], Optional[str], bool, bool, bool, bool, bool, bool) -> None
+    """Reclaim selected disposable data below the JerryProxy home."""
+
+    manager = _manager(context)
+    selected = [
+        area
+        for area, enabled in (
+            ("downloads", downloads),
+            ("logs", logs),
+            ("providers", providers),
+            ("runtimes", runtimes),
+        )
+        if enabled
+    ]
+    guided = name is None and version is None and not selected and not all_areas
+    if guided:
+        cleanup_scope = str(
+            _select(
+                "Select data to clean:",
+                [
+                    Choice("downloads-version", name="One cached backend version"),
+                    Choice("downloads-backend", name="All downloads for one backend"),
+                    Choice("downloads", name="All backend downloads"),
+                    Choice("logs", name="All logs"),
+                    Choice("providers", name="All subscription provider data"),
+                    Choice("runtimes", name="All generated runtime data"),
+                    Choice("all", name="All disposable JerryProxy data"),
+                ],
+            )
+        )
+        if cleanup_scope in ("downloads-version", "downloads-backend"):
+            cached = manager.list_cached_versions()
+            names = {backend_name for backend_name, versions in cached.items() if versions}
+            name = _select_backend("Select a backend cache:", names)
+            if cleanup_scope == "downloads-version":
+                version = str(
+                    _select(
+                        "Select a cached version:",
+                        [Choice(item, name=item) for item in cached[name]],
+                    )
+                )
+            selected = ["downloads"]
+        elif cleanup_scope == "all":
+            all_areas = True
+        else:
+            selected = [cleanup_scope]
+    if all_areas and selected:
+        raise click.UsageError("-A/--all cannot be combined with individual cleanup areas")
+    if name is not None and (all_areas or any(area != "downloads" for area in selected)):
+        raise click.UsageError("backend-scoped cleanup can only target downloads")
+    if version is not None and name is None:
+        raise click.UsageError("a cleanup VERSION requires NAME")
+    if all_areas:
+        selected = ["downloads", "logs", "providers", "runtimes"]
+    elif not selected:
+        selected = ["downloads"]
+
+    if version is not None:
+        scope = "%s %s downloads" % (name, version)
+    elif name is not None:
+        scope = "%s downloads" % name
+    else:
+        scope = ", ".join(selected)
+    if not _confirm_dangerous_operation("Clean %s?" % scope, yes):
+        click.echo("Cancelled.")
+        return
+
+    result = manager.clean(name=name, version=version, areas=selected)
+    click.echo(
+        "Cleaned %s: %d target(s), %s reclaimed"
+        % (", ".join(result.areas), result.targets_removed, _format_size(result.bytes_reclaimed))
+    )
 
 
 def main():  # type: () -> int

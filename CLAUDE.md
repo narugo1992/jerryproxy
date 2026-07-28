@@ -93,12 +93,28 @@ authentication, extraction, process, or permission errors to warnings.
   byte progress/status display on stderr. Preserve system proxy/CA behavior,
   keep stdout machine-readable, and retain deterministic injection points for
   unit tests.
+- Keep `urllib3` below 2 while Python 3.7/OpenSSL 1.1.0 standalone build
+  compatibility remains a target; use the latest patched 1.26 release floor.
 - Install through a private staging directory and atomically rename only after
   validation succeeds.
 - Never overwrite an installed version with different bytes.
 - A failed install or switch must leave the previous active backend usable.
 - Do not auto-update or execute a newly downloaded backend without an explicit
   user operation and a tested version policy.
+- Backend cleanup may empty only `downloads`, `logs`, `providers`, and
+  `runtimes`. It must never treat `backends`, `bin`, `active`, or `locks` as
+  disposable. Backend/version-scoped cleanup applies only to downloads.
+- Cleanup must reject managed symlink components, share backend locks with
+  downloads/install/removal, remain idempotent for missing targets, and never
+  escape the configured JerryProxy home.
+- Home initialization must reject symlinked managed subdirectories before
+  applying permissions or performing any mutation through them.
+- Destructive removal and cleanup require an `InquirerPy` confirmation. The
+  `-y/--yes` bypass exists for complete non-interactive commands and must not
+  infer a missing backend, version, or cleanup scope.
+- Keep complete backend commands deterministic for automation. Missing targets
+  may enter guided `InquirerPy` selection, while established no-argument
+  read-only commands retain their all-backend meaning.
 
 ## Secrets and state
 

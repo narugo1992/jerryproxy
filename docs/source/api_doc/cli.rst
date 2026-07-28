@@ -109,6 +109,12 @@ backend\_remove
 .. autofunction:: backend_remove
 
 
+backend\_clean
+-----------------------------------------------------
+
+.. autofunction:: backend_clean
+
+
 main
 -----------------------------------------------------
 

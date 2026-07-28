@@ -78,12 +78,12 @@ jobs:
         run: |
           python -m jerryproxy --home backend-home backend update "${{ matrix.backend }}"
           if python -m jerryproxy --home backend-home backend remove "${{ matrix.backend }}" \
-            "$(python -m jerryproxy backend versions "${{ matrix.backend }}" --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"; then
+            "$(python -m jerryproxy backend versions "${{ matrix.backend }}" --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')" -y; then
             echo "Active backend removal unexpectedly succeeded without --force" >&2
             exit 1
           fi
           version="$(python -m jerryproxy backend versions "${{ matrix.backend }}" --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
-          python -m jerryproxy --home backend-home backend remove "${{ matrix.backend }}" "$version" --force
+          python -m jerryproxy --home backend-home backend remove "${{ matrix.backend }}" "$version" --force -y
           python -m jerryproxy --home backend-home backend current "${{ matrix.backend }}"
 
   musl-lifecycle:

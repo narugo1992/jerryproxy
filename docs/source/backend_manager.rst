@@ -34,6 +34,64 @@ installing:
    jerryproxy backend update mihomo
    jerryproxy backend verify
 
+Interactive and automated use
+-----------------------------
+
+Running ``jerryproxy backend`` opens an ``InquirerPy`` operation menu. A
+backend command with a missing target also guides the remaining choices:
+
+.. code-block:: shell
+
+   jerryproxy backend
+   jerryproxy backend install
+   jerryproxy backend artifact
+   jerryproxy backend switch
+   jerryproxy backend remove
+   jerryproxy backend clean
+
+Supplying the complete positional target and options skips selection prompts,
+so the same commands remain deterministic for scripts. Read-only commands
+whose no-argument meaning is already complete keep that behavior:
+``available`` and ``supported`` show the catalog, while ``list``, ``current``,
+and ``verify`` operate across all installed backends.
+
+Removal and cleanup
+-------------------
+
+Destructive commands always show one final ``InquirerPy`` confirmation unless
+``-y/--yes`` is explicit. Remove one inactive version, force removal of one
+active version, or remove every version of one backend:
+
+.. code-block:: shell
+
+   jerryproxy backend remove mihomo 1.19.29
+   jerryproxy backend remove mihomo 1.19.29 --force
+   jerryproxy backend remove mihomo -A
+   jerryproxy backend remove mihomo -A --downloads
+
+``--downloads`` removes the matching verified release cache in the same
+operation. ``-A`` deactivates the backend before deleting all of its immutable
+version directories. In non-interactive automation, add ``-y`` only after
+specifying the complete target.
+
+Cleanup can target one cached backend version, one backend cache, selected
+global areas, all downloads, or every disposable area:
+
+.. code-block:: shell
+
+   jerryproxy backend clean mihomo 1.19.29
+   jerryproxy backend clean mihomo
+   jerryproxy backend clean --downloads
+   jerryproxy backend clean --logs --runtimes
+   jerryproxy backend clean -A
+
+``clean -A`` empties ``downloads``, ``logs``, ``providers``, and ``runtimes``.
+It never deletes ``backends``, ``bin``, ``active``, or ``locks``. Backend and
+version scopes apply only to downloads because the other state areas do not
+yet have a stable per-backend ownership layout. Empty targets are idempotent.
+Managed symlink components are rejected instead of followed, and download
+cleanup shares the same backend operation locks as installation and removal.
+
 Activation uses an atomic relative symbolic link on Unix-like systems. Windows
 without symlink privilege receives an atomic verified executable copy; the
 active manifest records the selected version and ``link_mode`` so this

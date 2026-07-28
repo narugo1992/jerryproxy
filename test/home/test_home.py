@@ -1,6 +1,9 @@
 import os
 from pathlib import Path
 
+import pytest
+
+from jerryproxy.errors import IntegrityError
 from jerryproxy.home import JerryProxyPaths, resolve_home
 
 
@@ -32,3 +35,16 @@ def test_paths_create_single_private_tree(tmp_path):
     assert all(path.is_dir() for path in expected)
     if os.name == "posix":
         assert all((path.stat().st_mode & 0o777) == 0o700 for path in expected)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink containment behavior")
+def test_paths_reject_managed_directory_symlink_before_permission_changes(tmp_path):
+    root = tmp_path / "home"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir(mode=0o755)
+    (root / "downloads").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(IntegrityError, match="must not be a symlink"):
+        JerryProxyPaths(root).ensure()
+    assert outside.stat().st_mode & 0o777 == 0o755

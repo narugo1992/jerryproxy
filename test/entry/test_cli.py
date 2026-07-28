@@ -3,6 +3,7 @@ import hashlib
 import json
 import runpy
 import sys
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -215,9 +216,285 @@ def test_backend_inventory_switch_and_remove_commands(tmp_path, monkeypatch):
     assert "EXECUTABLE SHA256" in verified.output
     assert "mihomo" in verified.output
 
-    removed = runner.invoke(cli, ["--home", str(home), "backend", "remove", "mihomo", "1.0.0"])
+    removed = runner.invoke(cli, ["--home", str(home), "backend", "remove", "mihomo", "1.0.0", "-y"])
     assert removed.exit_code == 0
-    assert "Removed: mihomo 1.0.0" in removed.output
+    assert "Removed 1 installed version(s): 1.0.0" in removed.output
+
+
+def test_backend_remove_confirmation_rejection_preserves_installed_version(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    installed = install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=False)
+
+    class Prompt(object):
+        def execute(self):
+            return False
+
+    monkeypatch.setattr(cli_module.inquirer, "confirm", lambda **kwargs: Prompt())
+    result = CliRunner().invoke(cli, ["--home", str(home), "backend", "remove", "mihomo", "1.0.0"])
+
+    assert result.exit_code == 0
+    assert "Cancelled." in result.output
+    assert installed.manifest.is_file()
+
+
+def test_backend_remove_yes_bypasses_prompt_and_cleans_matching_downloads(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=False)
+    cached = home / "downloads" / "mihomo" / "1.0.0" / "archive.gz"
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"cache")
+
+    def unexpected_prompt(**kwargs):
+        raise AssertionError("-y must bypass InquirerPy confirmation")
+
+    monkeypatch.setattr(cli_module.inquirer, "confirm", unexpected_prompt)
+    result = CliRunner().invoke(
+        cli,
+        ["--home", str(home), "backend", "remove", "mihomo", "1.0.0", "--downloads", "-y"],
+    )
+
+    assert result.exit_code == 0
+    assert "Cleaned downloads: 1 target(s), 5.0 B reclaimed" in result.output
+    assert not cached.exists()
+
+
+def test_backend_remove_all_deactivates_and_removes_every_version(tmp_path):
+    home = tmp_path / "home"
+    install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=True)
+    install_fake_mihomo(home, tmp_path, "2.0.0", b"two", activate=False)
+
+    result = CliRunner().invoke(cli, ["--home", str(home), "backend", "remove", "mihomo", "-A", "-y"])
+
+    assert result.exit_code == 0
+    assert "Removed 2 installed version(s)" in result.output
+    assert not (home / "backends" / "mihomo").exists()
+    assert not (home / "active" / "mihomo.json").exists()
+    assert not (home / "bin" / "mihomo").exists()
+
+
+def test_backend_clean_explicit_areas_and_yes_are_noninteractive(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    paths = JerryProxyPaths(home)
+    paths.ensure()
+    (paths.logs / "backend.log").write_bytes(b"log")
+    (paths.runtimes / "runtime.json").write_bytes(b"runtime")
+    preserved = paths.backends / "mihomo" / "1.0.0" / "manifest.json"
+    preserved.parent.mkdir(parents=True)
+    preserved.write_text("{}", encoding="ascii")
+
+    def unexpected_prompt(**kwargs):
+        raise AssertionError("-y must bypass InquirerPy confirmation")
+
+    monkeypatch.setattr(cli_module.inquirer, "confirm", unexpected_prompt)
+    result = CliRunner().invoke(
+        cli,
+        ["--home", str(home), "backend", "clean", "--logs", "--runtimes", "-y"],
+    )
+
+    assert result.exit_code == 0
+    assert "Cleaned logs, runtimes: 2 target(s), 10.0 B reclaimed" in result.output
+    assert list(paths.logs.iterdir()) == []
+    assert list(paths.runtimes.iterdir()) == []
+    assert preserved.is_file()
+
+
+def test_backend_clean_short_command_guides_scope_then_confirms(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    cached = home / "downloads" / "mihomo" / "1.0.0" / "archive.gz"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"cache")
+    selections = iter(["downloads-version", "1.0.0"])
+    confirmations = []
+
+    monkeypatch.setattr(cli_module, "_select", lambda message, choices: next(selections))
+    monkeypatch.setattr(cli_module, "_select_backend", lambda message, names=None: "mihomo")
+    monkeypatch.setattr(
+        cli_module,
+        "_confirm_dangerous_operation",
+        lambda message, assume_yes: confirmations.append(message) or True,
+    )
+    result = CliRunner().invoke(cli, ["--home", str(home), "backend", "clean"])
+
+    assert result.exit_code == 0
+    assert confirmations == ["Clean mihomo 1.0.0 downloads?"]
+    assert not cached.exists()
+
+
+def test_backend_group_short_command_dispatches_selected_operation(tmp_path, monkeypatch):
+    class Prompt(object):
+        def execute(self):
+            return "list"
+
+    monkeypatch.setattr(cli_module.inquirer, "select", lambda **kwargs: Prompt())
+
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend"])
+
+    assert result.exit_code == 0
+    assert "No backend versions installed." in result.output
+
+
+def test_guided_artifact_uses_real_inquirer_selection_boundary(tmp_path, monkeypatch):
+    selections = iter(["mihomo", ""])
+    prompts = []
+
+    class Prompt(object):
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    def select(**kwargs):
+        prompts.append(kwargs["message"])
+        return Prompt(next(selections))
+
+    monkeypatch.setattr(cli_module.inquirer, "select", select)
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "artifact"])
+
+    assert result.exit_code == 0
+    assert prompts == ["Select a backend artifact:", "Select a stable version:"]
+    assert "Backend: mihomo" in result.output
+
+
+def test_guided_remove_selects_active_version_and_final_confirmation(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=True)
+    selections = iter(["mihomo", "1.0.0"])
+    confirmations = iter([False, True])
+
+    class Prompt(object):
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    monkeypatch.setattr(
+        cli_module.inquirer,
+        "select",
+        lambda **kwargs: Prompt(next(selections)),
+    )
+    monkeypatch.setattr(
+        cli_module.inquirer,
+        "confirm",
+        lambda **kwargs: Prompt(next(confirmations)),
+    )
+    result = CliRunner().invoke(cli, ["--home", str(home), "backend", "remove"])
+
+    assert result.exit_code == 0
+    assert "Removed 1 installed version(s): 1.0.0" in result.output
+    assert not (home / "active" / "mihomo.json").exists()
+
+
+def test_guided_update_selects_backend_before_public_manager_call(tmp_path, monkeypatch):
+    calls = []
+
+    class Manager(object):
+        def update(self, name):
+            calls.append(name)
+            return SimpleNamespace(name=name, version="1.0.0")
+
+    monkeypatch.setattr(cli_module, "_manager", lambda context: Manager())
+    monkeypatch.setattr(cli_module, "_select_backend", lambda message: "mihomo")
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "update"])
+
+    assert result.exit_code == 0
+    assert calls == ["mihomo"]
+    assert "Updated and active: mihomo 1.0.0" in result.output
+
+
+def test_incomplete_command_reports_unavailable_interactive_input(tmp_path, monkeypatch):
+    class Prompt(object):
+        def execute(self):
+            raise EOFError()
+
+    monkeypatch.setattr(cli_module.inquirer, "select", lambda **kwargs: Prompt())
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "versions"])
+
+    assert result.exit_code == 1
+    assert "interactive selection unavailable" in result.output
+
+
+def test_destructive_command_reports_unavailable_confirmation(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=False)
+
+    class Prompt(object):
+        def execute(self):
+            raise EOFError()
+
+    monkeypatch.setattr(cli_module.inquirer, "confirm", lambda **kwargs: Prompt())
+    result = CliRunner().invoke(cli, ["--home", str(home), "backend", "remove", "mihomo", "1.0.0"])
+
+    assert result.exit_code == 1
+    assert "interactive confirmation unavailable; rerun with --yes" in result.output
+
+
+def test_guided_commands_report_empty_installed_inventory(tmp_path):
+    switch = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "switch"])
+    remove = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "remove", "mihomo"])
+
+    assert switch.exit_code == 1
+    assert "no backend matches this interactive operation" in switch.output
+    assert remove.exit_code == 1
+    assert "no installed versions found for mihomo" in remove.output
+
+
+def test_clean_all_and_invalid_option_combinations(tmp_path):
+    home = tmp_path / "home"
+    paths = JerryProxyPaths(home)
+    paths.ensure()
+    (paths.providers / "provider.yaml").write_bytes(b"provider")
+
+    cleaned = CliRunner().invoke(cli, ["--home", str(home), "backend", "clean", "-A", "-y"])
+    combined = CliRunner().invoke(cli, ["--home", str(home), "backend", "clean", "-A", "--logs", "-y"])
+    scoped = CliRunner().invoke(cli, ["--home", str(home), "backend", "clean", "mihomo", "--logs", "-y"])
+
+    assert cleaned.exit_code == 0
+    assert "Cleaned downloads, logs, providers, runtimes" in cleaned.output
+    assert not (paths.providers / "provider.yaml").exists()
+    assert combined.exit_code == 2
+    assert "cannot be combined" in combined.output
+    assert scoped.exit_code == 2
+    assert "backend-scoped cleanup can only target downloads" in scoped.output
+
+
+def test_clean_confirmation_rejection_preserves_cache(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    cached = home / "downloads" / "mihomo" / "1.0.0" / "archive.gz"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"cache")
+
+    class Prompt(object):
+        def execute(self):
+            return False
+
+    monkeypatch.setattr(cli_module.inquirer, "confirm", lambda **kwargs: Prompt())
+    result = CliRunner().invoke(cli, ["--home", str(home), "backend", "clean", "mihomo"])
+
+    assert result.exit_code == 0
+    assert "Cancelled." in result.output
+    assert cached.is_file()
+
+
+def test_backend_switch_short_command_selects_installed_target(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=False)
+
+    def manager(context):
+        return BackendManager(
+            JerryProxyPaths.from_value(context.obj.get("home")),
+            probe_runner=lambda installed: None,
+        )
+
+    monkeypatch.setattr(cli_module, "_manager", manager)
+    monkeypatch.setattr(cli_module, "_select_backend", lambda message, names=None: "mihomo")
+    monkeypatch.setattr(cli_module, "_select_installed_version", lambda manager, name: "1.0.0")
+
+    result = CliRunner().invoke(cli, ["--home", str(home), "backend", "switch"])
+
+    assert result.exit_code == 0
+    assert "Active: mihomo 1.0.0" in result.output
 
 
 def test_current_reports_empty_backend(tmp_path):

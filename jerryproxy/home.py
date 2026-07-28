@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+from .errors import IntegrityError
+
 HOME_ENVIRONMENT_VARIABLE = "JERRYPROXY_HOME"
 
 
@@ -73,6 +75,10 @@ class JerryProxyPaths(object):
             self.locks,
             self.active,
         ):
+            if path != self.root and path.is_symlink():
+                raise IntegrityError("managed JerryProxy home path must not be a symlink: %s" % path)
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if path != self.root and path.is_symlink():
+                raise IntegrityError("managed JerryProxy home path must not be a symlink: %s" % path)
             if os.name == "posix":
                 path.chmod(0o700)

@@ -1,9 +1,11 @@
 """Backend download, immutable installation, activation, and rollback."""
 
+import errno
 import os
 import shutil
 import subprocess
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from ..errors import (
     BackendActiveError,
     BackendAlreadyInstalledError,
     BackendNotInstalledError,
+    CleanupScopeError,
     IntegrityError,
     UnsupportedBackendError,
     UnsupportedPlatformError,
@@ -21,7 +24,7 @@ from .archive import extract_archive, find_executable
 from .catalog import BackendCatalog
 from .download import AssetDownloader
 from .lock import BackendOperationLock
-from .model import ActiveBackend, InstalledBackend
+from .model import ActiveBackend, CleanupResult, InstalledBackend, RemovalResult
 from .platform import detect_platform
 from .registry import get_backend, iter_backend_platforms, iter_backends, version_sort_key
 
@@ -377,22 +380,179 @@ class BackendManager(object):
                 active.append(item)
         return active
 
-    def remove(self, name, version, force=False):  # type: (str, str, bool) -> None
+    def remove(self, name, version, force=False, downloads=False):
+        # type: (str, str, bool, bool) -> RemovalResult
+        """Remove one installed version and optionally its cached downloads."""
+
         spec = get_backend(name)
+        normalized_version = spec.normalize_version(version)
         with BackendOperationLock(self._lock_path(spec.name)):
-            installed = self.get_installed(spec.name, version)
+            cleanup_targets = self._download_cleanup_targets(spec.name, normalized_version) if downloads else []
+            installed = self.get_installed(spec.name, normalized_version)
             active = self.current(spec.name)
             if active is not None and active.version == installed.version:
                 if not force:
                     raise BackendActiveError(
                         "%s %s is active; switch versions or use --force" % (spec.name, installed.version)
                     )
-                if os.path.lexists(str(active.link)):
-                    active.link.unlink()
-                active_manifest = self.paths.active / ("%s.json" % spec.name)
-                if active_manifest.exists():
-                    active_manifest.unlink()
+                self._deactivate(active)
             shutil.rmtree(str(installed.manifest.parent))
+            self._remove_empty_directory(installed.manifest.parent.parent)
+            cleanup = (
+                self._remove_cleanup_targets(("downloads",), cleanup_targets)
+                if downloads
+                else CleanupResult((), 0, 0)
+            )
+        return RemovalResult(spec.name, (installed.version,), cleanup)
+
+    def remove_all(self, name, downloads=False):  # type: (str, bool) -> RemovalResult
+        """Remove every installed version of one backend and deactivate it."""
+
+        spec = get_backend(name)
+        with BackendOperationLock(self._lock_path(spec.name)):
+            cleanup_targets = self._download_cleanup_targets(spec.name, None) if downloads else []
+            installed = self.list_installed(spec.name)
+            active = self.current(spec.name)
+            if active is not None:
+                self._deactivate(active)
+            for item in installed:
+                shutil.rmtree(str(item.manifest.parent))
+            self._remove_empty_directory(self.paths.backends / spec.name)
+            cleanup = (
+                self._remove_cleanup_targets(("downloads",), cleanup_targets)
+                if downloads
+                else CleanupResult((), 0, 0)
+            )
+        return RemovalResult(spec.name, tuple(item.version for item in installed), cleanup)
+
+    def clean(self, name=None, version=None, areas=None):
+        # type: (Optional[str], Optional[str], Optional[Iterable[str]]) -> CleanupResult
+        """Remove selected disposable data without touching installed backends."""
+
+        selected_areas = tuple(("downloads",) if areas is None else areas)
+        allowed_areas = ("downloads", "logs", "providers", "runtimes")
+        if not selected_areas or any(area not in allowed_areas for area in selected_areas):
+            raise CleanupScopeError("cleanup areas must be selected from: %s" % ", ".join(allowed_areas))
+        if len(set(selected_areas)) != len(selected_areas):
+            raise CleanupScopeError("cleanup areas must not contain duplicates")
+        if version is not None and name is None:
+            raise CleanupScopeError("a cleanup version requires a backend name")
+        if name is not None and selected_areas != ("downloads",):
+            raise CleanupScopeError("backend-scoped cleanup can only target downloads")
+
+        normalized_name = None
+        normalized_version = None
+        if name is not None:
+            spec = get_backend(name)
+            normalized_name = spec.name
+            if version is not None:
+                normalized_version = spec.normalize_version(version)
+
+        lock_names = []
+        if "downloads" in selected_areas:
+            lock_names = [normalized_name] if normalized_name else [spec.name for spec in iter_backends()]
+        with ExitStack() as stack:
+            for lock_name in lock_names:
+                stack.enter_context(BackendOperationLock(self._lock_path(lock_name)))
+            targets = []
+            for area in selected_areas:
+                if area == "downloads":
+                    targets.extend(self._download_cleanup_targets(normalized_name, normalized_version))
+                else:
+                    targets.extend(self._area_cleanup_targets(area))
+            return self._remove_cleanup_targets(selected_areas, targets)
+
+    def list_cached_versions(self, name=None):  # type: (Optional[str]) -> dict
+        """Return exact cached release versions grouped by backend name."""
+
+        names = [get_backend(name).name] if name is not None else [spec.name for spec in iter_backends()]
+        cached = {}
+        for backend_name in names:
+            backend_root = self.paths.downloads / backend_name
+            self._validate_cleanup_chain(self.paths.downloads, backend_root)
+            versions = []
+            if backend_root.exists():
+                for candidate in backend_root.iterdir():
+                    self._validate_cleanup_chain(self.paths.downloads, candidate)
+                    try:
+                        normalized = get_backend(backend_name).normalize_version(candidate.name)
+                        version_sort_key(normalized)
+                    except ValueError:
+                        # Non-release cache entries are omitted from exact-version selection.
+                        continue
+                    if normalized == candidate.name:
+                        versions.append(normalized)
+            cached[backend_name] = tuple(sorted(versions, key=version_sort_key, reverse=True))
+        return cached
+
+    def _deactivate(self, active):  # type: (ActiveBackend) -> None
+        if os.path.lexists(str(active.link)):
+            active.link.unlink()
+        active_manifest = self.paths.active / ("%s.json" % active.name)
+        if active_manifest.exists():
+            active_manifest.unlink()
+
+    def _download_cleanup_targets(self, name, version):
+        # type: (Optional[str], Optional[str]) -> List[Path]
+        root = self.paths.downloads
+        if name is None:
+            return self._area_cleanup_targets("downloads")
+        backend_root = root / name
+        self._validate_cleanup_chain(root, backend_root)
+        if version is None:
+            return [backend_root] if os.path.lexists(str(backend_root)) else []
+        target = backend_root / version
+        self._validate_cleanup_chain(root, target)
+        return [target] if os.path.lexists(str(target)) else []
+
+    def _area_cleanup_targets(self, area):  # type: (str) -> List[Path]
+        root = getattr(self.paths, area)
+        self._validate_cleanup_chain(root, root)
+        return list(root.iterdir())
+
+    def _validate_cleanup_chain(self, root, target):  # type: (Path, Path) -> None
+        current = target
+        while True:
+            if current.is_symlink():
+                raise CleanupScopeError("refusing cleanup through managed symlink: %s" % current)
+            if current == root:
+                return
+            if current == self.paths.root or current.parent == current:
+                raise CleanupScopeError("cleanup target escapes managed area: %s" % target)
+            current = current.parent
+
+    def _remove_cleanup_targets(self, areas, targets):
+        # type: (Iterable[str], Iterable[Path]) -> CleanupResult
+        removed = 0
+        reclaimed = 0
+        for target in targets:
+            if not os.path.lexists(str(target)):
+                continue
+            reclaimed += self._path_size(target)
+            if target.is_symlink() or not target.is_dir():
+                target.unlink()
+            else:
+                shutil.rmtree(str(target))
+            removed += 1
+        return CleanupResult(tuple(areas), removed, reclaimed)
+
+    @classmethod
+    def _path_size(cls, path):  # type: (Path) -> int
+        if path.is_symlink() or not path.is_dir():
+            return path.lstat().st_size
+        return sum(cls._path_size(child) for child in path.iterdir())
+
+    @staticmethod
+    def _remove_empty_directory(path):  # type: (Path) -> None
+        try:
+            path.rmdir()
+        except FileNotFoundError:
+            # Another cleanup path may already have removed this empty parent.
+            return
+        except OSError as error:
+            # A non-empty parent is intentionally preserved; other filesystem errors remain fatal.
+            if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                raise
 
     def _lock_path(self, name):  # type: (str) -> Path
         return self.paths.locks / ("backend-%s.lock" % name)

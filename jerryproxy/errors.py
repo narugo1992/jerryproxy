@@ -43,3 +43,7 @@ class BackendActiveError(JerryProxyError):
 
 class BackendBusyError(JerryProxyError):
     """Raised when another backend operation owns the installation lock."""
+
+
+class CleanupScopeError(JerryProxyError):
+    """Raised when a cleanup target is invalid or escapes its managed area."""

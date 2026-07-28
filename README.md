@@ -32,6 +32,11 @@ Implemented now:
 - relative symbolic links on supported systems and an atomic executable-copy
   fallback where Windows symlink privileges are unavailable;
 - an active-version manifest that records the selected version and link mode;
+- guided `InquirerPy` backend menus for short commands while complete command
+  arguments remain suitable for scripts and automation;
+- confirmed single-version or whole-backend removal, with optional matching
+  download-cache cleanup;
+- scoped cleanup for downloads, logs, providers, and generated runtime data;
 - a lightweight packaged-CLI self-check with isolated failure diagnostics;
 - two-stage standalone validation that builds Linux in a pinned Python 3.7
   Docker image and executes every downloaded artifact in clean environments;
@@ -106,6 +111,12 @@ jerryproxy backend versions mihomo --limit 5
 jerryproxy backend artifact mihomo
 ```
 
+Run `jerryproxy backend` for a guided operation menu. Commands whose target is
+omitted, such as `backend install`, `backend switch`, `backend remove`, and
+`backend clean`, use `InquirerPy` to collect the missing choices. Supplying the
+complete target and options keeps the command deterministic and suitable for
+shell scripts.
+
 Install and activate the newest verified stable version for this host:
 
 ```shell
@@ -153,7 +164,32 @@ Remove an inactive version:
 jerryproxy backend remove mihomo 1.19.29
 ```
 
-Removing the active version fails closed unless `--force` is explicit.
+Every removal and cleanup asks for a final destructive-operation confirmation.
+Use `-y/--yes` only in automation where the complete target is already known.
+Removing one active version also requires `--force`; selecting that active
+version through guided mode makes the deactivation part of the confirmed
+operation.
+
+Remove every installed Mihomo version, deactivate it, and also discard its
+cached release archives:
+
+```shell
+jerryproxy backend remove mihomo -A --downloads
+```
+
+Clean one cached release, all downloads for one backend, or selected global
+data areas:
+
+```shell
+jerryproxy backend clean mihomo 1.19.29
+jerryproxy backend clean mihomo
+jerryproxy backend clean --logs --runtimes
+jerryproxy backend clean -A
+```
+
+`clean -A` empties `downloads`, `logs`, `providers`, and `runtimes`. It never
+removes installed versions, active links, manifests, or operation locks; use
+`backend remove` for installations.
 
 ## Directory layout
 
@@ -280,6 +316,7 @@ and report the loopback HTTP/SOCKS endpoint.
 - [x] Implement safe archive extraction and immutable manifests.
 - [x] Add lightweight self-check and clean-runner standalone artifact gates.
 - [x] Add tested stable-only offline backend catalogs and weekly maintenance.
+- [x] Add guided backend operations and confirmed scoped cleanup/removal.
 - [ ] Add offline archive installation with an explicit digest.
 - [ ] Implement managed subscription fetch and private file providers.
 - [ ] Implement the Mihomo runtime driver and authenticated controller client.

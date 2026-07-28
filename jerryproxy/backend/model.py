@@ -111,3 +111,21 @@ class ActiveBackend:
     executable: Path
     link: Path
     link_mode: str
+
+
+@dataclass(frozen=True)
+class CleanupResult:
+    """Summary of targets removed from managed disposable storage."""
+
+    areas: tuple
+    targets_removed: int
+    bytes_reclaimed: int
+
+
+@dataclass(frozen=True)
+class RemovalResult:
+    """Summary of installed versions and cached downloads removed together."""
+
+    name: str
+    versions: tuple
+    cleanup: CleanupResult

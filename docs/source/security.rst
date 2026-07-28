@@ -17,6 +17,12 @@ Current enforced backend invariants:
   version probe before atomic immutable publication;
 * activation-time executable re-verification and probing while holding the
   backend lock, preserving the previous version on failure;
+* destructive removal and cleanup require an ``InquirerPy`` confirmation or
+  an explicit ``-y/--yes`` automation override;
+* cleanup accepts only fixed managed areas, rejects symlink traversal, and
+  never treats installed backends, active state, or locks as disposable;
+* managed home subdirectories are rejected when replaced by symlinks, before
+  permission repair or cleanup can affect their targets;
 * private home directories and private JSON manifests on POSIX.
 
 Planned runtime invariants:
