@@ -268,7 +268,8 @@ make check
 Every main-branch push and pull request runs the following independent gates:
 
 - unit tests on Linux, Windows, and macOS for every supported Python version
-  from 3.7 through 3.14 (24 matrix cells, with no excluded combinations);
+  from 3.7 through 3.14 (24 matrix cells, with no excluded combinations); every
+  cell uploads its own named and flagged coverage report for Codecov aggregation;
 - strict Sphinx HTML documentation with warnings treated as errors;
 - staged sdist and wheel builds, followed by clean artifact-only installation
   smoke tests on Python 3.7 and 3.14;

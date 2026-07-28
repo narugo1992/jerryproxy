@@ -71,3 +71,27 @@ def test_color_detection_honors_environment_and_explicit_override(monkeypatch):
     monkeypatch.delenv("NO_COLOR")
     monkeypatch.setenv("FORCE_COLOR", "1")
     assert ansi_color_enabled(object()) is True
+
+
+def test_color_detection_falls_back_when_stream_has_no_usable_tty(monkeypatch):
+    class BrokenTerminal(object):
+        def isatty(self):
+            raise OSError("terminal unavailable")
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    assert ansi_color_enabled(object()) is False
+    assert ansi_color_enabled(BrokenTerminal()) is False
+
+
+def test_self_check_reports_corrupt_active_inventory_without_stopping_other_checks(tmp_path):
+    paths = JerryProxyPaths(tmp_path)
+    paths.ensure()
+    (paths.active / "mihomo.json").write_text("{not-json", encoding="ascii")
+    lines = []
+
+    exit_code = run_self_check(paths, output=lines.append)
+
+    assert exit_code == 1
+    assert any("backend inventory: FAIL" in line for line in lines)
+    assert lines[-1] == "Self-check FAILED"

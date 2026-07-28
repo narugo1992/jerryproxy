@@ -27,3 +27,13 @@ def test_unknown_platform_fails_early():
 def test_unknown_architecture_fails_early():
     with pytest.raises(UnsupportedPlatformError):
         detect_platform(system_platform="linux", machine="mystery-cpu")
+
+
+def test_linux_musl_is_reported_through_public_platform_detection(monkeypatch):
+    monkeypatch.setattr(
+        "jerryproxy.backend.platform.platform.libc_ver",
+        lambda: ("musl", "1.2.5"),
+    )
+    result = detect_platform(system_platform="linux", machine="x86_64")
+    assert result.libc == "musl"
+    assert result.key == "linux-amd64-musl"

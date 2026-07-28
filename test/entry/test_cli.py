@@ -1,7 +1,9 @@
 import gzip
 import hashlib
+import runpy
 import sys
 
+import pytest
 from click.testing import CliRunner
 
 from jerryproxy.backend.manager import BackendManager
@@ -81,24 +83,19 @@ def test_self_check_can_force_ansi_color(tmp_path):
     assert "\033[1;32mSelf-check PASSED\033[0m" in result.output
 
 
-def test_self_check_failure_reaches_console_exit_code(tmp_path, monkeypatch, capsys):
-    def failed_check(paths, output, color):
-        assert color is False
-        output("[1/1] home write access: FAIL - OSError: read-only state directory")
-        output("Summary: 0 OK, 1 FAIL")
-        output("Self-check FAILED")
-        return 1
-
-    monkeypatch.setattr("jerryproxy.cli.run_self_check", failed_check)
+def test_self_check_failure_reaches_console_exit_code_through_real_state(tmp_path, monkeypatch, capsys):
+    invalid_home = tmp_path / "invalid-home"
+    invalid_home.mkdir()
+    (invalid_home / "backends").write_text("not a directory", encoding="ascii")
     monkeypatch.setattr(
         sys,
         "argv",
-        ["jerryproxy", "--home", str(tmp_path), "self-check"],
+        ["jerryproxy", "--home", str(invalid_home), "self-check"],
     )
 
     assert main() == 1
     captured = capsys.readouterr()
-    assert "OSError: read-only state directory" in captured.out
+    assert "FileExistsError" in captured.out
     assert "Self-check FAILED" in captured.out
     assert "Error: self-check failed; inspect the diagnostics above" in captured.err
 
@@ -154,3 +151,24 @@ def test_current_reports_empty_backend(tmp_path):
     result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "current"])
     assert result.exit_code == 0
     assert "No active backend." in result.output
+
+
+def test_console_main_returns_success_for_real_version_command(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["jerryproxy", "--version"])
+    assert main() == 0
+    assert "jerryproxy, version 0.1.0a1" in capsys.readouterr().out
+
+
+def test_console_main_returns_click_usage_exit_code(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["jerryproxy", "missing-command"])
+    assert main() == 2
+    captured = capsys.readouterr()
+    assert "No such command 'missing-command'" in captured.err
+
+
+def test_python_module_entrypoint_executes_real_cli(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["python -m jerryproxy", "--version"])
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_module("jerryproxy.__main__", run_name="__main__")
+    assert exit_info.value.code == 0
+    assert "jerryproxy, version 0.1.0a1" in capsys.readouterr().out

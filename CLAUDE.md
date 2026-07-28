@@ -117,7 +117,7 @@ built in until a separate trust model is designed.
 ```shell
 make unittest
 make unittest RANGE_DIR=./backend
-make unittest MIN_COVERAGE=85
+make unittest MIN_COVERAGE=90
 make lint
 make rst_auto
 make rst_auto RANGE_DIR=backend
@@ -129,9 +129,24 @@ make check
 python3.7 -m pytest test -m unittest
 ```
 
-Unit tests must be deterministic and network-free. Model GitHub responses and
-release archives locally. Real backend integration tests belong in an explicit
-credential-free integration lane and must pin versions and asset digests.
+Unit tests must be deterministic and network-free. Test behavior through public
+commands, entry points, classes, and functions; do not call private helpers only
+to increase coverage. Prefer real execution with temporary directories, files,
+archives, subprocesses, loopback services, and operating-system behavior.
+Mocking is permitted only when the real boundary is nondeterministic,
+credentialed, destructive, platform-inaccessible, or required to reproduce a
+specific failure atomically. Keep each mock at the narrow external boundary and
+assert the resulting public behavior. Model GitHub responses locally because
+unit tests must not depend on external network availability. Real backend
+integration tests belong in an explicit credential-free integration lane and
+must pin versions and asset digests.
+
+Every unit-test matrix cell must produce its own `coverage.xml` and upload it to
+Codecov with a unique environment name and exactly one matching flag. Upload
+failures fail trusted CI jobs. Fork pull requests must skip the upload because
+GitHub intentionally withholds repository secrets; their tests and local
+coverage gate still run normally. The statement-coverage floor is 90% locally
+and in every matrix cell. Never print or persist `CODECOV_TOKEN`.
 The `test` tree is a Python package: every directory below `test/` must contain
 an `__init__.py`, including newly added test-area directories.
 

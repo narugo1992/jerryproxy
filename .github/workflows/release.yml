@@ -10,6 +10,7 @@ permissions:
 jobs:
   tests:
     uses: ./.github/workflows/test.yml
+    secrets: inherit
 
   standalone:
     uses: ./.github/workflows/standalone.yml
