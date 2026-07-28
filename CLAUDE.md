@@ -142,11 +142,12 @@ integration tests belong in an explicit credential-free integration lane and
 must pin versions and asset digests.
 
 Every unit-test matrix cell must produce its own `coverage.xml` and upload it to
-Codecov with a unique environment name and exactly one matching flag. Upload
-failures fail trusted CI jobs. Fork pull requests must skip the upload because
-GitHub intentionally withholds repository secrets; their tests and local
-coverage gate still run normally. The statement-coverage floor is 90% locally
-and in every matrix cell. Never print or persist `CODECOV_TOKEN`.
+Codecov with the shared `python` aggregation flag and a unique environment
+upload name. Upload failures fail trusted CI jobs. Fork pull requests must skip
+the upload because GitHub intentionally withholds repository secrets; their
+tests and local coverage gate still run normally. The statement-coverage floor
+is 90% locally and in every matrix cell. Never print or persist
+`CODECOV_TOKEN`.
 The `test` tree is a Python package: every directory below `test/` must contain
 an `__init__.py`, including newly added test-area directories.
 
