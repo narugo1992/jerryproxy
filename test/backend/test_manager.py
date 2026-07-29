@@ -1723,7 +1723,7 @@ def test_clean_simulated_windows_close_failure_releases_both_handles(tmp_path, m
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound deletion behavior")
 @pytest.mark.parametrize("directory", (False, True))
-def test_clean_windows_handle_cannot_be_redirected_by_final_path_replacement(
+def test_clean_windows_handle_fails_closed_after_final_path_replacement(
     tmp_path,
     monkeypatch,
     directory,
@@ -1758,9 +1758,10 @@ def test_clean_windows_handle_cannot_be_redirected_by_final_path_replacement(
     monkeypatch.setattr(removal_module, "_delete_windows_guard", replace_path_then_delete_pinned_object)
 
     try:
-        result = manager.clean(areas=("logs",))
+        with pytest.raises(PermissionError) as error:
+            manager.clean(areas=("logs",))
 
-        assert result.targets_removed == 1
+        assert error.value.winerror == 5
         assert swaps == [target]
         if directory:
             assert removal_module.is_path_alias(target)
@@ -2438,9 +2439,11 @@ def test_committed_recovery_windows_journal_replacement_preserves_substitute(
         replace_journal_before_native_delete,
     )
 
-    with pytest.raises(IntegrityError, match="directory is not empty"):
+    with pytest.raises(RemovalCleanupError, match="quarantine cleanup failed") as error:
         manager.current("mihomo")
 
+    assert isinstance(error.value.__cause__, PermissionError)
+    assert error.value.__cause__.winerror == 5
     assert swapped == [journal]
     assert journal.read_bytes() == b"replacement"
     assert_windows_identity_guards_closed(opened, closed)
@@ -2487,8 +2490,11 @@ def test_committed_recovery_windows_transaction_replacement_preserves_external_d
     )
 
     try:
-        assert manager.current("mihomo") is None
+        with pytest.raises(RemovalCleanupError, match="quarantine cleanup failed") as error:
+            manager.current("mihomo")
 
+        assert isinstance(error.value.__cause__, PermissionError)
+        assert error.value.__cause__.winerror == 5
         assert swapped == [transaction]
         assert removal_module.is_path_alias(transaction)
         assert outside.is_dir()
