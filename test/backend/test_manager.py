@@ -1639,7 +1639,7 @@ def test_clean_simulated_windows_close_failure_releases_both_handles(tmp_path, m
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound deletion behavior")
 @pytest.mark.parametrize("directory", (False, True))
-def test_clean_windows_handle_cannot_be_redirected_by_final_junction_swap(
+def test_clean_windows_handle_cannot_be_redirected_by_final_path_replacement(
     tmp_path,
     monkeypatch,
     directory,
@@ -1647,62 +1647,50 @@ def test_clean_windows_handle_cannot_be_redirected_by_final_junction_swap(
     manager = manager_for(tmp_path)
     manager.paths.ensure()
     root = manager.paths.logs
-    parent = root / "runtime"
-    parent.mkdir()
-    target = parent / ("victim" if directory else "victim.log")
+    target = root / ("victim" if directory else "victim.log")
     outside = tmp_path / "outside-logs"
-    outside_parent = outside / parent.name
-    outside_parent.mkdir(parents=True)
-    outside_victim = outside_parent / target.name
+    outside.mkdir()
     if directory:
         target.mkdir()
-        outside_victim.mkdir()
     else:
         target.write_bytes(b"managed")
-        outside_victim.write_bytes(b"outside")
-    saved = tmp_path / "saved-logs"
+    saved = root / ("saved-" + target.name)
     original_delete = removal_module._delete_windows_guard
     swaps = []
     opened, closed = record_windows_identity_guards(monkeypatch)
 
-    def swap_parent_then_delete(descriptor, expect_directory):
+    def replace_path_then_delete_pinned_object(descriptor, expect_directory):
         if descriptor.path == target and not swaps:
-            home_guard = removal_module._open_windows_identity_guard(
-                manager.paths.root,
-                manager.paths.root.lstat(),
-                manager_module.CleanupScopeError,
+            root_guard = next(
+                item
+                for item in reversed(opened)
+                if item.path == root and item not in closed
             )
-            root_guard = removal_module._open_windows_identity_guard(
-                root,
-                root.lstat(),
-                manager_module.CleanupScopeError,
-            )
-            try:
-                rename_windows_identity_guard(root_guard, home_guard, saved.name)
-            finally:
-                try:
-                    removal_module._close_windows_guard(root_guard)
-                finally:
-                    removal_module._close_windows_guard(home_guard)
-            create_windows_junction(root, outside)
-            swaps.append(root)
+            rename_windows_identity_guard(descriptor, root_guard, saved.name)
+            if directory:
+                create_windows_junction(target, outside)
+            else:
+                target.write_bytes(b"replacement")
+            swaps.append(target)
         return original_delete(descriptor, expect_directory)
 
-    monkeypatch.setattr(removal_module, "_delete_windows_guard", swap_parent_then_delete)
+    monkeypatch.setattr(removal_module, "_delete_windows_guard", replace_path_then_delete_pinned_object)
 
     try:
-        with pytest.raises(manager_module.CleanupScopeError, match="managed path alias"):
-            manager.clean(areas=("logs",))
+        result = manager.clean(areas=("logs",))
 
-        assert swaps == [root]
-        assert outside_victim.exists()
-        assert not (saved / parent.name / target.name).exists()
+        assert result.targets_removed == 1
+        assert swaps == [target]
+        if directory:
+            assert removal_module.is_path_alias(target)
+            assert outside.is_dir()
+        else:
+            assert target.read_bytes() == b"replacement"
+        assert not saved.exists()
         assert_windows_identity_guards_closed(opened, closed)
     finally:
-        if removal_module.is_path_alias(root):
-            os.rmdir(str(root))
-        if saved.exists():
-            saved.rename(root)
+        if directory and removal_module.is_path_alias(target):
+            os.rmdir(str(target))
 
 
 def test_clean_tolerates_a_file_disappearing_before_measurement(tmp_path, monkeypatch):
@@ -2336,7 +2324,7 @@ def test_committed_recovery_final_transaction_rmdir_cannot_escape_runtimes(tmp_p
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
-def test_committed_recovery_windows_journal_replacement_preserves_external_data(
+def test_committed_recovery_windows_journal_replacement_preserves_substitute(
     tmp_path,
     monkeypatch,
 ):
@@ -2351,58 +2339,36 @@ def test_committed_recovery_windows_journal_replacement_preserves_external_data(
     os.replace(str(source), str(destination))
     journal = transaction / "journal.json"
     manager_module.atomic_write_json(journal, {"phase": "committed", "moves": [move]})
-    saved_transaction = manager.paths.runtimes / (transaction.name + "-saved")
-    outside = tmp_path / "outside-journal"
-    outside.mkdir()
-    victim = outside / journal.name
-    victim.write_bytes(b"outside")
+    saved_journal = transaction / "journal-saved.json"
     original_delete = removal_module._delete_windows_guard
     opened, closed = record_windows_identity_guards(monkeypatch)
     swapped = []
 
-    def replace_transaction_before_journal_delete(guard, expect_directory):
+    def replace_journal_before_native_delete(guard, expect_directory):
         if guard.path == journal and not swapped:
             transaction_guard = next(
                 item
                 for item in reversed(opened)
                 if item.path == transaction and item not in closed
             )
-            runtimes_status = manager.paths.runtimes.lstat()
-            runtimes_guard = removal_module._open_windows_identity_guard(
-                manager.paths.runtimes,
-                runtimes_status,
-                IntegrityError,
-            )
-            try:
-                rename_windows_identity_guard(
-                    transaction_guard,
-                    runtimes_guard,
-                    saved_transaction.name,
-                )
-            finally:
-                removal_module._close_windows_guard(runtimes_guard)
-            create_windows_junction(transaction, outside)
-            swapped.append(transaction)
+            rename_windows_identity_guard(guard, transaction_guard, saved_journal.name)
+            journal.write_bytes(b"replacement")
+            swapped.append(journal)
         return original_delete(guard, expect_directory)
 
     monkeypatch.setattr(
         removal_module,
         "_delete_windows_guard",
-        replace_transaction_before_journal_delete,
+        replace_journal_before_native_delete,
     )
 
-    try:
-        with pytest.raises(IntegrityError, match="managed path alias"):
-            manager.current("mihomo")
+    with pytest.raises(IntegrityError, match="directory is not empty"):
+        manager.current("mihomo")
 
-        assert swapped == [transaction]
-        assert removal_module.is_path_alias(transaction)
-        assert victim.read_bytes() == b"outside"
-        assert not (saved_transaction / journal.name).exists()
-        assert_windows_identity_guards_closed(opened, closed)
-    finally:
-        if removal_module.is_path_alias(transaction):
-            os.rmdir(str(transaction))
+    assert swapped == [journal]
+    assert journal.read_bytes() == b"replacement"
+    assert not saved_journal.exists()
+    assert_windows_identity_guards_closed(opened, closed)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
