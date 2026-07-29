@@ -43,28 +43,10 @@ backend\_group
 .. autofunction:: backend_group
 
 
-backend\_supported
------------------------------------------------------
-
-.. autofunction:: backend_supported
-
-
 backend\_available
 -----------------------------------------------------
 
 .. autofunction:: backend_available
-
-
-backend\_versions
------------------------------------------------------
-
-.. autofunction:: backend_versions
-
-
-backend\_artifact
------------------------------------------------------
-
-.. autofunction:: backend_artifact
 
 
 backend\_list
@@ -79,12 +61,6 @@ backend\_install
 .. autofunction:: backend_install
 
 
-backend\_update
------------------------------------------------------
-
-.. autofunction:: backend_update
-
-
 backend\_verify
 -----------------------------------------------------
 
@@ -95,12 +71,6 @@ backend\_switch
 -----------------------------------------------------
 
 .. autofunction:: backend_switch
-
-
-backend\_current
------------------------------------------------------
-
-.. autofunction:: backend_current
 
 
 backend\_remove

@@ -260,12 +260,11 @@ jobs:
               /usr/local/bin/jerryproxy --help >/dev/null
               /usr/local/bin/jerryproxy --home /tmp/self-check-home home
               /usr/local/bin/jerryproxy --home /tmp/self-check-home doctor
-              /usr/local/bin/jerryproxy backend supported
               /usr/local/bin/jerryproxy backend available
-              /usr/local/bin/jerryproxy backend versions mihomo --limit 2
-              /usr/local/bin/jerryproxy backend artifact mihomo
+              /usr/local/bin/jerryproxy backend available mihomo --limit 2
+              /usr/local/bin/jerryproxy backend available mihomo 1.19.29
               /usr/local/bin/jerryproxy --home /tmp/self-check-home backend list
-              /usr/local/bin/jerryproxy --home /tmp/self-check-home backend current
+              /usr/local/bin/jerryproxy --home /tmp/self-check-home backend list --active
               test -d /tmp/self-check-home/backends
               test -d /tmp/self-check-home/bin
               test -d /tmp/self-check-home/active
@@ -285,12 +284,11 @@ jobs:
           "$binary" --help >/dev/null
           "$binary" --home self-check-home home
           "$binary" --home self-check-home doctor
-          "$binary" backend supported
           "$binary" backend available
-          "$binary" backend versions mihomo --limit 2
-          "$binary" backend artifact mihomo
+          "$binary" backend available mihomo --limit 2
+          "$binary" backend available mihomo 1.19.29
           "$binary" --home self-check-home backend list
-          "$binary" --home self-check-home backend current
+          "$binary" --home self-check-home backend list --active
           test -d self-check-home/backends
           test -d self-check-home/bin
           test -d self-check-home/active

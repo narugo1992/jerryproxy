@@ -194,18 +194,13 @@ def backend_group(context):  # type: (click.Context) -> None
         _select(
             "Select a backend operation:",
             [
-                Choice("available", name="Browse available backends"),
-                Choice("versions", name="Browse stable versions"),
-                Choice("artifact", name="Inspect an exact release artifact"),
-                Choice("install", name="Install a backend"),
-                Choice("list", name="List installed backends"),
-                Choice("current", name="Show active backends"),
+                Choice("available", name="Browse available releases"),
+                Choice("install", name="Install or update a backend"),
+                Choice("list", name="Show installed and active versions"),
                 Choice("switch", name="Switch the active version"),
                 Choice("verify", name="Verify installed backends"),
-                Choice("update", name="Update a backend"),
                 Choice("remove", name="Remove installed backends"),
                 Choice("clean", name="Clean disposable backend data"),
-                Choice("supported", name="Show supported backend cores"),
             ],
         )
     )
@@ -214,16 +209,6 @@ def backend_group(context):  # type: (click.Context) -> None
         raise click.ClickException("interactive backend operation is unavailable: %s" % action)
     with command.make_context(action, [], parent=context) as command_context:
         command.invoke(command_context)
-
-
-@backend_group.command("supported")
-def backend_supported():  # type: () -> None
-    """List backend drivers built into this JerryProxy release."""
-
-    _echo_table(
-        ["BACKEND", "UPSTREAM", "DESCRIPTION"],
-        [[spec.name, spec.repository, spec.description] for spec in iter_backends()],
-    )
 
 
 def _format_size(size):  # type: (int) -> str
@@ -245,64 +230,84 @@ def _available_record(manager, version, artifact):
         "url": artifact.url,
         "size": artifact.size,
         "sha256": artifact.sha256,
+        "verification": artifact.verification,
         "catalog_generated_at": manager.catalog.generated_at,
     }
 
 
 @backend_group.command("available")
-@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-@click.pass_context
-def backend_available(context, as_json):
-    # type: (click.Context, bool) -> None
-    """Summarize backend availability for the current host."""
-
-    manager = _manager(context)
-    records = []
-    for spec in manager.supported():
-        versions = manager.available(spec.name)
-        records.append(
-            {
-                "backend": spec.name,
-                "latest": versions[0].version if versions else None,
-                "available_versions": len(versions),
-                "catalog_releases": len(manager.catalog.versions(spec.name)),
-                "platform": manager.platform_info.asset_key,
-                "catalog_generated_at": manager.catalog.generated_at,
-            }
-        )
-    if as_json:
-        click.echo(json.dumps(records, indent=2, sort_keys=True))
-        return
-    click.echo("Catalog snapshot: %s" % manager.catalog.generated_at)
-    _echo_table(
-        ["BACKEND", "LATEST", "AVAILABLE", "CATALOG", "HOST"],
-        [
-            [
-                record["backend"],
-                record["latest"] or "unavailable",
-                record["available_versions"],
-                record["catalog_releases"],
-                record["platform"],
-            ]
-            for record in records
-        ],
-    )
-
-
-@backend_group.command("versions")
 @click.argument("name", required=False)
+@click.argument("version", required=False)
 @click.option("--all-platforms", is_flag=True, help="List stable releases with any verified platform asset.")
 @click.option("--limit", type=click.IntRange(min=0), default=20, show_default=True, help="Maximum rows; 0 means all.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_context
-def backend_versions(context, name, all_platforms, limit, as_json):
-    # type: (click.Context, Optional[str], bool, int, bool) -> None
-    """List installable stable versions for one backend."""
+def backend_available(context, name, version, all_platforms, limit, as_json):
+    # type: (click.Context, Optional[str], Optional[str], bool, int, bool) -> None
+    """Browse supported backends, stable versions, or one exact artifact."""
 
     manager = _manager(context)
     if name is None:
-        name = _select_backend("Select a backend to browse:")
+        if all_platforms:
+            raise click.UsageError("--all-platforms requires a backend NAME")
+        records = []
+        for spec in manager.supported():
+            versions = manager.available(spec.name)
+            records.append(
+                {
+                    "backend": spec.name,
+                    "upstream": spec.repository,
+                    "description": spec.description,
+                    "latest": versions[0].version if versions else None,
+                    "available_versions": len(versions),
+                    "catalog_releases": len(manager.catalog.versions(spec.name)),
+                    "platform": manager.platform_info.asset_key,
+                    "catalog_generated_at": manager.catalog.generated_at,
+                }
+            )
+        if as_json:
+            click.echo(json.dumps(records, indent=2, sort_keys=True))
+            return
+        click.echo("Catalog snapshot: %s" % manager.catalog.generated_at)
+        _echo_table(
+            ["BACKEND", "LATEST", "AVAILABLE", "CATALOG", "HOST", "UPSTREAM"],
+            [
+                [
+                    record["backend"],
+                    record["latest"] or "unavailable",
+                    record["available_versions"],
+                    record["catalog_releases"],
+                    record["platform"],
+                    record["upstream"],
+                ]
+                for record in records
+            ],
+        )
+        return
     backend_name = get_backend(name).name
+    if version is not None:
+        if all_platforms:
+            raise click.UsageError("--all-platforms cannot be combined with VERSION")
+        artifact = manager.resolve_artifact(backend_name, version)
+        catalog_version = next(
+            item for item in manager.catalog.versions(backend_name) if item.version == artifact.version
+        )
+        record = _available_record(manager, catalog_version, artifact)
+        if as_json:
+            click.echo(json.dumps(record, indent=2, sort_keys=True))
+            return
+        click.echo("Catalog snapshot: %s" % manager.catalog.generated_at)
+        click.echo("Backend: %s" % artifact.backend)
+        click.echo("Version: %s" % artifact.version)
+        click.echo("Host: %s" % manager.platform_info.key)
+        click.echo("Catalog target: %s" % artifact.platform)
+        click.echo("Asset: %s" % artifact.name)
+        click.echo("Size: %d (%s)" % (artifact.size, _format_size(artifact.size)))
+        click.echo("SHA-256: %s" % artifact.sha256)
+        click.echo("URL: %s" % artifact.url)
+        click.echo("Selection: exact OS/architecture match; integrity source: %s" % artifact.verification)
+        return
+
     records = []
     if all_platforms:
         for version in manager.catalog.versions(backend_name):
@@ -350,48 +355,57 @@ def backend_versions(context, name, all_platforms, limit, as_json):
     )
 
 
-@backend_group.command("artifact")
+@backend_group.command("list")
 @click.argument("name", required=False)
-@click.argument("version", required=False)
+@click.option("--active", "active_only", is_flag=True, help="Show only active backend versions.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_context
-def backend_artifact(context, name, version):
-    # type: (click.Context, Optional[str], Optional[str]) -> None
-    """Explain the exact artifact automatically selected for this host."""
+def backend_list(context, name, active_only, as_json):
+    # type: (click.Context, Optional[str], bool, bool) -> None
+    """List installed versions and their active-link state."""
 
     manager = _manager(context)
     if name is None:
-        name = _select_backend("Select a backend artifact:")
-        version = _select_catalog_version(manager, name)
-    artifact = manager.resolve_artifact(name, version)
-    click.echo("Catalog snapshot: %s" % manager.catalog.generated_at)
-    click.echo("Backend: %s" % artifact.backend)
-    click.echo("Version: %s" % artifact.version)
-    click.echo("Host: %s" % manager.platform_info.key)
-    click.echo("Catalog target: %s" % artifact.platform)
-    click.echo("Asset: %s" % artifact.name)
-    click.echo("Size: %d (%s)" % (artifact.size, _format_size(artifact.size)))
-    click.echo("SHA-256: %s" % artifact.sha256)
-    click.echo("URL: %s" % artifact.url)
-    click.echo("Selection: exact OS/architecture match; integrity source: %s" % artifact.verification)
-
-
-@backend_group.command("list")
-@click.argument("name", required=False)
-@click.pass_context
-def backend_list(context, name):  # type: (click.Context, str) -> None
-    """List installed backend versions and mark active versions."""
-
-    manager = _manager(context)
-    active_versions = {item.name: item.version for item in manager.list_active()}
+        active_items = manager.list_active()
+    else:
+        active = manager.current(name)
+        active_items = [] if active is None else [active]
+    active_by_name = {item.name: item for item in active_items}
     installed = manager.list_installed(name=name)
-    if not installed:
-        click.echo("No backend versions installed.")
+    records = []
+    for item in installed:
+        active = active_by_name.get(item.name)
+        selected = active is not None and active.version == item.version
+        records.append(
+            {
+                "active": selected,
+                "backend": item.name,
+                "version": item.version,
+                "mode": active.link_mode if selected else None,
+                "executable": str(item.executable),
+                "link": str(active.link) if selected else None,
+            }
+        )
+    if active_only:
+        records = [record for record in records if record["active"]]
+    if as_json:
+        click.echo(json.dumps(records, indent=2, sort_keys=True))
+        return
+    if not records:
+        click.echo("No active backend." if active_only else "No backend versions installed.")
         return
     _echo_table(
-        ["ACTIVE", "BACKEND", "VERSION", "EXECUTABLE"],
+        ["ACTIVE", "BACKEND", "VERSION", "MODE", "EXECUTABLE", "LINK"],
         [
-            ["*" if active_versions.get(item.name) == item.version else "", item.name, item.version, item.executable]
-            for item in installed
+            [
+                "*" if record["active"] else "",
+                record["backend"],
+                record["version"],
+                record["mode"] or "",
+                record["executable"],
+                record["link"] or "",
+            ]
+            for record in records
         ],
     )
 
@@ -420,18 +434,6 @@ def backend_install(context, name, version, activate):
     if activate:
         active = manager.current(installed.name)
         click.echo("Active link: %s (%s)" % (active.link, active.link_mode))
-
-
-@backend_group.command("update")
-@click.argument("name", required=False)
-@click.pass_context
-def backend_update(context, name):  # type: (click.Context, Optional[str]) -> None
-    """Install and activate the newest compatible catalog release."""
-
-    if name is None:
-        name = _select_backend("Select a backend to update:")
-    installed = _manager(context).update(name)
-    click.echo("Updated and active: %s %s" % (installed.name, installed.version))
 
 
 @backend_group.command("verify")
@@ -467,24 +469,6 @@ def backend_switch(context, name, version):
     active = manager.switch(name, version)
     click.echo("Active: %s %s" % (active.name, active.version))
     click.echo("Link: %s (%s)" % (active.link, active.link_mode))
-
-
-@backend_group.command("current")
-@click.argument("name", required=False)
-@click.pass_context
-def backend_current(context, name):  # type: (click.Context, str) -> None
-    """Show one or all active backend versions."""
-
-    manager = _manager(context)
-    active = [manager.current(name)] if name else manager.list_active()
-    active = [item for item in active if item is not None]
-    if not active:
-        click.echo("No active backend.")
-        return
-    _echo_table(
-        ["BACKEND", "VERSION", "MODE", "LINK"],
-        [[item.name, item.version, item.link_mode, item.link] for item in active],
-    )
 
 
 @backend_group.command("remove")

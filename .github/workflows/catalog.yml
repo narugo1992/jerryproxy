@@ -63,8 +63,9 @@ jobs:
         run: |
           make build
           ./dist/jerryproxy backend available
-          ./dist/jerryproxy backend versions mihomo --limit 2
-          ./dist/jerryproxy backend artifact mihomo
+          ./dist/jerryproxy backend available mihomo --limit 2
+          version="$(./dist/jerryproxy backend available mihomo --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
+          ./dist/jerryproxy backend available mihomo "$version"
           ./dist/jerryproxy --home build/catalog-self-check self-check
       - name: Publish catalog refresh branch
         id: publish

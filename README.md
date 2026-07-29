@@ -103,13 +103,23 @@ Inspect built-in backend drivers and the selected home:
 
 ```shell
 jerryproxy home
-jerryproxy backend supported
 jerryproxy doctor
 jerryproxy self-check
 jerryproxy backend available
-jerryproxy backend versions mihomo --limit 5
-jerryproxy backend artifact mihomo
+jerryproxy backend available mihomo --limit 5
+jerryproxy backend available mihomo 1.19.29
 ```
+
+The backend command surface has seven operations: `available`, `install`,
+`list`, `switch`, `verify`, `remove`, and `clean`. The positional depth of
+`available` selects the catalog view: no target shows supported backends, a
+backend shows its stable versions, and a backend plus version shows the exact
+host artifact and full SHA-256 evidence.
+
+With `--json`, the same three depths have explicit machine shapes:
+`available --json` returns an array of backend overview records,
+`available NAME --json` returns an array of release records (possibly empty),
+and `available NAME VERSION --json` returns one exact artifact object.
 
 Run `jerryproxy backend` for a guided operation menu. Commands whose target is
 omitted, such as `backend install`, `backend switch`, `backend remove`, and
@@ -121,21 +131,21 @@ Install and activate the newest verified stable version for this host:
 
 ```shell
 jerryproxy backend install mihomo
-jerryproxy backend current mihomo
+jerryproxy backend list mihomo --active
 ```
 
 Install and activate one exact catalog version:
 
 ```shell
 jerryproxy backend install mihomo 1.19.29
-jerryproxy backend current mihomo
+jerryproxy backend list mihomo --active
 ```
 
 Update to the newest packaged stable version and verify installed executable
 fingerprints:
 
 ```shell
-jerryproxy backend update mihomo
+jerryproxy backend install mihomo
 jerryproxy backend verify
 ```
 

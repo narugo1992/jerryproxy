@@ -115,6 +115,17 @@ authentication, extraction, process, or permission errors to warnings.
 - Keep complete backend commands deterministic for automation. Missing targets
   may enter guided `InquirerPy` selection, while established no-argument
   read-only commands retain their all-backend meaning.
+- Keep the public backend command surface to `available`, `install`, `list`,
+  `switch`, `verify`, `remove`, and `clean`. Catalog discovery uses
+  `available [NAME] [VERSION]`; do not reintroduce separate supported-backend,
+  version-list, or artifact commands.
+- `install NAME` is the single install/update entry point. Active-state queries
+  use `list [NAME] --active`; do not reintroduce separate update or current
+  commands.
+- Keep `available --json`, `available NAME --json`, and
+  `available NAME VERSION --json` as overview-array, release-array, and exact
+  artifact-object shapes respectively. Keep `list NAME` scoped to that
+  backend; unrelated active state must not affect the query.
 
 ## Secrets and state
 

@@ -46,9 +46,11 @@ jobs:
       - name: Resolve, install, activate, and verify
         shell: bash
         run: |
-          python -m jerryproxy backend artifact "${{ matrix.backend }}"
+          version="$(python -m jerryproxy backend available "${{ matrix.backend }}" --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
+          echo "JERRYPROXY_BACKEND_VERSION=$version" >> "$GITHUB_ENV"
+          python -m jerryproxy backend available "${{ matrix.backend }}" "$version"
           python -m jerryproxy --home backend-home backend install "${{ matrix.backend }}"
-          python -m jerryproxy --home backend-home backend current "${{ matrix.backend }}"
+          python -m jerryproxy --home backend-home backend list "${{ matrix.backend }}" --active
           python -m jerryproxy --home backend-home backend verify "${{ matrix.backend }}"
       - name: Execute managed backend version command
         shell: bash
@@ -73,18 +75,17 @@ jobs:
           if completed.returncode != 0:
               raise SystemExit(completed.returncode)
           PY
-      - name: Exercise update and removal lifecycle
+      - name: Exercise reinstall and removal lifecycle
         shell: bash
         run: |
-          python -m jerryproxy --home backend-home backend update "${{ matrix.backend }}"
+          python -m jerryproxy --home backend-home backend install "${{ matrix.backend }}"
           if python -m jerryproxy --home backend-home backend remove "${{ matrix.backend }}" \
-            "$(python -m jerryproxy backend versions "${{ matrix.backend }}" --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')" -y; then
+            "$JERRYPROXY_BACKEND_VERSION" -y; then
             echo "Active backend removal unexpectedly succeeded without --force" >&2
             exit 1
           fi
-          version="$(python -m jerryproxy backend versions "${{ matrix.backend }}" --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
-          python -m jerryproxy --home backend-home backend remove "${{ matrix.backend }}" "$version" --force -y
-          python -m jerryproxy --home backend-home backend current "${{ matrix.backend }}"
+          python -m jerryproxy --home backend-home backend remove "${{ matrix.backend }}" "$JERRYPROXY_BACKEND_VERSION" --force -y
+          python -m jerryproxy --home backend-home backend list "${{ matrix.backend }}" --active
 
   musl-lifecycle:
     name: sing-box lifecycle (Alpine musl)
@@ -103,7 +104,8 @@ jobs:
               cp -R /workspace /tmp/source
               python3 -m venv /tmp/jerryproxy
               /tmp/jerryproxy/bin/python -m pip install --no-cache-dir /tmp/source >/dev/null
-              artifact="$(/tmp/jerryproxy/bin/jerryproxy backend artifact sing-box)"
+              version="$(/tmp/jerryproxy/bin/jerryproxy backend available sing-box --limit 1 --json | /tmp/jerryproxy/bin/python -c '\''import json,sys; print(json.load(sys.stdin)[0]["version"])'\'')"
+              artifact="$(/tmp/jerryproxy/bin/jerryproxy backend available sing-box "$version")"
               printf "%s\n" "$artifact"
               printf "%s\n" "$artifact" | grep -F "Catalog target: linux-amd64-musl"
               printf "%s\n" "$artifact" | grep -F -- "-linux-amd64-musl.tar.gz"

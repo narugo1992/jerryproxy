@@ -96,10 +96,13 @@ jobs:
       - run: python -m pip check
       - run: jerryproxy --version
       - run: jerryproxy --home package-smoke-home self-check --color
-      - run: python -m jerryproxy backend supported
       - run: python -m jerryproxy backend available
-      - run: python -m jerryproxy backend versions mihomo --limit 2
-      - run: python -m jerryproxy backend artifact mihomo
+      - run: python -m jerryproxy backend available mihomo --limit 2
+      - name: Exercise exact artifact lookup from the staged sdist
+        shell: bash
+        run: |
+          version="$(python -m jerryproxy backend available mihomo --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
+          python -m jerryproxy backend available mihomo "$version"
 
   wheel-smoke:
     name: Wheel smoke (Python ${{ matrix.python }})
@@ -132,10 +135,13 @@ jobs:
       - run: python -m pip check
       - run: jerryproxy --version
       - run: jerryproxy --home package-smoke-home self-check --color
-      - run: python -m jerryproxy backend supported
       - run: python -m jerryproxy backend available
-      - run: python -m jerryproxy backend versions mihomo --limit 2
-      - run: python -m jerryproxy backend artifact mihomo
+      - run: python -m jerryproxy backend available mihomo --limit 2
+      - name: Exercise exact artifact lookup from the staged wheel
+        shell: bash
+        run: |
+          version="$(python -m jerryproxy backend available mihomo --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
+          python -m jerryproxy backend available mihomo "$version"
 
   gate:
     name: Package gate

@@ -42,13 +42,13 @@ def test_home_override(tmp_path):
     assert result.output.strip() == str(tmp_path)
 
 
-def test_supported_backends():
-    result = CliRunner().invoke(cli, ["backend", "supported"])
+def test_backend_command_surface_is_consolidated():
+    result = CliRunner().invoke(cli, ["backend", "--help"])
     assert result.exit_code == 0
-    assert "mihomo" in result.output
-    assert "sing-box" in result.output
-    assert "xray" in result.output
-    assert "v2ray" in result.output
+    for command in ("available", "clean", "install", "list", "remove", "switch", "verify"):
+        assert "  %s " % command in result.output
+    for removed in ("artifact", "current", "supported", "update", "versions"):
+        assert "  %s " % removed not in result.output
 
 
 def test_empty_backend_list_uses_private_home(tmp_path):
@@ -126,7 +126,7 @@ def test_install_unknown_backend_reports_domain_error(tmp_path, monkeypatch, cap
     assert "Error: unsupported backend: unknown" in capsys.readouterr().err
 
 
-def test_available_versions_and_artifact_commands_use_packaged_catalog_offline():
+def test_available_command_browses_overview_versions_and_exact_artifact_offline():
     runner = CliRunner()
     catalog = BackendCatalog.load()
     platform_info = detect_platform()
@@ -137,17 +137,30 @@ def test_available_versions_and_artifact_commands_use_packaged_catalog_offline()
     assert available.exit_code == 0
     overview = {record["backend"]: record for record in json.loads(available.output)}
     assert sorted(overview) == ["mihomo", "sing-box", "v2ray", "xray"]
+    assert set(overview["mihomo"]) == {
+        "available_versions",
+        "backend",
+        "catalog_generated_at",
+        "catalog_releases",
+        "description",
+        "latest",
+        "platform",
+        "upstream",
+    }
     assert overview["mihomo"]["latest"] == expected_versions[0].version
     assert overview["mihomo"]["platform"] == platform_info.asset_key
+    assert overview["mihomo"]["upstream"] == "MetaCubeX/mihomo"
+    assert overview["mihomo"]["description"]
 
     human_available = runner.invoke(cli, ["backend", "available"])
     assert human_available.exit_code == 0
     assert "BACKEND" in human_available.output
     assert "AVAILABLE" in human_available.output
     assert "HOST" in human_available.output
+    assert "UPSTREAM" in human_available.output
     assert platform_info.asset_key in human_available.output
 
-    versions = runner.invoke(cli, ["backend", "versions", "mihomo", "--limit", "2", "--json"])
+    versions = runner.invoke(cli, ["backend", "available", "mihomo", "--limit", "2", "--json"])
     assert versions.exit_code == 0
     records = json.loads(versions.output)
     assert [record["version"] for record in records] == [item.version for item in expected_versions[:2]]
@@ -155,24 +168,56 @@ def test_available_versions_and_artifact_commands_use_packaged_catalog_offline()
     assert all(record["platform"] == expected_artifact.platform for record in records)
     assert all(len(record["sha256"]) == 64 for record in records)
 
-    human_versions = runner.invoke(cli, ["backend", "versions", "mihomo", "--limit", "1"])
+    human_versions = runner.invoke(cli, ["backend", "available", "mihomo", "--limit", "1"])
     assert human_versions.exit_code == 0
     assert "VERSION" in human_versions.output
     assert "TARGET" in human_versions.output
     assert expected_artifact.name in human_versions.output
 
-    all_platforms = runner.invoke(cli, ["backend", "versions", "mihomo", "--all-platforms", "--limit", "2"])
+    all_platforms = runner.invoke(
+        cli,
+        ["backend", "available", "mihomo", "--all-platforms", "--limit", "2"],
+    )
     assert all_platforms.exit_code == 0
     assert "PLATFORMS" in all_platforms.output
     assert "PUBLISHED" in all_platforms.output
     assert expected_versions[0].version in all_platforms.output
 
-    artifact = runner.invoke(cli, ["backend", "artifact", "mihomo"])
+    artifact = runner.invoke(cli, ["backend", "available", "mihomo", expected_artifact.version])
     assert artifact.exit_code == 0
     assert "Version: %s" % expected_artifact.version in artifact.output
     assert "Catalog target: %s" % expected_artifact.platform in artifact.output
     assert "SHA-256:" in artifact.output
     assert expected_artifact.url in artifact.output
+
+    artifact_json = runner.invoke(
+        cli,
+        ["backend", "available", "mihomo", expected_artifact.version, "--json"],
+    )
+    assert artifact_json.exit_code == 0
+    artifact_record = json.loads(artifact_json.output)
+    assert set(artifact_record) == {
+        "asset",
+        "backend",
+        "catalog_generated_at",
+        "platform",
+        "published_at",
+        "sha256",
+        "size",
+        "url",
+        "verification",
+        "version",
+    }
+    assert artifact_record["version"] == expected_artifact.version
+    assert artifact_record["sha256"] == expected_artifact.sha256
+    assert artifact_record["verification"] == expected_artifact.verification
+
+    invalid = runner.invoke(
+        cli,
+        ["backend", "available", "mihomo", expected_artifact.version, "--all-platforms"],
+    )
+    assert invalid.exit_code == 2
+    assert "cannot be combined with VERSION" in invalid.output
 
 
 def test_backend_inventory_switch_and_remove_commands(tmp_path, monkeypatch):
@@ -200,10 +245,18 @@ def test_backend_inventory_switch_and_remove_commands(tmp_path, monkeypatch):
     assert switched.exit_code == 0
     assert "Active: mihomo 2.0.0" in switched.output
 
-    current = runner.invoke(cli, ["--home", str(home), "backend", "current", "mihomo"])
-    assert current.exit_code == 0
-    assert "mihomo" in current.output
-    assert "2.0.0" in current.output
+    active = runner.invoke(
+        cli,
+        ["--home", str(home), "backend", "list", "mihomo", "--active", "--json"],
+    )
+    assert active.exit_code == 0
+    active_records = json.loads(active.output)
+    assert len(active_records) == 1
+    assert active_records[0]["backend"] == "mihomo"
+    assert active_records[0]["version"] == "2.0.0"
+    assert active_records[0]["active"] is True
+    assert active_records[0]["mode"] in ("copy", "symlink")
+    assert active_records[0]["link"]
 
     doctor = runner.invoke(cli, ["--home", str(home), "doctor"])
     assert doctor.exit_code == 0
@@ -333,9 +386,11 @@ def test_backend_group_short_command_dispatches_selected_operation(tmp_path, mon
     assert "No backend versions installed." in result.output
 
 
-def test_guided_artifact_uses_real_inquirer_selection_boundary(tmp_path, monkeypatch):
+def test_guided_install_uses_real_inquirer_selection_boundary(tmp_path, monkeypatch):
     selections = iter(["mihomo", ""])
     prompts = []
+    manager = BackendManager(JerryProxyPaths(tmp_path / "home"), probe_runner=lambda installed: None)
+    captured = {}
 
     class Prompt(object):
         def __init__(self, value):
@@ -348,12 +403,37 @@ def test_guided_artifact_uses_real_inquirer_selection_boundary(tmp_path, monkeyp
         prompts.append(kwargs["message"])
         return Prompt(next(selections))
 
+    class GuidedManager(object):
+        platform_info = manager.platform_info
+
+        def available(self, name):
+            return manager.available(name)
+
+        def resolve_artifact(self, name, version):
+            return manager.resolve_artifact(name, version)
+
+        def install(self, name, version, activate):
+            artifact = manager.resolve_artifact(name, version)
+            captured.update(name=name, version=version, activate=activate)
+            return SimpleNamespace(
+                name=name,
+                version=artifact.version,
+                executable=tmp_path / "mihomo",
+            )
+
+    class ConfirmPrompt(object):
+        def execute(self):
+            return False
+
+    monkeypatch.setattr(cli_module, "_manager", lambda context: GuidedManager())
     monkeypatch.setattr(cli_module.inquirer, "select", select)
-    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "artifact"])
+    monkeypatch.setattr(cli_module.inquirer, "confirm", lambda **kwargs: ConfirmPrompt())
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "install"])
 
     assert result.exit_code == 0
-    assert prompts == ["Select a backend artifact:", "Select a stable version:"]
-    assert "Backend: mihomo" in result.output
+    assert prompts == ["Select a backend to install:", "Select a stable version:"]
+    assert captured == {"name": "mihomo", "version": None, "activate": False}
+    assert "Installed: mihomo" in result.output
 
 
 def test_guided_remove_selects_active_version_and_final_confirmation(tmp_path, monkeypatch):
@@ -386,30 +466,13 @@ def test_guided_remove_selects_active_version_and_final_confirmation(tmp_path, m
     assert not (home / "active" / "mihomo.json").exists()
 
 
-def test_guided_update_selects_backend_before_public_manager_call(tmp_path, monkeypatch):
-    calls = []
-
-    class Manager(object):
-        def update(self, name):
-            calls.append(name)
-            return SimpleNamespace(name=name, version="1.0.0")
-
-    monkeypatch.setattr(cli_module, "_manager", lambda context: Manager())
-    monkeypatch.setattr(cli_module, "_select_backend", lambda message: "mihomo")
-    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "update"])
-
-    assert result.exit_code == 0
-    assert calls == ["mihomo"]
-    assert "Updated and active: mihomo 1.0.0" in result.output
-
-
 def test_incomplete_command_reports_unavailable_interactive_input(tmp_path, monkeypatch):
     class Prompt(object):
         def execute(self):
             raise EOFError()
 
     monkeypatch.setattr(cli_module.inquirer, "select", lambda **kwargs: Prompt())
-    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "versions"])
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "install"])
 
     assert result.exit_code == 1
     assert "interactive selection unavailable" in result.output
@@ -497,10 +560,36 @@ def test_backend_switch_short_command_selects_installed_target(tmp_path, monkeyp
     assert "Active: mihomo 1.0.0" in result.output
 
 
-def test_current_reports_empty_backend(tmp_path):
-    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "current"])
+def test_active_list_reports_empty_backend(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--home", str(tmp_path), "backend", "list", "--active"])
+    machine = runner.invoke(cli, ["--home", str(tmp_path), "backend", "list", "--active", "--json"])
+
     assert result.exit_code == 0
     assert "No active backend." in result.output
+    assert machine.exit_code == 0
+    assert json.loads(machine.output) == []
+
+
+def test_scoped_active_list_ignores_unrelated_corrupt_active_state(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=True)
+    (home / "active" / "xray.json").write_text("{}", encoding="ascii")
+
+    def manager(context):
+        return BackendManager(
+            JerryProxyPaths.from_value(context.obj.get("home")),
+            probe_runner=lambda installed: None,
+        )
+
+    monkeypatch.setattr(cli_module, "_manager", manager)
+    result = CliRunner().invoke(
+        cli,
+        ["--home", str(home), "backend", "list", "mihomo", "--active", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)[0]["version"] == "1.0.0"
 
 
 def test_console_main_returns_success_for_real_version_command(monkeypatch, capsys):

@@ -10,4 +10,4 @@ BackendManager
 -----------------------------------------------------
 
 .. autoclass:: BackendManager
-   :members: __init__,from_home,supported,available,resolve_artifact,install,install_from_archive,list_installed,get_installed,verify,update,switch,current,list_active,remove,remove_all,clean,list_cached_versions
+   :members: __init__,from_home,supported,available,resolve_artifact,install,install_from_archive,list_installed,get_installed,verify,switch,current,list_active,remove,remove_all,clean,list_cached_versions

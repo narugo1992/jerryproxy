@@ -19,20 +19,32 @@ installing:
 
 .. code-block:: shell
 
-   jerryproxy backend supported
    jerryproxy backend available
-   jerryproxy backend versions mihomo --limit 5
-   jerryproxy backend versions mihomo --all-platforms --limit 5
-   jerryproxy backend artifact mihomo
+   jerryproxy backend available mihomo --limit 5
+   jerryproxy backend available mihomo --all-platforms --limit 5
+   jerryproxy backend available mihomo 1.19.29
    jerryproxy backend install mihomo
    jerryproxy backend install mihomo 1.19.29
    jerryproxy backend install mihomo 1.19.28 --no-activate
    jerryproxy backend switch mihomo 1.19.28
-   jerryproxy backend current mihomo
-   jerryproxy backend list mihomo
+   jerryproxy backend list mihomo --active
    jerryproxy backend install sing-box 1.13.14
-   jerryproxy backend update mihomo
    jerryproxy backend verify
+
+The backend command surface has seven operations: ``available``, ``install``,
+``list``, ``switch``, ``verify``, ``remove``, and ``clean``. ``available``
+uses positional depth instead of separate discovery commands: no target shows
+the supported backends, ``NAME`` shows stable versions, and ``NAME VERSION``
+shows the exact host artifact and full SHA-256 evidence. ``install NAME`` is
+also the update operation because it resolves and activates the newest
+compatible packaged release when ``VERSION`` is omitted.
+
+With ``--json``, those three depths have explicit machine shapes:
+``available --json`` returns an array of backend overview records,
+``available NAME --json`` returns an array of release records (possibly
+empty), and ``available NAME VERSION --json`` returns one exact artifact
+object. The exact object includes the asset name, URL, byte size, platform,
+full SHA-256 digest, and verification source.
 
 Interactive and automated use
 -----------------------------
@@ -44,7 +56,6 @@ backend command with a missing target also guides the remaining choices:
 
    jerryproxy backend
    jerryproxy backend install
-   jerryproxy backend artifact
    jerryproxy backend switch
    jerryproxy backend remove
    jerryproxy backend clean
@@ -52,8 +63,9 @@ backend command with a missing target also guides the remaining choices:
 Supplying the complete positional target and options skips selection prompts,
 so the same commands remain deterministic for scripts. Read-only commands
 whose no-argument meaning is already complete keep that behavior:
-``available`` and ``supported`` show the catalog, while ``list``, ``current``,
-and ``verify`` operate across all installed backends.
+``available`` shows the catalog, while ``list`` and ``verify`` operate across
+all installed backends. Add ``--active`` to ``list`` to show only selected
+versions.
 
 Removal and cleanup
 -------------------

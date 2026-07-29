@@ -258,10 +258,6 @@ class BackendManager(object):
             self._verify_installed_executable(item)
         return installed
 
-    def update(self, name):  # type: (str) -> InstalledBackend
-        """Install and activate the newest compatible catalog release."""
-        return self.install(name, version=None, activate=True)
-
     def switch(self, name, version):  # type: (str, str) -> ActiveBackend
         spec = get_backend(name)
         link = self.paths.bin / spec.executable_filename(self.platform_info)
