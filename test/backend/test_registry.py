@@ -1,7 +1,7 @@
 import pytest
 
 from jerryproxy.backend.model import PlatformInfo
-from jerryproxy.backend.registry import get_backend, is_stable_version, iter_backends
+from jerryproxy.backend.registry import BackendSpec, get_backend, is_stable_version, iter_backends
 from jerryproxy.errors import UnsupportedBackendError, UnsupportedPlatformError
 
 
@@ -76,6 +76,13 @@ def test_prerelease_versions_are_not_stable(version):
 def test_unknown_backend_is_rejected():
     with pytest.raises(UnsupportedBackendError):
         get_backend("unknown")
+
+
+def test_unknown_asset_family_is_rejected_as_an_unsupported_platform_rule():
+    spec = BackendSpec("custom", "owner/repo", "custom", "unknown", "Custom", ("version",))
+
+    with pytest.raises(UnsupportedPlatformError, match="unknown asset family"):
+        spec.expected_asset_name(PlatformInfo("linux", "amd64"), "1.0.0")
 
 
 def test_mihomo_openbsd_is_not_guessed():

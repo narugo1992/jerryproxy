@@ -32,6 +32,8 @@ Implemented now:
 - relative symbolic links on supported systems and an atomic executable-copy
   fallback where Windows symlink privileges are unavailable;
 - an active-version manifest that records the selected version and link mode;
+- one fail-fast, home-wide process lock backed directly by the cross-platform
+  `filelock` package;
 - guided `InquirerPy` backend menus for short commands while complete command
   arguments remain suitable for scripts and automation;
 - confirmed single-version or whole-backend removal, with optional matching
@@ -180,6 +182,15 @@ Removing one active version also requires `--force`; selecting that active
 version through guided mode makes the deactivation part of the confirmed
 operation.
 
+Removal atomically stages matching downloads, installed versions, and active
+state in a private `runtimes/.remove-*` quarantine. A private journal is written
+before the first move. If the process stops during staging, the next home-wide
+lock acquisition restores the original paths in reverse order. If it stops
+after commit, the next acquisition finishes quarantine disposal. Invalid or
+ambiguous recovery state fails closed instead of guessing. If final quarantine
+disposal fails, the CLI reports the committed removal and the retained data can
+be retried with `backend clean --runtimes -y`.
+
 Remove every installed Mihomo version, deactivate it, and also discard its
 cached release archives:
 
@@ -209,7 +220,7 @@ removes installed versions, active links, manifests, or operation locks; use
 ├── backends/        # Immutable backend versions
 ├── bin/             # Active backend links/copies
 ├── downloads/       # Verified release archives
-├── locks/           # Concurrent operation locks
+├── locks/           # Home-wide jerryproxy.lock
 ├── logs/            # Future wrapper/core logs
 ├── providers/       # Future private subscription provider files
 └── runtimes/        # Future runtime descriptors and generated configs
@@ -220,14 +231,35 @@ files are written atomically as `0600`. Windows ACL hardening is part of the
 runtime security roadmap; the current design keeps every path beneath the
 current user's profile.
 
+Every managed-state read or mutation uses one `filelock.FileLock` at
+`~/.jerryproxy/locks/jerryproxy.lock`. Contention fails immediately with an
+actionable busy error. The lock file may remain on disk after release; JerryProxy
+does not store owner PIDs in it, inspect its contents, delete it as stale, or
+replace `filelock` with platform-specific locking code.
+The configured home root may itself be an alias, but managed subdirectories and
+the operation lock file must not be symlinks or Windows reparse-point aliases
+such as junctions. They are rejected before state access so one physical state
+tree cannot be mutated under unrelated locks.
+
 ## Self-check
 
 `jerryproxy self-check` actively validates the packaged Python runtime, host
 platform mapping, private home layout and write access, POSIX directory modes,
-backend registry, and installed/active backend inventory. Each check is
-isolated: a failure prints its check name, exception type, and message, while
-the remaining checks continue. The final summary exits nonzero when any check
-fails.
+backend registry, `filelock` compatibility, and one lock-consistent
+installed/active backend inventory. Results use four levels: green `OK`, yellow
+`WARN`, red `FAIL`, and red `ERR`. Only `FAIL` and `ERR` make the command exit
+nonzero.
+
+Python 3.7-3.9 install the newest `filelock` lines still compatible with those
+interpreters. Those legacy lines are affected by CVE-2025-68146, so self-check
+and `doctor` report `WARN` while operations remain available. Upgrade to Python
+3.10+ and reinstall or upgrade JerryProxy when possible. Python 3.10+ installs
+`filelock>=3.30`, which includes the upstream fork-ownership protection.
+
+Standalone executables are intentionally built with Python 3.7 for legacy Linux,
+Windows, and macOS compatibility, so their bundled `filelock` is also on the
+legacy warning line. Users who prioritize the upstream lock hardening over that
+binary compatibility should use the Python 3.10+ pip installation.
 
 The check is local and network-free. It does not download or start a backend:
 
@@ -272,7 +304,9 @@ at runtime. The manager:
 5. verifies size and SHA-256 before extraction;
 6. rejects archive traversal, symlinks, and special files;
 7. installs into an immutable version directory;
-8. changes the active backend only after installation succeeds.
+8. holds the single home-wide `filelock` across cache validation, download,
+   extraction, publication, probing, and optional activation;
+9. changes the active backend only after installation succeeds.
 
 The progress bar is written to stderr, so stdout remains stable for ordinary
 CLI output and machine-readable JSON. `requests` honors the host's standard

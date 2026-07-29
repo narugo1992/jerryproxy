@@ -29,8 +29,20 @@ Packaged CLI self-check
 
 ``jerryproxy self-check`` performs a small network-free validation of the
 runtime, platform mapping, private state tree, write access, backend registry,
-and backend inventory. Every check reports ``OK`` or an exception type and
-message; all checks run before the command returns a nonzero status on failure.
+``filelock`` compatibility, and one lock-consistent backend inventory. Results
+are ``OK`` (green), ``WARN`` (yellow), ``FAIL`` (red), or ``ERR`` (red). Only
+``FAIL`` and ``ERR`` produce a nonzero exit status.
+
+Python 3.7 through 3.9 use the newest ``filelock`` lines that still support
+those interpreters. Those legacy lines are affected by CVE-2025-68146, so the
+check reports ``WARN`` and recommends Python 3.10+; the warning does not block
+otherwise supported operations. Python 3.10+ uses ``filelock>=3.30`` with the
+dependency's upstream fork-ownership protection.
+
+Standalone executables use Python 3.7 to retain the documented legacy operating
+system baseline, so they also bundle a legacy ``filelock`` line and report the
+warning. Use the Python 3.10+ pip installation when the upstream lock hardening
+is more important than legacy standalone compatibility.
 
 ANSI colors are selected automatically for terminal output. ``NO_COLOR``
 disables colors, ``FORCE_COLOR=1`` enables them for redirected output, and

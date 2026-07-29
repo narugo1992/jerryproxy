@@ -5,7 +5,6 @@ import os
 import shutil
 import subprocess
 import uuid
-from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,16 +14,18 @@ from ..errors import (
     BackendNotInstalledError,
     CleanupScopeError,
     IntegrityError,
+    RemovalCleanupError,
     UnsupportedBackendError,
     UnsupportedPlatformError,
 )
-from ..home import JerryProxyPaths
+from ..home import JerryProxyPaths, is_path_alias
+from ..lock import JerryProxyOperationLock
 from ..utils.fs import atomic_write_json, ensure_private_directory, read_json, sha256_file
+from . import removal as removal_module
 from .archive import extract_archive, find_executable
 from .catalog import BackendCatalog
 from .download import AssetDownloader
-from .lock import BackendOperationLock
-from .model import ActiveBackend, CleanupResult, InstalledBackend, RemovalResult
+from .model import ActiveBackend, BackendInventory, CleanupResult, InstalledBackend, RemovalResult
 from .platform import detect_platform
 from .registry import get_backend, iter_backend_platforms, iter_backends, version_sort_key
 
@@ -46,7 +47,6 @@ class BackendManager(object):
         self.catalog = catalog or BackendCatalog.load()
         self.downloader = downloader or AssetDownloader()
         self.probe_runner = probe_runner or self._probe_installed
-        self.paths.ensure()
 
     @classmethod
     def from_home(cls, home=None):  # type: (Optional[str]) -> "BackendManager"
@@ -67,31 +67,32 @@ class BackendManager(object):
         spec = get_backend(name)
         asset = self.resolve_artifact(spec.name, version)
         normalized_version = asset.version
-        download_directory = self.paths.downloads / spec.name / normalized_version
-        ensure_private_directory(download_directory)
-        archive = download_directory / asset.name
-        if archive.exists() and sha256_file(archive) != asset.sha256:
-            archive.unlink()
-        if not archive.exists():
-            self.downloader.download(
-                asset.url,
+        with JerryProxyOperationLock(self.paths):
+            download_directory = self.paths.downloads / spec.name / normalized_version
+            self._reject_backend_alias(self.paths.downloads, spec.name, download_directory)
+            ensure_private_directory(download_directory)
+            archive = download_directory / asset.name
+            if archive.exists() and sha256_file(archive) != asset.sha256:
+                archive.unlink()
+            if not archive.exists():
+                self.downloader.download(
+                    asset.url,
+                    archive,
+                    asset.sha256,
+                    expected_size=asset.size,
+                )
+            installed = self._install_from_archive_locked(
+                spec.name,
+                normalized_version,
                 archive,
-                asset.sha256,
-                expected_size=asset.size,
+                expected_sha256=asset.sha256,
+                asset_name=asset.name,
+                source_url=asset.url,
+                asset_platform=asset.platform,
+                archive_executable=asset.executable,
             )
-        installed = self.install_from_archive(
-            spec.name,
-            normalized_version,
-            archive,
-            expected_sha256=asset.sha256,
-            asset_name=asset.name,
-            source_url=asset.url,
-            asset_platform=asset.platform,
-            archive_executable=asset.executable,
-            activate=False,
-        )
-        if activate:
-            self.switch(spec.name, normalized_version)
+            if activate:
+                self._switch_locked(spec.name, normalized_version)
         return installed
 
     def _probe_installed(self, installed):  # type: (InstalledBackend) -> None
@@ -131,6 +132,32 @@ class BackendManager(object):
         activate=False,
     ):
         # type: (str, str, Path, str, Optional[str], Optional[str], Optional[str], Optional[str], bool) -> InstalledBackend
+        with JerryProxyOperationLock(self.paths):
+            installed = self._install_from_archive_locked(
+                name,
+                version,
+                archive,
+                expected_sha256,
+                asset_name=asset_name,
+                source_url=source_url,
+                asset_platform=asset_platform,
+                archive_executable=archive_executable,
+            )
+            if activate:
+                self._switch_locked(name, version)
+            return installed
+
+    def _install_from_archive_locked(
+        self,
+        name,
+        version,
+        archive,
+        expected_sha256,
+        asset_name=None,
+        source_url=None,
+        asset_platform=None,
+        archive_executable=None,
+    ):
         spec = get_backend(name)
         normalized_version = spec.normalize_version(version)
         selected_platform = asset_platform or self._default_asset_platform(spec.name)
@@ -142,30 +169,27 @@ class BackendManager(object):
             )
 
         target = self.paths.backends / spec.name / normalized_version
-        lock_path = self._lock_path(spec.name)
-        with BackendOperationLock(lock_path):
-            if target.exists():
-                installed = self._load_installed_manifest(target / "manifest.json")
-                if installed.sha256 != actual_sha256:
-                    raise BackendAlreadyInstalledError(
-                        "%s %s already exists with a different digest" % (spec.name, normalized_version)
-                    )
-                self._verify_installed_executable(installed)
-                self.probe_runner(installed)
-            else:
-                installed = self._install_new_version(
-                    spec,
-                    normalized_version,
-                    archive,
-                    actual_sha256,
-                    asset_name or archive.name,
-                    source_url,
-                    selected_platform,
-                    archive_executable,
-                    target,
+        self._reject_backend_alias(self.paths.backends, spec.name, target)
+        if target.exists():
+            installed = self._load_installed_manifest(target / "manifest.json")
+            if installed.sha256 != actual_sha256:
+                raise BackendAlreadyInstalledError(
+                    "%s %s already exists with a different digest" % (spec.name, normalized_version)
                 )
-        if activate:
-            self.switch(spec.name, normalized_version)
+            self._verify_installed_executable(installed)
+            self.probe_runner(installed)
+        else:
+            installed = self._install_new_version(
+                spec,
+                normalized_version,
+                archive,
+                actual_sha256,
+                asset_name or archive.name,
+                source_url,
+                selected_platform,
+                archive_executable,
+                target,
+            )
         return installed
 
     def _install_new_version(
@@ -218,6 +242,10 @@ class BackendManager(object):
         return self._load_installed_manifest(target / "manifest.json")
 
     def list_installed(self, name=None):  # type: (Optional[str]) -> List[InstalledBackend]
+        with JerryProxyOperationLock(self.paths):
+            return self._list_installed_locked(name)
+
+    def _list_installed_locked(self, name=None):
         manifests = []
         if name is not None:
             spec = get_backend(name)
@@ -225,10 +253,14 @@ class BackendManager(object):
         else:
             roots = [self.paths.backends / spec.name for spec in iter_backends()]
         for root in roots:
+            self._reject_backend_alias(self.paths.backends, root.name, root)
             if not root.exists():
                 continue
             manifests.extend(sorted(root.glob("*/manifest.json")))
-        installed = [self._load_installed_manifest(manifest) for manifest in manifests]
+        installed = []
+        for manifest in manifests:
+            self._reject_backend_alias(self.paths.backends, manifest.parent.parent.name, manifest.parent)
+            installed.append(self._load_installed_manifest(manifest))
         grouped = []
         for spec in iter_backends():
             versions = [item for item in installed if item.name == spec.name]
@@ -236,9 +268,14 @@ class BackendManager(object):
         return grouped
 
     def get_installed(self, name, version):  # type: (str, str) -> InstalledBackend
+        with JerryProxyOperationLock(self.paths):
+            return self._get_installed_locked(name, version)
+
+    def _get_installed_locked(self, name, version):
         spec = get_backend(name)
         normalized_version = spec.normalize_version(version)
         manifest = self.paths.backends / spec.name / normalized_version / "manifest.json"
+        self._reject_backend_alias(self.paths.backends, spec.name, manifest.parent)
         if not manifest.is_file():
             raise BackendNotInstalledError("%s %s is not installed" % (spec.name, normalized_version))
         installed = self._load_installed_manifest(manifest)
@@ -253,23 +290,29 @@ class BackendManager(object):
 
     def verify(self, name=None):  # type: (Optional[str]) -> List[InstalledBackend]
         """Re-hash installed executables and return every verified version."""
-        installed = self.list_installed(name=name)
-        for item in installed:
-            self._verify_installed_executable(item)
-        return installed
+        with JerryProxyOperationLock(self.paths):
+            installed = self._list_installed_locked(name=name)
+            for item in installed:
+                self._verify_installed_executable(item)
+            return installed
 
     def switch(self, name, version):  # type: (str, str) -> ActiveBackend
+        with JerryProxyOperationLock(self.paths):
+            return self._switch_locked(name, version)
+
+    def _switch_locked(self, name, version):
         spec = get_backend(name)
         link = self.paths.bin / spec.executable_filename(self.platform_info)
         active_manifest = self.paths.active / ("%s.json" % spec.name)
-        with BackendOperationLock(self._lock_path(spec.name)):
-            installed = self.get_installed(spec.name, version)
-            self._verify_installed_executable(installed)
-            self.probe_runner(installed)
-            link_backup = link.with_name(".%s.%s.rollback" % (link.name, uuid.uuid4().hex))
-            manifest_backup = active_manifest.with_name(".%s.%s.rollback" % (active_manifest.name, uuid.uuid4().hex))
-            had_link = os.path.lexists(str(link))
-            had_manifest = active_manifest.is_file()
+        installed = self._get_installed_locked(spec.name, version)
+        self._verify_installed_executable(installed)
+        self.probe_runner(installed)
+        link_backup = link.with_name(".%s.%s.rollback" % (link.name, uuid.uuid4().hex))
+        manifest_backup = active_manifest.with_name(".%s.%s.rollback" % (active_manifest.name, uuid.uuid4().hex))
+        had_link = os.path.lexists(str(link))
+        had_manifest = active_manifest.is_file()
+        discard_backups = True
+        try:
             if had_link:
                 self._backup_path(link, link_backup)
             if had_manifest:
@@ -287,10 +330,13 @@ class BackendManager(object):
                 atomic_write_json(active_manifest, value)
             except OSError:
                 # Filesystem failures must restore the previously active command and manifest.
+                discard_backups = False
                 self._restore_path(link, link_backup, had_link)
                 self._restore_path(active_manifest, manifest_backup, had_manifest)
+                discard_backups = True
                 raise
-            finally:
+        finally:
+            if discard_backups:
                 self._remove_path(link_backup)
                 self._remove_path(manifest_backup)
         return ActiveBackend(
@@ -321,11 +367,13 @@ class BackendManager(object):
         finally:
             if os.path.lexists(str(temporary)):
                 temporary.unlink()
-        if os.name == "posix" and link_mode == "copy":
-            link.chmod(0o755)
         return link_mode
 
     def current(self, name):  # type: (str) -> Optional[ActiveBackend]
+        with JerryProxyOperationLock(self.paths):
+            return self._current_locked(name)
+
+    def _current_locked(self, name):
         spec = get_backend(name)
         manifest = self.paths.active / ("%s.json" % spec.name)
         if not manifest.is_file():
@@ -339,14 +387,16 @@ class BackendManager(object):
         try:
             version = spec.normalize_version(value["version"])
         except ValueError:
+            # BackendSpec rejects malformed versions read from the active manifest.
             raise BackendNotInstalledError("active backend manifest has an invalid version: %s" % manifest)
         if version != value["version"] or value["link_mode"] not in ("symlink", "copy"):
             raise BackendNotInstalledError("invalid active backend manifest: %s" % manifest)
         executable_path = self._safe_relative_path(value["executable"], manifest, "executable")
         link_path = self._safe_relative_path(value["link"], manifest, "link")
         try:
-            installed = self.get_installed(spec.name, version)
+            installed = self._get_installed_locked(spec.name, version)
         except BackendNotInstalledError:
+            # Active state may reference an install that is missing or invalid.
             raise BackendNotInstalledError("active %s backend is incomplete" % spec.name)
         expected_link = self.paths.bin / spec.executable_filename(self.platform_info)
         if executable_path != installed.executable or link_path != expected_link:
@@ -369,12 +419,26 @@ class BackendManager(object):
         )
 
     def list_active(self):  # type: () -> List[ActiveBackend]
+        with JerryProxyOperationLock(self.paths):
+            return self._list_active_locked()
+
+    def _list_active_locked(self, name=None):
         active = []
-        for spec in iter_backends():
-            item = self.current(spec.name)
+        specs = (get_backend(name),) if name is not None else iter_backends()
+        for spec in specs:
+            item = self._current_locked(spec.name)
             if item is not None:
                 active.append(item)
         return active
+
+    def inventory(self, name=None):  # type: (Optional[str]) -> BackendInventory
+        """Return one lock-consistent installed and active backend snapshot."""
+
+        with JerryProxyOperationLock(self.paths):
+            return BackendInventory(
+                installed=tuple(self._list_installed_locked(name)),
+                active=tuple(self._list_active_locked(name)),
+            )
 
     def remove(self, name, version, force=False, downloads=False):
         # type: (str, str, bool, bool) -> RemovalResult
@@ -382,22 +446,20 @@ class BackendManager(object):
 
         spec = get_backend(name)
         normalized_version = spec.normalize_version(version)
-        with BackendOperationLock(self._lock_path(spec.name)):
+        with JerryProxyOperationLock(self.paths):
             cleanup_targets = self._download_cleanup_targets(spec.name, normalized_version) if downloads else []
-            installed = self.get_installed(spec.name, normalized_version)
-            active = self.current(spec.name)
+            installed = self._get_installed_locked(spec.name, normalized_version)
+            active = self._current_locked(spec.name)
             if active is not None and active.version == installed.version:
                 if not force:
                     raise BackendActiveError(
                         "%s %s is active; switch versions or use --force" % (spec.name, installed.version)
                     )
-                self._deactivate(active)
-            shutil.rmtree(str(installed.manifest.parent))
-            self._remove_empty_directory(installed.manifest.parent.parent)
-            cleanup = (
-                self._remove_cleanup_targets(("downloads",), cleanup_targets)
-                if downloads
-                else CleanupResult((), 0, 0)
+            cleanup = self._remove_transaction_locked(
+                (installed,),
+                active if active and active.version == installed.version else None,
+                cleanup_targets,
+                downloads,
             )
         return RemovalResult(spec.name, (installed.version,), cleanup)
 
@@ -405,20 +467,11 @@ class BackendManager(object):
         """Remove every installed version of one backend and deactivate it."""
 
         spec = get_backend(name)
-        with BackendOperationLock(self._lock_path(spec.name)):
+        with JerryProxyOperationLock(self.paths):
             cleanup_targets = self._download_cleanup_targets(spec.name, None) if downloads else []
-            installed = self.list_installed(spec.name)
-            active = self.current(spec.name)
-            if active is not None:
-                self._deactivate(active)
-            for item in installed:
-                shutil.rmtree(str(item.manifest.parent))
-            self._remove_empty_directory(self.paths.backends / spec.name)
-            cleanup = (
-                self._remove_cleanup_targets(("downloads",), cleanup_targets)
-                if downloads
-                else CleanupResult((), 0, 0)
-            )
+            installed = self._list_installed_locked(spec.name)
+            active = self._current_locked(spec.name)
+            cleanup = self._remove_transaction_locked(installed, active, cleanup_targets, downloads)
         return RemovalResult(spec.name, tuple(item.version for item in installed), cleanup)
 
     def clean(self, name=None, version=None, areas=None):
@@ -444,12 +497,7 @@ class BackendManager(object):
             if version is not None:
                 normalized_version = spec.normalize_version(version)
 
-        lock_names = []
-        if "downloads" in selected_areas:
-            lock_names = [normalized_name] if normalized_name else [spec.name for spec in iter_backends()]
-        with ExitStack() as stack:
-            for lock_name in lock_names:
-                stack.enter_context(BackendOperationLock(self._lock_path(lock_name)))
+        with JerryProxyOperationLock(self.paths):
             targets = []
             for area in selected_areas:
                 if area == "downloads":
@@ -461,6 +509,10 @@ class BackendManager(object):
     def list_cached_versions(self, name=None):  # type: (Optional[str]) -> dict
         """Return exact cached release versions grouped by backend name."""
 
+        with JerryProxyOperationLock(self.paths):
+            return self._list_cached_versions_locked(name)
+
+    def _list_cached_versions_locked(self, name=None):
         names = [get_backend(name).name] if name is not None else [spec.name for spec in iter_backends()]
         cached = {}
         for backend_name in names:
@@ -481,12 +533,160 @@ class BackendManager(object):
             cached[backend_name] = tuple(sorted(versions, key=version_sort_key, reverse=True))
         return cached
 
-    def _deactivate(self, active):  # type: (ActiveBackend) -> None
-        if os.path.lexists(str(active.link)):
-            active.link.unlink()
-        active_manifest = self.paths.active / ("%s.json" % active.name)
-        if active_manifest.exists():
-            active_manifest.unlink()
+    def _remove_transaction_locked(self, installed, active, cleanup_targets, downloads):
+        # type: (Iterable[InstalledBackend], Optional[ActiveBackend], Iterable[Path], bool) -> CleanupResult
+        installed = tuple(installed)
+        cleanup_targets = tuple(cleanup_targets)
+        measured_cleanup_targets = []
+        for target in cleanup_targets:
+            self._validate_cleanup_chain(self.paths.downloads, target)
+            if not os.path.lexists(str(target)):
+                continue
+            measured_cleanup_targets.append(
+                (
+                    target,
+                    removal_module._secure_path_size(
+                        self.paths.downloads,
+                        target,
+                        CleanupScopeError,
+                    ),
+                )
+            )
+        for item in installed:
+            self._reject_backend_alias(self.paths.backends, item.name, item.manifest.parent)
+            removal_module._validate_removal_tree(
+                self.paths.backends,
+                item.manifest.parent,
+                IntegrityError,
+            )
+
+        existing_cleanup_targets = []
+        cleanup_size = 0
+        for target, measured_size in measured_cleanup_targets:
+            self._validate_cleanup_chain(self.paths.downloads, target)
+            if not os.path.lexists(str(target)):
+                continue
+            removal_module._validate_removal_tree(
+                self.paths.downloads,
+                target,
+                CleanupScopeError,
+            )
+            existing_cleanup_targets.append(target)
+            cleanup_size += measured_size
+
+        transaction = self.paths.runtimes / (".remove-%s" % uuid.uuid4().hex)
+        ensure_private_directory(transaction)
+        removal_module._validate_removal_tree(
+            self.paths.runtimes,
+            transaction,
+            IntegrityError,
+        )
+        sources = []
+        for index, target in enumerate(existing_cleanup_targets):
+            sources.append((target, transaction / ("download-%d" % index), "download"))
+        for index, item in enumerate(installed):
+            sources.append((item.manifest.parent, transaction / ("installed-%d" % index), "installed"))
+        if active is not None:
+            sources.append((active.link, transaction / "active-link", "active-link"))
+            sources.append(
+                (
+                    self.paths.active / ("%s.json" % active.name),
+                    transaction / "active-manifest",
+                    "active-manifest",
+                )
+            )
+
+        if not sources:
+            transaction.rmdir()
+            return CleanupResult(
+                ("downloads",) if downloads else (),
+                0,
+                0,
+            )
+
+        moves = [
+            removal_module._removal_move(self.paths, source, destination, kind)
+            for source, destination, kind in sources
+        ]
+        removal_module._write_removal_journal(transaction, moves)
+
+        moved = []
+        backend_root = installed[0].manifest.parent.parent if installed else None
+        try:
+            for (source, destination, kind), move in zip(sources, moves):
+                removal_module._validate_chain(
+                    self.paths.runtimes,
+                    destination.parent,
+                    IntegrityError,
+                )
+                if kind == "download":
+                    self._validate_cleanup_chain(self.paths.downloads, source)
+                    removal_module._validate_removal_tree(
+                        self.paths.downloads,
+                        source,
+                        CleanupScopeError,
+                    )
+                    error_type = CleanupScopeError
+                elif kind == "installed":
+                    self._reject_backend_alias(self.paths.backends, source.parent.name, source)
+                    removal_module._validate_removal_tree(
+                        self.paths.backends,
+                        source,
+                        IntegrityError,
+                    )
+                    error_type = IntegrityError
+                elif kind == "active-link":
+                    self._validate_cleanup_chain(self.paths.bin, source.parent)
+                    error_type = IntegrityError
+                else:
+                    self._validate_cleanup_chain(self.paths.active, source)
+                    removal_module._validate_removal_tree(
+                        self.paths.active,
+                        source,
+                        IntegrityError,
+                    )
+                    error_type = IntegrityError
+                os.replace(str(source), str(destination))
+                moved.append(move)
+                if kind == "download":
+                    self._validate_cleanup_chain(self.paths.downloads, source)
+                elif kind == "installed":
+                    self._reject_backend_alias(self.paths.backends, source.parent.name, source)
+                else:
+                    self._validate_cleanup_chain(getattr(self.paths, move["source"].split("/", 1)[0]), source.parent)
+                removal_module._validate_staged_move(
+                    self.paths,
+                    transaction,
+                    move,
+                    error_type,
+                )
+            if backend_root is not None:
+                self._remove_empty_directory(backend_root)
+            removal_module._write_removal_journal(transaction, moves, phase="committed")
+        except (OSError, CleanupScopeError, IntegrityError):
+            # A staging failure restores every path already moved into quarantine.
+            removal_module._rollback_removal_transaction(
+                self.paths,
+                transaction,
+                moved,
+                replace=os.replace,
+            )
+            removal_module._discard_rolled_back_transaction(self.paths, transaction)
+            raise
+
+        try:
+            removal_module._dispose_removal_transaction(self.paths, transaction)
+        except OSError as error:
+            # Public state is already atomically absent; retain private evidence for explicit cleanup.
+            raise RemovalCleanupError(
+                "backend removal committed but quarantine cleanup failed at %s; "
+                "run 'jerryproxy backend clean --runtimes -y'" % transaction
+            ) from error
+        return CleanupResult(
+            ("downloads",) if downloads else (),
+            len(existing_cleanup_targets),
+            cleanup_size,
+        )
 
     def _download_cleanup_targets(self, name, version):
         # type: (Optional[str], Optional[str]) -> List[Path]
@@ -509,8 +709,10 @@ class BackendManager(object):
     def _validate_cleanup_chain(self, root, target):  # type: (Path, Path) -> None
         current = target
         while True:
-            if current.is_symlink():
-                raise CleanupScopeError("refusing cleanup through managed symlink: %s" % current)
+            if is_path_alias(current):
+                raise CleanupScopeError(
+                    "refusing cleanup through managed symlink or Windows path alias: %s" % current
+                )
             if current == root:
                 return
             if current == self.paths.root or current.parent == current:
@@ -519,39 +721,42 @@ class BackendManager(object):
 
     def _remove_cleanup_targets(self, areas, targets):
         # type: (Iterable[str], Iterable[Path]) -> CleanupResult
+        selected_areas = tuple(areas)
         removed = 0
         reclaimed = 0
         for target in targets:
+            for area in selected_areas:
+                root = getattr(self.paths, area)
+                try:
+                    target.relative_to(root)
+                except ValueError:
+                    # Path.relative_to rejects targets outside this candidate cleanup area.
+                    continue
+                self._validate_cleanup_chain(root, target)
+                break
+            else:
+                raise CleanupScopeError("cleanup target escapes managed areas: %s" % target)
             if not os.path.lexists(str(target)):
                 continue
-            reclaimed += self._path_size(target)
-            if target.is_symlink() or not target.is_dir():
-                target.unlink()
-            else:
-                shutil.rmtree(str(target))
+            reclaimed += removal_module._secure_path_size(root, target, CleanupScopeError)
+            self._validate_cleanup_chain(root, target)
+            removal_module._secure_remove_tree(root, target, CleanupScopeError)
             removed += 1
-        return CleanupResult(tuple(areas), removed, reclaimed)
-
-    @classmethod
-    def _path_size(cls, path):  # type: (Path) -> int
-        if path.is_symlink() or not path.is_dir():
-            return path.lstat().st_size
-        return sum(cls._path_size(child) for child in path.iterdir())
+        return CleanupResult(selected_areas, removed, reclaimed)
 
     @staticmethod
-    def _remove_empty_directory(path):  # type: (Path) -> None
+    def _remove_empty_directory(path):  # type: (Path) -> bool
         try:
             path.rmdir()
+            return True
         except FileNotFoundError:
             # Another cleanup path may already have removed this empty parent.
-            return
+            return False
         except OSError as error:
             # A non-empty parent is intentionally preserved; other filesystem errors remain fatal.
             if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
                 raise
-
-    def _lock_path(self, name):  # type: (str) -> Path
-        return self.paths.locks / ("backend-%s.lock" % name)
+            return False
 
     def _default_asset_platform(self, name):  # type: (str) -> str
         supported = {item.asset_key for item in iter_backend_platforms(name)}
@@ -559,6 +764,14 @@ class BackendManager(object):
             if key in supported:
                 return key
         raise UnsupportedPlatformError("%s has no catalog platform for %s" % (name, self.platform_info.key))
+
+    @staticmethod
+    def _reject_backend_alias(area, name, target):  # type: (Path, str, Path) -> None
+        backend_root = area / name
+        if is_path_alias(backend_root) or is_path_alias(target):
+            raise IntegrityError(
+                "managed backend path must not be a symlink or Windows path alias: %s" % target
+            )
 
     @staticmethod
     def _backup_path(source, backup):  # type: (Path, Path) -> None
@@ -597,6 +810,7 @@ class BackendManager(object):
             spec = get_backend(value["name"])
             normalized_version = spec.normalize_version(value["version"])
         except (UnsupportedBackendError, ValueError):
+            # Installed manifest identity fields may contain an unknown backend or invalid version.
             raise BackendNotInstalledError("invalid installed backend identity: %s" % manifest)
         expected_manifest = self.paths.backends / spec.name / normalized_version / "manifest.json"
         if value["version"] != normalized_version or manifest.absolute() != expected_manifest.absolute():
@@ -604,6 +818,7 @@ class BackendManager(object):
         try:
             manifest.resolve().relative_to(self.paths.backends.resolve())
         except ValueError:
+            # Path.relative_to rejects a resolved manifest outside the backend tree.
             raise BackendNotInstalledError("installed backend manifest escapes the backend home: %s" % manifest)
         supported_platforms = {item.asset_key for item in iter_backend_platforms(spec.name)}
         if value["platform"] not in supported_platforms:
@@ -614,6 +829,7 @@ class BackendManager(object):
         try:
             (manifest.parent / executable).resolve().relative_to(manifest.parent.resolve())
         except ValueError:
+            # Path.relative_to rejects a resolved executable outside its immutable version.
             raise BackendNotInstalledError("installed backend executable escapes its version directory: %s" % manifest)
         for digest_key in ("sha256", "executable_sha256"):
             digest = str(value[digest_key]).lower()
@@ -641,9 +857,4 @@ class BackendManager(object):
         relative = Path(value)
         if relative.is_absolute() or ".." in relative.parts:
             raise BackendNotInstalledError("unsafe %s path in active backend manifest: %s" % (field, manifest))
-        path = self.paths.root / relative
-        try:
-            path.absolute().relative_to(self.paths.root.absolute())
-        except ValueError:
-            raise BackendNotInstalledError("unsafe %s path in active backend manifest: %s" % (field, manifest))
-        return path
+        return self.paths.root / relative

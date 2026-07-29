@@ -81,10 +81,21 @@ active version, or remove every version of one backend:
    jerryproxy backend remove mihomo -A
    jerryproxy backend remove mihomo -A --downloads
 
-``--downloads`` removes the matching verified release cache in the same
-operation. ``-A`` deactivates the backend before deleting all of its immutable
-version directories. In non-interactive automation, add ``-y`` only after
-specifying the complete target.
+``--downloads`` includes the matching verified release cache in the same
+home-wide transaction. Removal first moves every selected cache, immutable
+version, active link, and active manifest into a private
+``runtimes/.remove-*`` quarantine using atomic renames. A private
+``journal.json`` with no format-version field is persisted before the first
+rename. Any staging failure restores moved paths in reverse order before
+physical deletion begins. If the process terminates, the next home-wide lock
+acquisition restores a staging journal or finishes disposal for a committed
+journal. Invalid, ambiguous, aliased, or identity-mismatched recovery state
+fails closed with ``IntegrityError``. Once all public paths are absent the
+logical removal is committed and the quarantine is deleted. A quarantine
+deletion failure is reported as ``RemovalCleanupError``;
+the consistent public state remains committed and ``clean --runtimes`` can
+retry disposal. In non-interactive automation, add ``-y`` only after specifying
+the complete target.
 
 Cleanup can target one cached backend version, one backend cache, selected
 global areas, all downloads, or every disposable area:
@@ -101,8 +112,22 @@ global areas, all downloads, or every disposable area:
 It never deletes ``backends``, ``bin``, ``active``, or ``locks``. Backend and
 version scopes apply only to downloads because the other state areas do not
 yet have a stable per-backend ownership layout. Empty targets are idempotent.
-Managed symlink components are rejected instead of followed, and download
-cleanup shares the same backend operation locks as installation and removal.
+Managed symlink and Windows reparse-point components, including junctions, are
+rejected instead of followed. Download cleanup shares the same home-wide
+operation lock as installation and removal. Cleanup revalidates each target's
+complete managed ancestor chain immediately before deletion and rejects aliases
+inside removal trees so a path swap after target collection fails closed.
+Recursive disposal repeatedly checks path identity and never delegates managed
+trees to an implementation that can traverse a Windows junction. The one
+journal-recorded active-command symlink is unlinked directly without following
+its target.
+
+Managed-state access is serialized by the upstream ``filelock.FileLock`` at
+``~/.jerryproxy/locks/jerryproxy.lock``. The default timeout is zero, so a
+second command fails immediately instead of waiting behind a download. The lock
+file may remain after release; JerryProxy does not inspect owner metadata or
+attempt stale-lock recovery. Installation holds this lock from cache validation
+and download through extraction, publication, probing, and optional activation.
 
 Activation uses an atomic relative symbolic link on Unix-like systems. Windows
 without symlink privilege receives an atomic verified executable copy; the

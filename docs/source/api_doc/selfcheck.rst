@@ -6,6 +6,13 @@ jerryproxy.selfcheck
 .. automodule:: jerryproxy.selfcheck
 
 
+CheckResult
+-----------------------------------------------------
+
+.. autoclass:: CheckResult
+   :members: level,detail,ok,warn,fail,err
+
+
 ansi\_color\_enabled
 -----------------------------------------------------
 

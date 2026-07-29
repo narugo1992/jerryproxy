@@ -114,6 +114,14 @@ class ActiveBackend:
 
 
 @dataclass(frozen=True)
+class BackendInventory:
+    """One lock-consistent snapshot of installed and active backends."""
+
+    installed: tuple
+    active: tuple
+
+
+@dataclass(frozen=True)
 class CleanupResult:
     """Summary of targets removed from managed disposable storage."""
 

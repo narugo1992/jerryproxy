@@ -95,20 +95,56 @@ authentication, extraction, process, or permission errors to warnings.
   unit tests.
 - Keep `urllib3` below 2 while Python 3.7/OpenSSL 1.1.0 standalone build
   compatibility remains a target; use the latest patched 1.26 release floor.
+- Serialize all managed-state reads and mutations for one logical home through
+  the upstream `filelock.FileLock` at `<home>/locks/jerryproxy.lock`, using the
+  public API only and a default timeout of zero.
+- Never add PID/UUID owner metadata, inspect lock contents, infer stale
+  ownership from the path, delete the lock file on release, access `filelock`
+  private state, or implement a second platform lock.
+- Keep the full install workflow under one acquisition, including cache
+  validation, download, hashing, extraction, publication, probing, and optional
+  activation. Composed operations must call private locked helpers instead of
+  recursively acquiring a second lock.
+- Read operations use the same home-wide lock. CLI list, doctor, and self-check
+  must consume one `BackendInventory` snapshot for installed and active state.
+- Python 3.7-3.9 use the newest compatible legacy `filelock` lines. Report that
+  known limitation as `WARN`, recommend Python 3.10+, and do not attempt a local
+  security repair. Python 3.10+ must use `filelock>=3.30` so fork ownership is
+  handled by the upstream dependency.
 - Install through a private staging directory and atomically rename only after
   validation succeeds.
 - Never overwrite an installed version with different bytes.
-- A failed install or switch must leave the previous active backend usable.
+- A failed install, switch, or forced active-version removal must leave the
+  previous active backend usable. If rollback itself fails, preserve every
+  remaining recovery artifact instead of deleting the evidence.
+- Removal stages selected downloads, installed versions, and active state into
+  one private `runtimes/.remove-*` quarantine through atomic renames. A staging
+  journal with no format-version field must be persisted before the first rename.
+  A staging failure must roll back in reverse order before physical deletion.
+  Every later home-lock acquisition must recover an interrupted staging journal
+  by restoring it, or finish disposal for an interrupted committed journal.
+  Invalid, ambiguous, aliased, or identity-mismatched journals fail closed with
+  `IntegrityError`. Once all public paths are absent, quarantine deletion
+  failure is a `RemovalCleanupError`; retain the quarantine for explicit runtime
+  cleanup.
 - Do not auto-update or execute a newly downloaded backend without an explicit
   user operation and a tested version policy.
 - Backend cleanup may empty only `downloads`, `logs`, `providers`, and
   `runtimes`. It must never treat `backends`, `bin`, `active`, or `locks` as
   disposable. Backend/version-scoped cleanup applies only to downloads.
-- Cleanup must reject managed symlink components, share backend locks with
-  downloads/install/removal, remain idempotent for missing targets, and never
-  escape the configured JerryProxy home.
-- Home initialization must reject symlinked managed subdirectories before
-  applying permissions or performing any mutation through them.
+- Cleanup and backend removal must reject managed symlink and Windows
+  reparse-point components, including junctions, share the home-wide lock with
+  downloads/install/removal, remain idempotent for missing cleanup targets, and
+  never escape the configured JerryProxy home. Revalidate each cleanup target's
+  complete managed ancestor chain and removal tree before deletion. Recursive
+  removal must use alias-aware JerryProxy code rather than `shutil.rmtree`, and
+  must recheck object identity throughout traversal. A transaction may safely
+  unlink only its journal-recorded active-command symlink; arbitrary aliases
+  within a quarantine remain integrity failures.
+- Home initialization must reject symlinked or Windows reparse-point managed
+  subdirectories before and immediately after creation, before applying
+  permissions or mutating through them. It must also reject an aliased lock file
+  before `filelock` opens it. The configured home root itself may be an alias.
 - Destructive removal and cleanup require an `InquirerPy` confirmation. The
   `-y/--yes` bypass exists for complete non-interactive commands and must not
   infer a missing backend, version, or cleanup scope.
@@ -149,8 +185,12 @@ authentication, extraction, process, or permission errors to warnings.
   selection. It performs no release API request.
 - `jerryproxy.backend.download`: bounded HTTPS and digest verification.
 - `jerryproxy.backend.archive`: safe extraction only.
+- `jerryproxy.backend.removal`: private crash recovery and alias-aware removal
+  primitives. It exposes no supported user-facing API.
 - `jerryproxy.backend.manager`: immutable installation, activation, rollback,
   and removal.
+- `jerryproxy.lock`: direct home-wide `filelock` integration and compatibility
+  status. It must not grow a second lock implementation.
 - Future runtime drivers own generated configuration and backend control APIs.
 - Future subscription management may fetch and inventory containers, but must
   not normalize protocol-specific credentials/settings into a second core.
@@ -164,7 +204,7 @@ built in until a separate trust model is designed.
 ```shell
 make unittest
 make unittest RANGE_DIR=./backend
-make unittest MIN_COVERAGE=90
+make unittest MIN_COVERAGE=97
 make lint
 make rst_auto
 make rst_auto RANGE_DIR=backend
@@ -193,12 +233,15 @@ The product unit-test boundary is the `jerryproxy` package. Do not create a
 unit-test scripts below `tools/`. Validate maintenance tools through their
 dedicated Make targets and repository workflows instead.
 
+Self-check has exactly four levels: `OK` is green, `WARN` is yellow, and
+`FAIL`/`ERR` are red. Only `FAIL` and `ERR` contribute a nonzero exit status.
+
 Every unit-test matrix cell must produce its own `coverage.xml` and upload it to
 Codecov with the shared `python` aggregation flag and a unique environment
 upload name. Upload failures fail trusted CI jobs. Fork pull requests must skip
 the upload because GitHub intentionally withholds repository secrets; their
 tests and local coverage gate still run normally. The statement-coverage floor
-is 90% locally and in every matrix cell. Never print or persist
+is 97% locally and in every matrix cell. Never print or persist
 `CODECOV_TOKEN`.
 The `test` tree is a Python package: every directory below `test/` must contain
 an `__init__.py`, including newly added test-area directories.
@@ -216,6 +259,9 @@ Leap 15.0 containers. Each job must verify both distribution ID and version;
 the build ELF gate must reject external glibc symbol requirements newer than
 2.17. Do not substitute unit tests, ELF inspection, or build-container
 execution for clean compatibility-container verification.
+The standalone builds use Python 3.7 and therefore bundle the legacy `filelock`
+line. Documentation and self-check must disclose that risk and direct users who
+prioritize upstream lock hardening to the Python 3.10+ pip installation.
 Document EOL compatibility targets as binary regression environments, never as
 a claim of continuing distribution security maintenance.
 

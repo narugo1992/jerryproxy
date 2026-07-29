@@ -1,7 +1,6 @@
 """JerryProxy command-line interface."""
 
 import json
-import sys
 from pathlib import Path
 
 import click
@@ -13,6 +12,7 @@ from .backend import BackendManager, get_backend, iter_backends
 from .config.meta import __VERSION__
 from .errors import JerryProxyError
 from .home import JerryProxyPaths
+from .lock import filelock_status
 from .selfcheck import ansi_color_enabled, run_self_check
 
 #: Click context settings used by the root command.
@@ -94,10 +94,11 @@ def _select_catalog_version(manager, name):  # type: (BackendManager, str) -> Op
 
 def _select_installed_version(manager, name, allow_all=False):
     # type: (BackendManager, str, bool) -> str
-    installed = manager.list_installed(name)
+    inventory = manager.inventory(name)
+    installed = inventory.installed
     if not installed:
         raise click.ClickException("no installed versions found for %s" % name)
-    active = manager.current(name)
+    active = inventory.active[0] if inventory.active else None
     choices = []
     if allow_all:
         choices.append(Choice("__all__", name="All installed versions"))
@@ -147,6 +148,8 @@ def doctor_command(context):  # type: (click.Context) -> None
     catalog_summary = manager.catalog.summary(manager.platform_info)
     compatible = sum(1 for value in catalog_summary.values() if value["latest"] is not None)
     click.echo("Catalog compatibility: %d/%d backends" % (compatible, len(catalog_summary)))
+    lock_status = filelock_status()
+    click.echo("File lock: %s - %s" % (lock_status.level, lock_status.detail))
     _echo_table(
         ["BACKEND", "RELEASES", "COMPATIBLE", "LATEST"],
         [
@@ -154,8 +157,9 @@ def doctor_command(context):  # type: (click.Context) -> None
             for name, value in sorted(catalog_summary.items())
         ],
     )
-    click.echo("Installed backends: %d" % len(manager.list_installed()))
-    active = manager.list_active()
+    inventory = manager.inventory()
+    click.echo("Installed backends: %d" % len(inventory.installed))
+    active = inventory.active
     click.echo("Active backends: %d" % len(active))
     if active:
         _echo_table(
@@ -217,7 +221,6 @@ def _format_size(size):  # type: (int) -> str
         if value < 1024.0 or suffix == "GiB":
             return "%.1f %s" % (value, suffix)
         value /= 1024.0
-    return "%d B" % size
 
 
 def _available_record(manager, version, artifact):
@@ -365,13 +368,10 @@ def backend_list(context, name, active_only, as_json):
     """List installed versions and their active-link state."""
 
     manager = _manager(context)
-    if name is None:
-        active_items = manager.list_active()
-    else:
-        active = manager.current(name)
-        active_items = [] if active is None else [active]
+    inventory = manager.inventory(name)
+    active_items = inventory.active
     active_by_name = {item.name: item for item in active_items}
-    installed = manager.list_installed(name=name)
+    installed = inventory.installed
     records = []
     for item in installed:
         active = active_by_name.get(item.name)
@@ -584,8 +584,6 @@ def backend_clean(context, name, version, downloads, logs, providers, runtimes, 
         raise click.UsageError("-A/--all cannot be combined with individual cleanup areas")
     if name is not None and (all_areas or any(area != "downloads" for area in selected)):
         raise click.UsageError("backend-scoped cleanup can only target downloads")
-    if version is not None and name is None:
-        raise click.UsageError("a cleanup VERSION requires NAME")
     if all_areas:
         selected = ["downloads", "logs", "providers", "runtimes"]
     elif not selected:
@@ -622,7 +620,3 @@ def main():  # type: () -> int
         error.show()
         return error.exit_code
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

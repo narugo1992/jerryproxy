@@ -4,6 +4,7 @@ import os
 import pytest
 import requests
 
+import jerryproxy.backend.download as download_module
 from jerryproxy.backend.download import AssetDownloader
 from jerryproxy.errors import DownloadError, IntegrityError
 
@@ -269,7 +270,7 @@ def test_download_replaces_a_stale_partial_file(tmp_path):
 
 def test_download_progress_reports_connection_bytes_and_completion(tmp_path):
     payload = b"abcdef"
-    response = FakeResponse(payload, chunks=[b"ab", b"cdef"])
+    response = FakeResponse(payload, chunks=[b"", b"ab", b"cdef"])
     session = FakeSession(response=response)
     factory = FakeProgressFactory()
     target = tmp_path / "backend.gz"
@@ -293,6 +294,33 @@ def test_download_progress_reports_connection_bytes_and_completion(tmp_path):
     assert progress.kwargs["unit_scale"] is True
     assert progress.kwargs["disable"] is False
     assert progress.closed
+
+
+def test_download_closes_raw_descriptor_when_fdopen_fails(tmp_path, monkeypatch):
+    payload = b"backend"
+    downloader, _ = make_downloader(FakeResponse(payload))
+    closed = []
+    real_close = download_module.os.close
+
+    def fail_fdopen(descriptor, mode):
+        raise OSError("fdopen unavailable")
+
+    def close(descriptor):
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(download_module.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(download_module.os, "close", close)
+
+    with pytest.raises(OSError, match="fdopen unavailable"):
+        downloader.download(
+            "https://example.test/backend.gz",
+            tmp_path / "backend.gz",
+            hashlib.sha256(payload).hexdigest(),
+        )
+
+    assert len(closed) == 1
+    assert not list(tmp_path.glob(".*.part"))
 
 
 def test_download_progress_reports_failure_and_closes(tmp_path):

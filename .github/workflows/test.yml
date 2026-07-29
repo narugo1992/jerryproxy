@@ -145,7 +145,7 @@ jobs:
           python -m pytest test -sv -m unittest
           --junitxml=junit.xml -o junit_family=legacy
           --cov=jerryproxy --cov-report=term-missing --cov-report=xml
-          --cov-fail-under=90
+          --cov-fail-under=97
       - name: Upload unit coverage to Codecov
         if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
         uses: codecov/codecov-action@v7

@@ -41,9 +41,13 @@ class BackendActiveError(JerryProxyError):
     """Raised when an active backend version cannot be removed."""
 
 
-class BackendBusyError(JerryProxyError):
-    """Raised when another backend operation owns the installation lock."""
+class JerryProxyBusyError(JerryProxyError):
+    """Raised when another process owns the JerryProxy home lock."""
 
 
 class CleanupScopeError(JerryProxyError):
     """Raised when a cleanup target is invalid or escapes its managed area."""
+
+
+class RemovalCleanupError(JerryProxyError):
+    """Raised when removal committed but its private quarantine remains."""

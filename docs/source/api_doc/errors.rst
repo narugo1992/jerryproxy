@@ -66,13 +66,19 @@ BackendActiveError
 .. autoclass:: BackendActiveError
 
 
-BackendBusyError
+JerryProxyBusyError
 -----------------------------------------------------
 
-.. autoclass:: BackendBusyError
+.. autoclass:: JerryProxyBusyError
 
 
 CleanupScopeError
 -----------------------------------------------------
 
 .. autoclass:: CleanupScopeError
+
+
+RemovalCleanupError
+-----------------------------------------------------
+
+.. autoclass:: RemovalCleanupError

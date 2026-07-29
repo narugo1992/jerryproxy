@@ -68,6 +68,7 @@ __pycache__/
 .pyre/
 .pytype/
 .ruff_cache/
+.omx/
 .tox/
 .nox/
 .coverage

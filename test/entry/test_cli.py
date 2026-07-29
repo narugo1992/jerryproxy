@@ -14,6 +14,7 @@ from jerryproxy.backend.manager import BackendManager
 from jerryproxy.backend.platform import detect_platform
 from jerryproxy.cli import cli, main
 from jerryproxy.home import JerryProxyPaths
+from jerryproxy.lock import filelock_status
 
 
 def install_fake_mihomo(home, tmp_path, version, payload, activate):
@@ -64,6 +65,7 @@ def test_doctor_reports_platform_and_counts(tmp_path):
     assert "JerryProxy 0.1.0a1" in result.output
     assert "Installed backends: 0" in result.output
     assert "Active backends: 0" in result.output
+    assert "File lock:" in result.output
     assert "Backend catalog:" in result.output
     assert "Catalog compatibility: 4/4 backends" in result.output
 
@@ -72,10 +74,11 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     result = CliRunner().invoke(cli, ["--home", str(tmp_path), "self-check"])
 
     assert result.exit_code == 0
-    assert "[1/8] Python runtime: OK" in result.output
-    assert "[7/8] packaged backend catalog: OK" in result.output
-    assert "[8/8] backend inventory: OK" in result.output
-    assert "Summary: 8 OK, 0 FAIL" in result.output
+    assert "[1/9] Python runtime: OK" in result.output
+    assert "[7/9] packaged backend catalog: OK" in result.output
+    assert "[8/9] filelock compatibility:" in result.output
+    assert "[9/9] backend inventory: OK" in result.output
+    assert "0 FAIL, 0 ERR" in result.output
     assert "Self-check PASSED" in result.output
 
 
@@ -88,7 +91,10 @@ def test_self_check_can_force_ansi_color(tmp_path):
 
     assert result.exit_code == 0
     assert "\033[1;32mOK\033[0m" in result.output
-    assert "\033[1;32mSelf-check PASSED\033[0m" in result.output
+    if filelock_status().level == "WARN":
+        assert "\033[1;33mSelf-check PASSED with warnings\033[0m" in result.output
+    else:
+        assert "\033[1;32mSelf-check PASSED\033[0m" in result.output
 
 
 def test_self_check_failure_reaches_console_exit_code_through_real_state(tmp_path, monkeypatch, capsys):
@@ -436,6 +442,20 @@ def test_guided_install_uses_real_inquirer_selection_boundary(tmp_path, monkeypa
     assert "Installed: mihomo" in result.output
 
 
+def test_guided_install_reports_when_no_compatible_stable_version_exists(tmp_path, monkeypatch):
+    class EmptyManager(object):
+        def available(self, name):
+            return ()
+
+    monkeypatch.setattr(cli_module, "_manager", lambda context: EmptyManager())
+    monkeypatch.setattr(cli_module, "_select_backend", lambda message: "mihomo")
+
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "install"])
+
+    assert result.exit_code == 1
+    assert "no compatible stable version is available for mihomo" in result.output
+
+
 def test_guided_remove_selects_active_version_and_final_confirmation(tmp_path, monkeypatch):
     home = tmp_path / "home"
     install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=True)
@@ -611,3 +631,147 @@ def test_python_module_entrypoint_executes_real_cli(monkeypatch, capsys):
         runpy.run_module("jerryproxy.__main__", run_name="__main__")
     assert exit_info.value.code == 0
     assert "jerryproxy, version 0.1.0a1" in capsys.readouterr().out
+
+
+def test_interactive_prompts_translate_interrupts_and_missing_input(tmp_path, monkeypatch):
+    class InterruptedPrompt(object):
+        def execute(self):
+            raise KeyboardInterrupt()
+
+    monkeypatch.setattr(cli_module.inquirer, "select", lambda **kwargs: InterruptedPrompt())
+    selected = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend"])
+    assert selected.exit_code == 1
+    assert "interactive selection cancelled" in selected.output
+
+    home = tmp_path / "home"
+    install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=False)
+    monkeypatch.setattr(cli_module.inquirer, "confirm", lambda **kwargs: InterruptedPrompt())
+    removed = CliRunner().invoke(
+        cli,
+        ["--home", str(home), "backend", "remove", "mihomo", "1.0.0"],
+    )
+    assert removed.exit_code == 0
+    assert "Cancelled." in removed.output
+
+
+@pytest.mark.parametrize("error", [EOFError(), KeyboardInterrupt()])
+def test_guided_install_translates_confirmation_failures(tmp_path, monkeypatch, error):
+    manager = BackendManager(JerryProxyPaths(tmp_path / "home"), probe_runner=lambda installed: None)
+
+    class Prompt(object):
+        def execute(self):
+            raise error
+
+    monkeypatch.setattr(cli_module, "_manager", lambda context: manager)
+    monkeypatch.setattr(cli_module, "_select_backend", lambda message: "mihomo")
+    monkeypatch.setattr(cli_module, "_select_catalog_version", lambda selected_manager, name: None)
+    monkeypatch.setattr(cli_module.inquirer, "confirm", lambda **kwargs: Prompt())
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "install"])
+
+    assert result.exit_code == 1
+    assert "interactive selection" in result.output
+
+
+def test_backend_group_rejects_an_unavailable_interactive_action(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_module, "_select", lambda message, choices: "unknown")
+
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend"])
+
+    assert result.exit_code == 1
+    assert "interactive backend operation is unavailable" in result.output
+
+
+def test_available_rejects_global_all_platforms_and_reports_empty_versions(tmp_path, monkeypatch):
+    invalid = CliRunner().invoke(cli, ["backend", "available", "--all-platforms"])
+    assert invalid.exit_code == 2
+    assert "requires a backend NAME" in invalid.output
+
+    class EmptyManager(object):
+        platform_info = detect_platform()
+        catalog = SimpleNamespace(generated_at="2026-01-01T00:00:00Z")
+
+        def available(self, name):
+            return ()
+
+    monkeypatch.setattr(cli_module, "_manager", lambda context: EmptyManager())
+    empty = CliRunner().invoke(cli, ["backend", "available", "mihomo"])
+    assert empty.exit_code == 0
+    assert "No verified stable versions available." in empty.output
+
+
+def test_explicit_install_prints_the_active_link(tmp_path, monkeypatch):
+    executable = tmp_path / "mihomo"
+    link = tmp_path / "bin" / "mihomo"
+    asset = SimpleNamespace(
+        backend="mihomo",
+        version="1.0.0",
+        name="mihomo.gz",
+        sha256="0" * 64,
+    )
+
+    class InstallManager(object):
+        platform_info = detect_platform()
+
+        def resolve_artifact(self, name, version):
+            return asset
+
+        def install(self, name, version, activate):
+            return SimpleNamespace(name=name, version="1.0.0", executable=executable)
+
+        def current(self, name):
+            return SimpleNamespace(link=link, link_mode="symlink")
+
+    monkeypatch.setattr(cli_module, "_manager", lambda context: InstallManager())
+    result = CliRunner().invoke(cli, ["backend", "install", "mihomo", "1.0.0"])
+
+    assert result.exit_code == 0
+    assert "Active link: %s (symlink)" % link in result.output
+
+
+def test_verify_empty_and_remove_invalid_option_combinations(tmp_path):
+    empty = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "verify"])
+    combined = CliRunner().invoke(
+        cli,
+        ["--home", str(tmp_path), "backend", "remove", "mihomo", "1.0.0", "-A", "-y"],
+    )
+    forced_all = CliRunner().invoke(
+        cli,
+        ["--home", str(tmp_path), "backend", "remove", "mihomo", "-A", "--force", "-y"],
+    )
+
+    assert empty.exit_code == 0
+    assert "No backend versions installed." in empty.output
+    assert combined.exit_code == 2
+    assert "VERSION or -A/--all" in combined.output
+    assert forced_all.exit_code == 2
+    assert "--force only applies" in forced_all.output
+
+
+@pytest.mark.parametrize("selected", ["__all__", "1.0.0"])
+def test_guided_remove_handles_all_and_exact_selections(tmp_path, monkeypatch, selected):
+    home = tmp_path / selected.replace("_", "all")
+    install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=True)
+    monkeypatch.setattr(cli_module, "_select_backend", lambda message, names=None: "mihomo")
+    monkeypatch.setattr(
+        cli_module,
+        "_select_installed_version",
+        lambda manager, name, allow_all=False: selected,
+    )
+    monkeypatch.setattr(cli_module, "_prompt_confirm", lambda message, default=False: False)
+    monkeypatch.setattr(cli_module, "_confirm_dangerous_operation", lambda message, assume_yes: True)
+
+    result = CliRunner().invoke(cli, ["--home", str(home), "backend", "remove"])
+
+    assert result.exit_code == 0
+    assert "Removed 1 installed version(s): 1.0.0" in result.output
+
+
+@pytest.mark.parametrize("scope", ["all", "logs"])
+def test_guided_clean_handles_all_and_single_area_scopes(tmp_path, monkeypatch, scope):
+    monkeypatch.setattr(cli_module, "_select", lambda message, choices: scope)
+    monkeypatch.setattr(cli_module, "_confirm_dangerous_operation", lambda message, assume_yes: False)
+
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path / scope), "backend", "clean"])
+
+    assert result.exit_code == 0
+    assert "Cancelled." in result.output

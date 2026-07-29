@@ -1,4 +1,5 @@
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -37,14 +38,89 @@ def test_paths_create_single_private_tree(tmp_path):
         assert all((path.stat().st_mode & 0o777) == 0o700 for path in expected)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink containment behavior")
-def test_paths_reject_managed_directory_symlink_before_permission_changes(tmp_path):
+@pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation may require elevated privileges")
+def test_paths_reject_user_managed_directory_aliases(tmp_path):
     root = tmp_path / "home"
     outside = tmp_path / "outside"
     root.mkdir()
-    outside.mkdir(mode=0o755)
+    outside.mkdir()
     (root / "downloads").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(IntegrityError, match="must not be a symlink"):
         JerryProxyPaths(root).ensure()
-    assert outside.stat().st_mode & 0o777 == 0o755
+    assert (root / "downloads").is_symlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation may require elevated privileges")
+def test_paths_reject_a_separate_lock_directory_alias(tmp_path):
+    root = tmp_path / "home"
+    root.mkdir()
+    outside = tmp_path / "outside-locks"
+    outside.mkdir()
+    (root / "locks").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(IntegrityError, match="must not be a symlink"):
+        JerryProxyPaths(root).ensure()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation may require elevated privileges")
+def test_paths_reject_a_lock_file_alias_without_touching_its_target(tmp_path):
+    paths = JerryProxyPaths(tmp_path / "home")
+    paths.locks.mkdir(parents=True)
+    outside = tmp_path / "outside-lock-target"
+    outside.write_bytes(b"must remain unchanged")
+    paths.lock_file.symlink_to(outside)
+
+    with pytest.raises(IntegrityError, match="lock file must not be a symlink"):
+        paths.ensure()
+
+    assert outside.read_bytes() == b"must remain unchanged"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation may require elevated privileges")
+def test_paths_recheck_managed_directory_aliases_after_creation(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / "home")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "marker"
+    marker.write_bytes(b"outside")
+    original_mkdir = Path.mkdir
+    replaced = []
+
+    def replace_downloads_after_creation(path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if path == paths.downloads and not replaced:
+            path.rmdir()
+            path.symlink_to(outside, target_is_directory=True)
+            replaced.append(path)
+        return result
+
+    monkeypatch.setattr(Path, "mkdir", replace_downloads_after_creation)
+
+    with pytest.raises(IntegrityError, match="must not be a symlink"):
+        paths.ensure()
+
+    assert replaced == [paths.downloads]
+    assert marker.read_bytes() == b"outside"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_paths_reject_windows_junction_without_touching_external_data(tmp_path):
+    paths = JerryProxyPaths(tmp_path / "home")
+    paths.root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "must-survive"
+    marker.write_bytes(b"outside")
+    subprocess.check_call(
+        ["cmd", "/c", "mklink", "/J", str(paths.downloads), str(outside)],
+        stdout=subprocess.DEVNULL,
+    )
+
+    try:
+        with pytest.raises(IntegrityError, match="path alias"):
+            paths.ensure()
+        assert marker.read_bytes() == b"outside"
+    finally:
+        if os.path.lexists(str(paths.downloads)):
+            os.rmdir(str(paths.downloads))

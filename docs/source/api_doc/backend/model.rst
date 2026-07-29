@@ -41,6 +41,13 @@ ActiveBackend
    :members: name,version,executable,link,link_mode
 
 
+BackendInventory
+-----------------------------------------------------
+
+.. autoclass:: BackendInventory
+   :members: installed,active
+
+
 CleanupResult
 -----------------------------------------------------
 

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import jerryproxy.backend.catalog as catalog_module
 import jerryproxy.data as data_module
 from jerryproxy.backend.catalog import BackendCatalog
 from jerryproxy.backend.model import PlatformInfo
@@ -192,3 +193,111 @@ def test_catalog_rejects_corrupt_public_payloads(mutation, message):
 
     with pytest.raises(BackendCatalogError, match=message):
         BackendCatalog.from_values(value)
+
+
+def _replace_nested(value, path, replacement):
+    target = value
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = replacement
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement", "message"),
+    [
+        (("mihomo", "generated_at"), None, "generated_at must be str"),
+        (("mihomo",), [], "catalog must be an object"),
+        (("mihomo", "backend"), "xray", "wrong backend id"),
+        (("mihomo", "repository"), "example/backend", "does not match the registry"),
+        (("mihomo", "versions", 0), [], "must be an object"),
+        (("mihomo", "versions", 0, "version"), "../bad", "version is invalid"),
+        (("mihomo", "versions", 0, "version"), "v1.19.29", "must be normalized"),
+        (("mihomo", "versions", 0, "version"), "1.19.29-rc1", "stable release"),
+        (("mihomo", "versions", 0, "tag"), "wrong-tag", "tag does not match"),
+        (("mihomo", "versions", 0, "release_id"), False, "positive integer"),
+        (("mihomo", "versions", 0, "release_url"), "http://example.test", "exact official GitHub release URL"),
+        (("mihomo", "versions", 0, "artifacts", "linux-amd64"), [], "must be an object"),
+        (
+            ("mihomo", "versions", 0, "artifacts", "linux-amd64", "name"),
+            "../mihomo.gz",
+            "safe release asset name",
+        ),
+        (("mihomo", "versions", 0, "artifacts", "linux-amd64", "asset_id"), 0, "positive integer"),
+        (("mihomo", "versions", 0, "artifacts", "linux-amd64", "size"), 0, "safety limit"),
+        (("mihomo", "versions", 0, "artifacts", "linux-amd64", "sha256"), 123, "string or null"),
+        (("mihomo", "versions", 0, "artifacts", "linux-amd64", "sha256"), "bad", "SHA-256 digest"),
+        (
+            ("mihomo", "versions", 0, "artifacts", "linux-amd64", "archive_format"),
+            "zip",
+            "does not match its asset",
+        ),
+        (
+            ("mihomo", "versions", 0, "artifacts", "linux-amd64", "executable"),
+            "..",
+            "safe member name",
+        ),
+    ],
+)
+def test_catalog_rejects_invalid_fields_through_public_parser(path, replacement, message):
+    value = deepcopy(packaged_value())
+    _replace_nested(value, path, replacement)
+
+    with pytest.raises(BackendCatalogError, match=message):
+        BackendCatalog.from_values(value)
+
+
+def test_catalog_rejects_duplicates_and_unsupported_platform_keys():
+    duplicate = deepcopy(packaged_value())
+    duplicate["mihomo"]["versions"].insert(0, deepcopy(duplicate["mihomo"]["versions"][0]))
+    with pytest.raises(BackendCatalogError, match="duplicate mihomo version"):
+        BackendCatalog.from_values(duplicate)
+
+    unsupported = deepcopy(packaged_value())
+    unsupported["mihomo"]["versions"][0]["artifacts"]["linux-unknown"] = {}
+    with pytest.raises(BackendCatalogError, match="unsupported platforms"):
+        BackendCatalog.from_values(unsupported)
+
+
+@pytest.mark.parametrize(
+    ("sha256", "verification", "message"),
+    [
+        (None, "github-release-digest", "no digest but is not marked unverified"),
+        ("0" * 64, "missing-upstream-sha256", "unsupported verification source"),
+    ],
+)
+def test_catalog_requires_consistent_digest_evidence(sha256, verification, message):
+    value = deepcopy(packaged_value())
+    artifact = value["mihomo"]["versions"][0]["artifacts"]["linux-amd64"]
+    artifact["sha256"] = sha256
+    artifact["verification"] = verification
+
+    with pytest.raises(BackendCatalogError, match=message):
+        BackendCatalog.from_values(value)
+
+
+def test_catalog_resolve_reports_unavailable_missing_and_conflicting_assets():
+    catalog = BackendCatalog.load()
+    with pytest.raises(UnsupportedPlatformError, match="no verified catalog asset"):
+        catalog.resolve("mihomo", platform_info=PlatformInfo("plan9", "amd64"))
+    with pytest.raises(BackendCatalogError, match="is not recorded"):
+        catalog.resolve("mihomo", "999.999.999", PlatformInfo("linux", "amd64"))
+
+    value = deepcopy(packaged_value())
+    artifact = value["mihomo"]["versions"][0]["artifacts"]["linux-amd64"]
+    artifact["sha256"] = None
+    artifact["verification"] = "conflicting-upstream-sha256"
+    conflicting = BackendCatalog.from_values(value)
+    with pytest.raises(BackendCatalogError, match="conflicting upstream SHA-256 evidence"):
+        conflicting.resolve("mihomo", value["mihomo"]["versions"][0]["version"], PlatformInfo("linux", "amd64"))
+
+
+def test_catalog_load_translates_packaged_resource_errors(monkeypatch):
+    catalog_module._load_packaged_catalog.cache_clear()
+
+    def fail_read(name):
+        raise FileNotFoundError("missing %s catalog" % name)
+
+    monkeypatch.setattr(catalog_module, "read_backend_catalog_json", fail_read)
+    with pytest.raises(BackendCatalogError, match="missing mihomo catalog"):
+        BackendCatalog.load()
+    catalog_module._load_packaged_catalog.cache_clear()

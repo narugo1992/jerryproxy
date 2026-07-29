@@ -20,7 +20,7 @@ RANGE_TEST_DIR := ${TEST_DIR}/${RANGE_DIR}
 RANGE_SRC_DIR  := ${SRC_DIR}/${RANGE_DIR}
 
 COV_TYPES ?= xml term-missing
-MIN_COVERAGE ?= 90
+MIN_COVERAGE ?= 97
 
 PYTHON_CODE_DIR   := ${SRC_DIR}
 RST_DOC_DIR       := ${DOC_DIR}/source/api_doc

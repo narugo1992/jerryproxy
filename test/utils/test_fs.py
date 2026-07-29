@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+import jerryproxy.utils.fs as fs_module
 from jerryproxy.utils.fs import atomic_write_json, read_json, sha256_file
 
 
@@ -23,6 +24,25 @@ def test_atomic_json_failure_leaves_no_partial_state(tmp_path):
     path = tmp_path / "state" / "manifest.json"
     with pytest.raises(TypeError):
         atomic_write_json(path, {"unsupported": object()})
+    assert not path.exists()
+    assert not list(path.parent.glob(".manifest.json.*"))
+
+
+def test_atomic_json_closes_raw_descriptor_when_fdopen_fails(tmp_path, monkeypatch):
+    path = tmp_path / "state" / "manifest.json"
+    captured = {}
+
+    def fail_fdopen(descriptor, *args, **kwargs):
+        captured["descriptor"] = descriptor
+        raise OSError("fdopen failed")
+
+    monkeypatch.setattr(fs_module.os, "fdopen", fail_fdopen)
+
+    with pytest.raises(OSError, match="fdopen failed"):
+        atomic_write_json(path, {"name": "mihomo"})
+
+    with pytest.raises(OSError):
+        os.fstat(captured["descriptor"])
     assert not path.exists()
     assert not list(path.parent.glob(".manifest.json.*"))
 

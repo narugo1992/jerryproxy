@@ -7,11 +7,13 @@ JerryProxy separates backend distribution from backend runtime behavior:
 
    CLI
     ├── Self-check (isolated local runtime and state diagnostics)
+    ├── Home-wide filelock (managed-state serialization)
     ├── Backend registry (identity and exact asset names)
     ├── Static catalog reader (packaged stable releases, offline)
     ├── Catalog selector (strict platform and integrity validation)
     ├── Downloader (HTTPS, size, SHA-256)
     ├── Archive extractor (bounded and traversal-safe)
+    ├── Removal transaction (private journal and alias-safe disposal)
     ├── Backend manager (versions, links, rollback)
     ├── Subscription manager (planned)
     └── Runtime drivers (planned)
@@ -33,6 +35,14 @@ source distributions, and frozen executables include those files but exclude
 the maintenance tool. Runtime reads go through ``jerryproxy.data`` only. Users
 receive catalog updates by upgrading JerryProxy, never through an in-process
 catalog updater.
+
+Every current managed-state operation uses one upstream ``filelock.FileLock``
+below the selected JerryProxy home. Catalog-only queries do not initialize or
+lock the home. Backend list, doctor, and self-check consume a single inventory
+snapshot so installed and active state cannot come from different lock epochs.
+Lock acquisition also recovers private removal journals before exposing managed
+state. The removal module is an internal manager/lock boundary, not a supported
+extension API.
 
 Backend protocol schemas remain owned by the external cores. Python may build
 top-level configs and bounded subscription containers, but must not become a

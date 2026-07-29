@@ -12,11 +12,11 @@ jerryproxy.backend
    archive
    catalog
    download
-   lock
    manager
    model
    platform
    registry
+   removal
 
 \_\_all\_\_
 -----------------------------------------------------

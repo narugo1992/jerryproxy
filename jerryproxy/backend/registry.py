@@ -144,6 +144,8 @@ class BackendSpec:
 
     def expected_asset_name(self, platform_info, version):  # type: (PlatformInfo, str) -> str
         normalized = self.normalize_version(version)
+        if self.asset_family not in _SUPPORTED_PLATFORM_PAIRS:
+            raise UnsupportedPlatformError("unknown asset family: %s" % self.asset_family)
         pair = (platform_info.os_name, platform_info.architecture)
         if pair not in _SUPPORTED_PLATFORM_PAIRS[self.asset_family]:
             raise UnsupportedPlatformError("%s has no registered asset rule for %s" % (self.name, platform_info.key))
@@ -210,10 +212,8 @@ def _v2ray_family_asset_name(family, platform_info):  # type: (str, PlatformInfo
         "riscv64": "riscv64",
         "s390x": "s390x",
     }
-    os_token = os_tokens.get(platform_info.os_name)
-    architecture_token = architecture_tokens.get(platform_info.architecture)
-    if os_token is None or architecture_token is None:
-        raise UnsupportedPlatformError("%s has no registered asset rule for %s" % (family, platform_info.key))
+    os_token = os_tokens[platform_info.os_name]
+    architecture_token = architecture_tokens[platform_info.architecture]
     prefix = "Xray" if family == "xray" else "v2ray"
     return "%s-%s-%s.zip" % (prefix, os_token, architecture_token)
 

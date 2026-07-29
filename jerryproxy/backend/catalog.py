@@ -71,8 +71,6 @@ class BackendCatalog(object):
 
     @staticmethod
     def _parse_backend(name, value):
-        if not isinstance(value, dict):
-            raise _catalog_error("backends.%s must be an object" % name)
         spec = get_backend(name)
         context = "%s catalog" % name
         if _required(value, "repository", str, context) != spec.repository:
@@ -104,6 +102,7 @@ class BackendCatalog(object):
             normalized = spec.normalize_version(version)
             version_sort_key(normalized)
         except ValueError as error:
+            # Registry normalization rejects malformed catalog release versions.
             raise _catalog_error("%s.version is invalid: %s" % (context, error))
         if version != normalized:
             raise _catalog_error("%s.version must be normalized" % context)

@@ -1,11 +1,29 @@
 """Cross-platform JerryProxy home-directory layout."""
 
 import os
+import stat
 from pathlib import Path
 
 from .errors import IntegrityError
 
 HOME_ENVIRONMENT_VARIABLE = "JERRYPROXY_HOME"
+
+
+def is_path_alias(path):  # type: (Path) -> bool
+    """Return whether a managed path is a symlink or Windows reparse point."""
+
+    path = Path(path)
+    if path.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        attributes = path.lstat().st_file_attributes
+    except FileNotFoundError:
+        # A missing managed path is created only after this alias check.
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
 
 
 def resolve_home(explicit_home=None):  # type: (Optional[str]) -> Path
@@ -63,22 +81,47 @@ class JerryProxyPaths(object):
     def active(self):  # type: () -> Path
         return self.root / "active"
 
-    def ensure(self):  # type: () -> None
+    @property
+    def lock_file(self):  # type: () -> Path
+        return self.locks / "jerryproxy.lock"
+
+    @staticmethod
+    def _ensure_directory(path, reject_alias=False):  # type: (Path, bool) -> None
+        if reject_alias and is_path_alias(path):
+            raise IntegrityError(
+                "managed JerryProxy home path must not be a symlink or Windows path alias: %s" % path
+            )
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if reject_alias and is_path_alias(path):
+            raise IntegrityError(
+                "managed JerryProxy home path must not be a symlink or Windows path alias: %s" % path
+            )
+        if os.name == "posix":
+            path.chmod(0o700)
+
+    def _ensure_lock_bootstrap(self):  # type: () -> None
+        self._ensure_directory(self.root)
+        self._ensure_directory(self.locks, reject_alias=True)
+        if is_path_alias(self.lock_file):
+            raise IntegrityError(
+                "managed JerryProxy lock file must not be a symlink or Windows path alias: %s"
+                % self.lock_file
+            )
+
+    def _ensure_layout_locked(self):  # type: () -> None
         for path in (
-            self.root,
             self.backends,
             self.bin,
             self.downloads,
             self.providers,
             self.runtimes,
             self.logs,
-            self.locks,
             self.active,
         ):
-            if path != self.root and path.is_symlink():
-                raise IntegrityError("managed JerryProxy home path must not be a symlink: %s" % path)
-            path.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if path != self.root and path.is_symlink():
-                raise IntegrityError("managed JerryProxy home path must not be a symlink: %s" % path)
-            if os.name == "posix":
-                path.chmod(0o700)
+            self._ensure_directory(path, reject_alias=True)
+
+    def ensure(self):  # type: () -> None
+        from .lock import JerryProxyOperationLock
+
+        with JerryProxyOperationLock(self):
+            pass
