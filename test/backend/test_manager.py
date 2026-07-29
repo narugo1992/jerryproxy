@@ -64,7 +64,7 @@ def create_windows_junction(link, target):
     )
 
 
-def unlink_windows_identity_guard_path(guard, expect_directory, delete_guard):
+def unlink_windows_identity_guard_path(guard):
     ctypes = removal_module.ctypes
     file_disposition_info_ex = 21
     file_disposition_delete = 0x00000001
@@ -100,11 +100,8 @@ def unlink_windows_identity_guard_path(guard, expect_directory, delete_guard):
         cause = removal_module._windows_error()
         kernel.CloseHandle(handle)
         raise cause
-    try:
-        delete_guard(guard, expect_directory)
-    finally:
-        if not kernel.CloseHandle(handle):
-            raise removal_module._windows_error()
+    if not kernel.CloseHandle(handle):
+        raise removal_module._windows_error()
     assert not os.path.lexists(str(guard.path))
 
 
@@ -1737,6 +1734,8 @@ def test_clean_windows_handle_cannot_be_redirected_by_final_path_replacement(
     target = root / ("victim" if directory else "victim.log")
     outside = tmp_path / "outside-logs"
     outside.mkdir()
+    outside_marker = outside / "must-survive"
+    outside_marker.write_bytes(b"outside")
     if directory:
         target.mkdir()
     else:
@@ -1747,13 +1746,13 @@ def test_clean_windows_handle_cannot_be_redirected_by_final_path_replacement(
 
     def replace_path_then_delete_pinned_object(descriptor, expect_directory):
         if descriptor.path == target and not swaps:
-            unlink_windows_identity_guard_path(descriptor, expect_directory, original_delete)
+            unlink_windows_identity_guard_path(descriptor)
             if directory:
                 create_windows_junction(target, outside)
             else:
                 target.write_bytes(b"replacement")
             swaps.append(target)
-            return None
+            return original_delete(descriptor, expect_directory)
         return original_delete(descriptor, expect_directory)
 
     monkeypatch.setattr(removal_module, "_delete_windows_guard", replace_path_then_delete_pinned_object)
@@ -1766,6 +1765,7 @@ def test_clean_windows_handle_cannot_be_redirected_by_final_path_replacement(
         if directory:
             assert removal_module.is_path_alias(target)
             assert outside.is_dir()
+            assert outside_marker.read_bytes() == b"outside"
         else:
             assert target.read_bytes() == b"replacement"
         assert_windows_identity_guards_closed(opened, closed)
@@ -2426,10 +2426,10 @@ def test_committed_recovery_windows_journal_replacement_preserves_substitute(
 
     def replace_journal_before_native_delete(guard, expect_directory):
         if guard.path == journal and not swapped:
-            unlink_windows_identity_guard_path(guard, expect_directory, original_delete)
+            unlink_windows_identity_guard_path(guard)
             journal.write_bytes(b"replacement")
             swapped.append(journal)
-            return None
+            return original_delete(guard, expect_directory)
         return original_delete(guard, expect_directory)
 
     monkeypatch.setattr(
@@ -2466,16 +2466,18 @@ def test_committed_recovery_windows_transaction_replacement_preserves_external_d
     )
     outside = tmp_path / "outside-transaction"
     outside.mkdir()
+    outside_marker = outside / "must-survive"
+    outside_marker.write_bytes(b"outside")
     original_delete = removal_module._delete_windows_guard
     opened, closed = record_windows_identity_guards(monkeypatch)
     swapped = []
 
     def replace_transaction_before_native_delete(guard, expect_directory):
         if guard.path == transaction and not swapped:
-            unlink_windows_identity_guard_path(guard, expect_directory, original_delete)
+            unlink_windows_identity_guard_path(guard)
             create_windows_junction(transaction, outside)
             swapped.append(transaction)
-            return None
+            return original_delete(guard, expect_directory)
         return original_delete(guard, expect_directory)
 
     monkeypatch.setattr(
@@ -2490,6 +2492,7 @@ def test_committed_recovery_windows_transaction_replacement_preserves_external_d
         assert swapped == [transaction]
         assert removal_module.is_path_alias(transaction)
         assert outside.is_dir()
+        assert outside_marker.read_bytes() == b"outside"
         assert_windows_identity_guards_closed(opened, closed)
     finally:
         if removal_module.is_path_alias(transaction):
