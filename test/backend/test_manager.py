@@ -66,6 +66,8 @@ def create_windows_junction(link, target):
 
 def rename_windows_identity_guard(guard, parent_guard, new_name):
     ctypes = removal_module.ctypes
+    file_rename_info_ex = 22
+    file_rename_flag_posix_semantics = 0x00000002
     encoded_name = str(parent_guard.path / new_name).encode("utf-16-le")
     pointer_size = ctypes.sizeof(ctypes.c_void_p)
     root_offset = 8 if pointer_size == 8 else 4
@@ -73,11 +75,12 @@ def rename_windows_identity_guard(guard, parent_guard, new_name):
     name_offset = length_offset + ctypes.sizeof(ctypes.c_uint32)
     structure_size = ((name_offset + 2 + pointer_size - 1) // pointer_size) * pointer_size
     information = ctypes.create_string_buffer(structure_size + len(encoded_name))
+    ctypes.c_uint32.from_buffer(information).value = file_rename_flag_posix_semantics
     ctypes.c_uint32.from_buffer(information, length_offset).value = len(encoded_name)
     ctypes.memmove(ctypes.addressof(information) + name_offset, encoded_name, len(encoded_name))
     if not removal_module._WINDOWS_KERNEL32.SetFileInformationByHandle(
         guard.handle,
-        3,
+        file_rename_info_ex,
         ctypes.byref(information),
         len(information),
     ):
