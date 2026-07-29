@@ -1,8 +1,10 @@
 """Crash-recoverable and alias-safe backend removal primitives."""
 
+import ctypes
 import os
 import re
 import stat
+from ctypes import wintypes
 from pathlib import Path, PurePosixPath
 
 from ..errors import CleanupScopeError, IntegrityError, RemovalCleanupError
@@ -17,6 +19,80 @@ _MOVE_KINDS = {
     "active-link": ("bin", "active-link"),
     "active-manifest": ("active", "active-manifest"),
 }
+
+_WINDOWS_DELETE = 0x00010000
+_WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_WRITE = 0x00000002
+_WINDOWS_FILE_SHARE_DELETE = 0x00000004
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_WINDOWS_FILE_DISPOSITION_INFO_CLASS = 4
+_WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class _WindowsFileInformation(ctypes.Structure):
+    _fields_ = (
+        ("file_attributes", wintypes.DWORD),
+        ("creation_time", wintypes.FILETIME),
+        ("last_access_time", wintypes.FILETIME),
+        ("last_write_time", wintypes.FILETIME),
+        ("volume_serial_number", wintypes.DWORD),
+        ("file_size_high", wintypes.DWORD),
+        ("file_size_low", wintypes.DWORD),
+        ("number_of_links", wintypes.DWORD),
+        ("file_index_high", wintypes.DWORD),
+        ("file_index_low", wintypes.DWORD),
+    )
+
+
+class _WindowsFileDispositionInformation(ctypes.Structure):
+    _fields_ = (("delete_file", wintypes.BOOLEAN),)
+
+
+if ctypes.sizeof(_WindowsFileDispositionInformation) != 1:  # pragma: no cover - ctypes ABI invariant
+    raise RuntimeError("FILE_DISPOSITION_INFO must use the one-byte Windows BOOLEAN ABI")
+
+
+class _WindowsIdentityGuard(object):
+    def __init__(self, handle, volume_serial, file_index, number_of_links, is_directory, size):
+        self.handle = handle
+        self.volume_serial = volume_serial
+        self.file_index = file_index
+        self.number_of_links = number_of_links
+        self.is_directory = is_directory
+        self.size = size
+
+
+_WINDOWS_KERNEL32 = None
+if os.name == "nt":
+    _WINDOWS_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _WINDOWS_KERNEL32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    _WINDOWS_KERNEL32.CreateFileW.restype = wintypes.HANDLE
+    _WINDOWS_KERNEL32.GetFileInformationByHandle.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_WindowsFileInformation),
+    )
+    _WINDOWS_KERNEL32.GetFileInformationByHandle.restype = wintypes.BOOL
+    _WINDOWS_KERNEL32.SetFileInformationByHandle.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    _WINDOWS_KERNEL32.SetFileInformationByHandle.restype = wintypes.BOOL
+    _WINDOWS_KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _WINDOWS_KERNEL32.CloseHandle.restype = wintypes.BOOL
 
 
 def _alias_error(error_type, path):
@@ -44,6 +120,194 @@ def _identity(stat_result):
         int(stat_result.st_ino),
         int(stat.S_IFMT(stat_result.st_mode)),
     )
+
+
+def _snapshot_identity(stat_result):
+    return _identity(stat_result) + (
+        int(stat_result.st_size),
+        int(stat_result.st_mtime_ns),
+        int(stat_result.st_ctime_ns),
+    )
+
+
+def _windows_extended_path(path):
+    value = os.path.abspath(str(path))
+    if value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
+
+
+def _windows_error():
+    return ctypes.WinError(ctypes.get_last_error())
+
+
+def _close_windows_guard(guard):
+    if not _WINDOWS_KERNEL32.CloseHandle(guard.handle):
+        raise _windows_error()
+
+
+def _close_identity_guard(descriptor):
+    if isinstance(descriptor, _WindowsIdentityGuard):
+        _close_windows_guard(descriptor)
+        return
+    os.close(descriptor)
+
+
+def _windows_status_matches_guard(status, guard):
+    if guard.file_index == 0 or int(status.st_ino) != guard.file_index:
+        return False
+    is_directory = stat.S_ISDIR(status.st_mode)
+    if is_directory != guard.is_directory:
+        return False
+    if not is_directory and int(status.st_nlink) != guard.number_of_links:
+        return False
+    return is_directory or int(status.st_size) == guard.size
+
+
+def _open_windows_identity_guard(path, status, error_type):
+    handle = _WINDOWS_KERNEL32.CreateFileW(
+        _windows_extended_path(path),
+        _WINDOWS_DELETE | _WINDOWS_FILE_READ_ATTRIBUTES,
+        _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE | _WINDOWS_FILE_SHARE_DELETE,
+        None,
+        _WINDOWS_OPEN_EXISTING,
+        _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle == _WINDOWS_INVALID_HANDLE_VALUE:
+        cause = _windows_error()
+        raise error_type("unable to pin managed removal path: %s" % path) from cause
+    information = _WindowsFileInformation()
+    if not _WINDOWS_KERNEL32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+        cause = _windows_error()
+        guard = _WindowsIdentityGuard(handle, 0, 0, 0, False, 0)
+        _close_windows_guard(guard)
+        raise error_type("unable to identify pinned managed removal path: %s" % path) from cause
+    file_index = (int(information.file_index_high) << 32) | int(information.file_index_low)
+    size = (int(information.file_size_high) << 32) | int(information.file_size_low)
+    guard = _WindowsIdentityGuard(
+        handle,
+        int(information.volume_serial_number),
+        file_index,
+        int(information.number_of_links),
+        bool(information.file_attributes & _WINDOWS_FILE_ATTRIBUTE_DIRECTORY),
+        size,
+    )
+    if not _windows_status_matches_guard(status, guard):
+        _close_windows_guard(guard)
+        raise error_type("managed removal path changed while pinning: %s" % path)
+    return guard
+
+
+def _open_identity_guard(path, status, error_type):
+    if _WINDOWS_KERNEL32 is not None:
+        return _open_windows_identity_guard(path, status, error_type)
+    if os.name != "posix":
+        return None
+    flags = getattr(os, "O_PATH", os.O_RDONLY)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    if stat.S_ISDIR(status.st_mode):
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(str(path), flags)
+    except OSError as error:
+        # POSIX may deny or race an identity-preserving handle acquisition.
+        raise error_type("unable to pin managed removal path: %s" % path) from error
+    try:
+        pinned = os.fstat(descriptor)
+    except OSError:
+        # The descriptor must not leak when the filesystem cannot identify it.
+        _close_identity_guard(descriptor)
+        raise
+    if _snapshot_identity(pinned) != _snapshot_identity(status):
+        _close_identity_guard(descriptor)
+        raise error_type("managed removal path changed while pinning: %s" % path)
+    return descriptor
+
+
+def _matches_guard(status, original, descriptor):
+    if descriptor is None:
+        return _identity(status) == _identity(original)
+    if isinstance(descriptor, _WindowsIdentityGuard):
+        return _windows_status_matches_guard(status, descriptor)
+    return _snapshot_identity(status) == _snapshot_identity(os.fstat(descriptor))
+
+
+def _validate_windows_child_guard(parent_descriptor, target_descriptor, error_type, target):
+    if not isinstance(parent_descriptor, _WindowsIdentityGuard):
+        return
+    if not isinstance(target_descriptor, _WindowsIdentityGuard):
+        raise error_type("managed removal target was not pinned by a Windows handle: %s" % target)
+    if parent_descriptor.volume_serial != target_descriptor.volume_serial:
+        raise error_type("managed removal target changed volumes while pinning: %s" % target)
+
+
+def _validate_parent_guard(root, target, original, descriptor, error_type, missing_ok=False):
+    parent = target.parent
+    _validate_chain(root, parent, error_type)
+    current = _lstat(parent)
+    if current is None and missing_ok:
+        return
+    if current is None or not stat.S_ISDIR(current.st_mode):
+        raise error_type("managed removal parent disappeared: %s" % parent)
+    if not _matches_guard(current, original, descriptor) or is_path_alias(parent):
+        raise error_type("managed removal parent changed before deletion: %s" % parent)
+
+
+def _open_parent_guard(root, target, error_type):
+    parent = target.parent
+    _validate_chain(root, parent, error_type)
+    status = _lstat(parent)
+    if status is None or not stat.S_ISDIR(status.st_mode):
+        raise error_type("managed removal parent is not a directory: %s" % parent)
+    if is_path_alias(parent):
+        _alias_error(error_type, parent)
+    descriptor = _open_identity_guard(parent, status, error_type)
+    try:
+        _validate_parent_guard(root, target, status, descriptor, error_type)
+    except (OSError, CleanupScopeError, IntegrityError):
+        # Guard acquisition failures must release the parent descriptor.
+        if descriptor is not None:
+            _close_identity_guard(descriptor)
+        raise
+    return status, descriptor
+
+
+def _delete_windows_guard(descriptor, expect_directory):
+    if descriptor.is_directory != expect_directory:  # pragma: no cover - caller uses the pinned status type
+        raise IntegrityError("managed removal object type changed while pinned")
+    disposition = _WindowsFileDispositionInformation(True)
+    if not _WINDOWS_KERNEL32.SetFileInformationByHandle(
+        descriptor.handle,
+        _WINDOWS_FILE_DISPOSITION_INFO_CLASS,
+        ctypes.byref(disposition),
+        ctypes.sizeof(disposition),
+    ):
+        raise _windows_error()
+
+
+def _anchored_unlink(target, parent_descriptor, target_descriptor=None):
+    if isinstance(target_descriptor, _WindowsIdentityGuard):
+        _delete_windows_guard(target_descriptor, False)
+        return
+    if parent_descriptor is None:
+        target.unlink()
+        return
+    os.unlink(target.name, dir_fd=parent_descriptor)
+
+
+def _anchored_rmdir(target, parent_descriptor, target_descriptor=None):
+    if isinstance(target_descriptor, _WindowsIdentityGuard):
+        _delete_windows_guard(target_descriptor, True)
+        return
+    if parent_descriptor is None:
+        target.rmdir()
+        return
+    os.rmdir(target.name, dir_fd=parent_descriptor)
 
 
 def _lstat(path):
@@ -103,40 +367,77 @@ def _secure_path_size(root, target, error_type=CleanupScopeError):
     return sum(_secure_path_size(root, child, error_type) for child in entries)
 
 
-def _remove_validated_tree(root, target, error_type, allowed):
+def _remove_validated_tree(root, target, error_type, allowed, recursive=True):
     if target in allowed and target.is_symlink():
-        _validate_chain(root, target.parent, error_type)
-        target.unlink()
-        return True
+        parent_status, parent_descriptor = _open_parent_guard(root, target, error_type)
+        target_descriptor = None
+        try:
+            if _WINDOWS_KERNEL32 is not None:
+                status = _lstat(target)
+                if status is None:
+                    return False
+                target_descriptor = _open_identity_guard(target, status, error_type)
+                _validate_windows_child_guard(parent_descriptor, target_descriptor, error_type, target)
+            _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type)
+            _anchored_unlink(target, parent_descriptor, target_descriptor)
+            _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type, missing_ok=True)
+            return True
+        finally:
+            try:
+                if target_descriptor is not None:
+                    _close_identity_guard(target_descriptor)
+            finally:
+                if parent_descriptor is not None:
+                    _close_identity_guard(parent_descriptor)
     _validate_chain(root, target, error_type)
     status = _lstat(target)
     if status is None:
         return False
     if is_path_alias(target):
         _alias_error(error_type, target)
-    if not stat.S_ISDIR(status.st_mode):
+    parent_status, parent_descriptor = _open_parent_guard(root, target, error_type)
+    descriptor = None
+    try:
+        descriptor = _open_identity_guard(target, status, error_type)
+        _validate_windows_child_guard(parent_descriptor, descriptor, error_type, target)
+        if not stat.S_ISDIR(status.st_mode):
+            _validate_chain(root, target, error_type)
+            current = _lstat(target)
+            if current is None:
+                return False
+            if not _matches_guard(current, status, descriptor) or is_path_alias(target):
+                raise error_type("managed removal path changed before deletion: %s" % target)
+            _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type)
+            _anchored_unlink(target, parent_descriptor, descriptor)
+            _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type, missing_ok=True)
+            return True
+        _validate_chain(root, target, error_type)
+        entries = list(target.iterdir())
+        if entries and not recursive:
+            raise error_type("managed removal directory is not empty: %s" % target)
+        _validate_chain(root, target, error_type)
+        current = _lstat(target)
+        if current is None or not _matches_guard(current, status, descriptor) or is_path_alias(target):
+            raise error_type("managed removal directory changed before deletion: %s" % target)
+        for child in entries:
+            _remove_validated_tree(root, child, error_type, allowed)
+        _validate_chain(root, target, error_type)
         current = _lstat(target)
         if current is None:
-            return False
-        if _identity(current) != _identity(status) or is_path_alias(target):
-            raise error_type("managed removal path changed before deletion: %s" % target)
-        target.unlink()
+            return True
+        if not _matches_guard(current, status, descriptor) or is_path_alias(target):
+            raise error_type("managed removal directory changed before final deletion: %s" % target)
+        _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type)
+        _anchored_rmdir(target, parent_descriptor, descriptor)
+        _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type, missing_ok=True)
         return True
-    entries = list(target.iterdir())
-    _validate_chain(root, target, error_type)
-    current = _lstat(target)
-    if current is None or _identity(current) != _identity(status) or is_path_alias(target):
-        raise error_type("managed removal directory changed before deletion: %s" % target)
-    for child in entries:
-        _remove_validated_tree(root, child, error_type, allowed)
-    _validate_chain(root, target, error_type)
-    current = _lstat(target)
-    if current is None:
-        return True
-    if _identity(current) != _identity(status) or is_path_alias(target):
-        raise error_type("managed removal directory changed before final deletion: %s" % target)
-    target.rmdir()
-    return True
+    finally:
+        try:
+            if descriptor is not None:
+                _close_identity_guard(descriptor)
+        finally:
+            if parent_descriptor is not None:
+                _close_identity_guard(parent_descriptor)
 
 
 def _secure_remove_tree(root, target, error_type=CleanupScopeError, allowed_symlinks=()):
@@ -146,6 +447,13 @@ def _secure_remove_tree(root, target, error_type=CleanupScopeError, allowed_syml
     allowed = set(Path(path) for path in allowed_symlinks)
     _validate_removal_tree(root, target, error_type, tuple(allowed))
     return _remove_validated_tree(Path(root), Path(target), error_type, allowed)
+
+
+def _secure_remove_empty_directory(root, target, error_type):
+    root = Path(root)
+    target = Path(target)
+    _validate_removal_tree(root, target, error_type)
+    return _remove_validated_tree(root, target, error_type, set(), recursive=False)
 
 
 def _removal_move(paths, source, destination, kind):
@@ -340,8 +648,9 @@ def _dispose_transaction(paths, transaction, moves):
     if os.path.lexists(str(journal)):
         if is_path_alias(journal):
             _alias_error(IntegrityError, journal)
-        journal.unlink()
-    transaction.rmdir()
+        _secure_remove_tree(paths.runtimes, journal, IntegrityError)
+    if not _secure_remove_empty_directory(paths.runtimes, transaction, IntegrityError):
+        raise IntegrityError("removal transaction disappeared before disposal: %s" % transaction)
 
 
 def _dispose_removal_transaction(paths, transaction):

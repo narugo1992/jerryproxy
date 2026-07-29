@@ -184,14 +184,17 @@ def test_home_layout_and_permission_checks_report_unmet_requirements(tmp_path, m
     assert missing.level == "FAIL"
     assert "missing state directories" in missing.detail
 
-    def weaken_download_permissions_after_initialization(selected_paths):
-        selected_paths.downloads.chmod(0o755)
-        return original_directory_paths(selected_paths)
+    if selfcheck_module.os.name == "posix":
+        def weaken_download_permissions_after_initialization(selected_paths):
+            selected_paths.downloads.chmod(0o755)
+            return original_directory_paths(selected_paths)
 
-    monkeypatch.setattr(selfcheck_module, "_directory_paths", weaken_download_permissions_after_initialization)
-    permissions = checks["private directory permissions"]()
-    assert permissions.level == "FAIL"
-    assert "not 0700" in permissions.detail
+        monkeypatch.setattr(selfcheck_module, "_directory_paths", weaken_download_permissions_after_initialization)
+        permissions = checks["private directory permissions"]()
+        assert permissions.level == "FAIL"
+        assert "not 0700" in permissions.detail
+    else:
+        assert checks["private directory permissions"]() == CheckResult.ok("POSIX mode check not applicable")
 
 
 def test_home_layout_and_permission_reads_remain_under_the_operation_lock(tmp_path, monkeypatch):
@@ -211,7 +214,8 @@ def test_home_layout_and_permission_reads_remain_under_the_operation_lock(tmp_pa
 
     assert checks["home directory layout"]().level == "OK"
     assert checks["private directory permissions"]().level == "OK"
-    assert observations == [paths.root, paths.root]
+    expected_observations = 2 if selfcheck_module.os.name == "posix" else 1
+    assert observations == [paths.root] * expected_observations
 
 
 def test_home_write_probe_remains_under_the_operation_lock(tmp_path, monkeypatch):

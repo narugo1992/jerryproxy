@@ -118,9 +118,18 @@ operation lock as installation and removal. Cleanup revalidates each target's
 complete managed ancestor chain immediately before deletion and rejects aliases
 inside removal trees so a path swap after target collection fails closed.
 Recursive disposal repeatedly checks path identity and never delegates managed
-trees to an implementation that can traverse a Windows junction. The one
-journal-recorded active-command symlink is unlinked directly without following
-its target.
+trees to an implementation that can traverse a Windows junction. POSIX targets
+remain pinned by an open descriptor through their final unlink or directory
+removal, preventing a removed inode from being recycled between identity
+checks. Windows targets remain pinned with ``OPEN_REPARSE_POINT`` and are
+deleted with ``SetFileInformationByHandle``, so replacing a parent with a
+junction cannot redirect the final operation. The one journal-recorded
+active-command symlink is unlinked directly without following its target.
+
+On POSIX systems without ``O_PATH`` (including supported macOS releases), an
+unreadable file or a socket may be impossible to pin safely. Cleanup fails
+closed and preserves that target instead of falling back to a pathname-only
+deletion.
 
 Managed-state access is serialized by the upstream ``filelock.FileLock`` at
 ``~/.jerryproxy/locks/jerryproxy.lock``. The default timeout is zero, so a

@@ -30,8 +30,11 @@ Current enforced backend invariants:
   interrupted committed disposal, while malformed or ambiguous journals fail
   closed;
 * managed recursive deletion repeatedly checks path identity and never follows
-  symlinks or Windows junctions; only the exact journal-recorded active-command
-  symlink may be unlinked as transaction payload;
+  symlinks or Windows junctions; POSIX deletion pins each target and uses
+  parent-relative deletion, while Windows opens the final object with
+  ``OPEN_REPARSE_POINT`` and deletes through its native handle; only the exact
+  journal-recorded active-command symlink may be unlinked as transaction
+  payload;
 * managed home subdirectories are rejected when replaced by symlinks or
   Windows reparse-point aliases such as junctions, both before and immediately
   after creation, before permission repair or state mutation can affect their
@@ -63,6 +66,10 @@ compatibility baseline and therefore bundle the legacy ``filelock`` line. Users
 who prioritize the upstream lock hardening should use the Python 3.10+ pip
 installation. This compatibility statement is a risk disclosure, not a claim
 that private-directory permissions repair the dependency vulnerability.
+
+On POSIX platforms without ``O_PATH``, some sockets and unreadable files cannot
+be pinned for identity-safe deletion. JerryProxy reports an error and preserves
+the target; it does not weaken the deletion boundary to make cleanup succeed.
 
 Planned runtime invariants:
 

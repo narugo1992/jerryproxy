@@ -138,9 +138,12 @@ authentication, extraction, process, or permission errors to warnings.
   never escape the configured JerryProxy home. Revalidate each cleanup target's
   complete managed ancestor chain and removal tree before deletion. Recursive
   removal must use alias-aware JerryProxy code rather than `shutil.rmtree`, and
-  must recheck object identity throughout traversal. A transaction may safely
-  unlink only its journal-recorded active-command symlink; arbitrary aliases
-  within a quarantine remain integrity failures.
+  must recheck object identity throughout traversal. POSIX removal must retain
+  an open identity handle and use parent-relative deletion; Windows removal
+  must retain a non-following native handle and delete through that handle.
+  Pathname replacement must not redirect the final deletion system call. A
+  transaction may safely unlink only its journal-recorded active-command
+  symlink; arbitrary aliases within a quarantine remain integrity failures.
 - Home initialization must reject symlinked or Windows reparse-point managed
   subdirectories before and immediately after creation, before applying
   permissions or mutating through them. It must also reject an aliased lock file
