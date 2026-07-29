@@ -5,7 +5,6 @@ import multiprocessing
 import os
 import shutil
 import subprocess
-import sys
 import tarfile
 from pathlib import Path
 
@@ -56,6 +55,63 @@ def removal_journal_move(manager, transaction, source, destination_name="downloa
     }
 
 
+def create_windows_junction(link, target):
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def rename_windows_identity_guard(guard, parent_guard, new_name):
+    ctypes = removal_module.ctypes
+    encoded_name = str(new_name).encode("utf-16-le")
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    root_offset = 8 if pointer_size == 8 else 4
+    length_offset = root_offset + pointer_size
+    name_offset = length_offset + ctypes.sizeof(ctypes.c_uint32)
+    information = ctypes.create_string_buffer(name_offset + len(encoded_name))
+    ctypes.c_void_p.from_buffer(information, root_offset).value = parent_guard.handle
+    ctypes.c_uint32.from_buffer(information, length_offset).value = len(encoded_name)
+    ctypes.memmove(ctypes.addressof(information) + name_offset, encoded_name, len(encoded_name))
+    if not removal_module._WINDOWS_KERNEL32.SetFileInformationByHandle(
+        guard.handle,
+        3,
+        ctypes.byref(information),
+        len(information),
+    ):
+        raise removal_module._windows_error()
+
+
+def record_windows_identity_guards(monkeypatch):
+    opened = []
+    closed = []
+    original_open = removal_module._open_windows_identity_guard
+    original_close = removal_module._close_windows_guard
+
+    def record_open(*args, **kwargs):
+        guard = original_open(*args, **kwargs)
+        opened.append(guard)
+        return guard
+
+    def record_close(guard):
+        try:
+            return original_close(guard)
+        finally:
+            closed.append(guard)
+
+    monkeypatch.setattr(removal_module, "_open_windows_identity_guard", record_open)
+    monkeypatch.setattr(removal_module, "_close_windows_guard", record_close)
+    return opened, closed
+
+
+def assert_windows_identity_guards_closed(opened, closed):
+    assert opened
+    assert len(closed) == len(opened)
+    assert set(id(guard) for guard in closed) == set(id(guard) for guard in opened)
+
+
 class SimulatedWindowsKernel(object):
     """Exercise the Windows handle boundary on non-Windows CI hosts."""
 
@@ -64,6 +120,7 @@ class SimulatedWindowsKernel(object):
         self.before_delete = before_delete
         self.handles = {}
         self.delete_calls = []
+        self.next_handle = 1000
 
     @staticmethod
     def _native_path(value):
@@ -79,29 +136,27 @@ class SimulatedWindowsKernel(object):
             return removal_module._WINDOWS_INVALID_HANDLE_VALUE
         native_path = self._native_path(path)
         native = Path(native_path)
-        if native.is_symlink():
-            flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
-        else:
-            flags = os.O_RDONLY
-        if native.is_dir():
-            flags |= getattr(os, "O_DIRECTORY", 0)
-        descriptor = os.open(native_path, flags)
-        self.handles[descriptor] = native
-        return descriptor
+        handle = self.next_handle
+        self.next_handle += 1
+        self.handles[handle] = native
+        return handle
 
     def GetFileInformationByHandle(self, handle, information_pointer):
         if self.failure == "information":
             return False
-        status = os.fstat(handle)
+        status = self.handles[handle].lstat()
         information = information_pointer._obj
         file_index = int(status.st_ino)
         if self.failure == "identity":
             file_index = 0
         information.file_index_high = (file_index >> 32) & 0xFFFFFFFF
         information.file_index_low = file_index & 0xFFFFFFFF
-        information.volume_serial_number = (
-            2 if self.failure == "volume" and not self.handles[handle].is_dir() else 1
-        )
+        volume_serial = int(status.st_dev)
+        if self.failure == "parent-volume" and self.handles[handle].is_dir():
+            volume_serial += 1
+        if self.failure == "target-volume" and not self.handles[handle].is_dir():
+            volume_serial += 1
+        information.volume_serial_number = volume_serial
         information.number_of_links = int(status.st_nlink) + (1 if self.failure == "links" else 0)
         size = int(status.st_size)
         if self.failure == "size":
@@ -124,12 +179,12 @@ class SimulatedWindowsKernel(object):
         self.delete_calls.append(handle)
         if self.failure == "delete":
             return False
-        if self.before_delete is not None:
-            self.before_delete()
         original_path = self.handles[handle]
-        pinned_path = (
-            original_path if original_path.is_symlink() else Path(os.readlink("/proc/self/fd/%d" % handle))
-        )
+        pinned_path = original_path
+        if self.before_delete is not None:
+            relocated_path = self.before_delete(original_path)
+            if relocated_path is not None:
+                pinned_path = Path(relocated_path)
         if pinned_path.is_dir():
             pinned_path.rmdir()
         else:
@@ -138,7 +193,6 @@ class SimulatedWindowsKernel(object):
 
     def CloseHandle(self, handle):
         self.handles.pop(handle, None)
-        os.close(handle)
         return self.failure != "close"
 
 
@@ -931,18 +985,32 @@ def test_clean_handles_a_directory_removed_or_replaced_after_its_last_child(
             return result
 
         monkeypatch.setattr(removal_module.os, "unlink", remove_parent_after_last_child)
-    else:
-        original_unlink = Path.unlink
+    elif replace_parent:
+        original_delete = removal_module._delete_windows_guard
+        original_lstat = removal_module._lstat
+        changed = []
 
-        def remove_parent_after_last_child(path, *args, **kwargs):
-            result = original_unlink(path, *args, **kwargs)
-            if path == child:
-                target.rmdir()
-                if replace_parent:
-                    target.mkdir()
+        def delete_child_then_change_parent_identity(descriptor, expect_directory):
+            result = original_delete(descriptor, expect_directory)
+            if descriptor.path == child:
+                changed.append(target)
             return result
 
-        monkeypatch.setattr(Path, "unlink", remove_parent_after_last_child)
+        def changed_parent_status(path):
+            status = original_lstat(path)
+            if path != target or not changed or status is None:
+                return status
+
+            class ChangedStatus(object):
+                def __getattr__(self, name):
+                    if name == "st_ino":
+                        return status.st_ino + 1
+                    return getattr(status, name)
+
+            return ChangedStatus()
+
+        monkeypatch.setattr(removal_module, "_delete_windows_guard", delete_child_then_change_parent_identity)
+        monkeypatch.setattr(removal_module, "_lstat", changed_parent_status)
 
     if replace_parent:
         with pytest.raises(manager_module.CleanupScopeError, match="parent changed before deletion"):
@@ -1158,7 +1226,7 @@ def test_clean_final_unlink_cannot_be_redirected_by_an_ancestor_swap(tmp_path, m
     manager.paths.ensure()
     target = manager.paths.logs / "runtime.log"
     target.write_bytes(b"managed")
-    saved = tmp_path / "saved-logs"
+    saved = manager.paths.root / "saved-logs"
     outside = tmp_path / "outside-logs"
     outside.mkdir()
     victim = outside / target.name
@@ -1329,7 +1397,6 @@ def test_clean_uses_stat_identity_fallback_off_posix(tmp_path, monkeypatch, dire
     assert not target.exists()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Windows handle API simulation uses Linux procfs")
 @pytest.mark.parametrize("directory", (False, True))
 def test_clean_deletes_through_a_simulated_windows_identity_handle(tmp_path, monkeypatch, directory):
     manager = manager_for(tmp_path)
@@ -1351,7 +1418,7 @@ def test_clean_deletes_through_a_simulated_windows_identity_handle(tmp_path, mon
     assert kernel.handles == {}
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Windows handle API simulation uses Linux procfs")
+@pytest.mark.skipif(os.name != "posix", reason="active symbolic-link simulation requires POSIX")
 def test_force_remove_deletes_the_allowed_active_symlink_through_a_windows_handle(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     install_fake_mihomo(manager, tmp_path, "1.0.0", b"backend", activate=True)
@@ -1368,7 +1435,7 @@ def test_force_remove_deletes_the_allowed_active_symlink_through_a_windows_handl
     assert kernel.handles == {}
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Windows handle API simulation uses Linux procfs")
+@pytest.mark.skipif(os.name != "posix", reason="active symbolic-link simulation requires POSIX")
 def test_force_remove_tolerates_allowed_active_symlink_disappearing_before_windows_pin(
     tmp_path,
     monkeypatch,
@@ -1397,7 +1464,7 @@ def test_force_remove_tolerates_allowed_active_symlink_disappearing_before_windo
     assert kernel.handles == {}
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Windows handle API simulation uses Linux procfs")
+@pytest.mark.skipif(os.name != "posix", reason="Windows handle API is simulated on POSIX")
 @pytest.mark.parametrize("directory", (False, True))
 def test_clean_simulated_windows_handle_cannot_be_redirected_by_parent_swap(
     tmp_path,
@@ -1420,9 +1487,11 @@ def test_clean_simulated_windows_handle_cannot_be_redirected_by_parent_swap(
         outside_victim.write_bytes(b"outside")
     saved = manager.paths.logs / "saved-runtime"
 
-    def redirect_parent():
+    def redirect_parent(original_path):
+        relative_path = original_path.relative_to(parent)
         parent.rename(saved)
         parent.symlink_to(outside, target_is_directory=True)
+        return saved / relative_path
 
     kernel = SimulatedWindowsKernel(before_delete=redirect_parent)
     monkeypatch.setattr(removal_module, "_WINDOWS_KERNEL32", kernel)
@@ -1442,10 +1511,19 @@ def test_clean_simulated_windows_handle_cannot_be_redirected_by_parent_swap(
             saved.rename(parent)
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Windows handle API simulation uses Linux procfs")
 @pytest.mark.parametrize(
     "failure",
-    ("create", "information", "identity", "links", "type", "size", "volume", "delete"),
+    (
+        "create",
+        "information",
+        "identity",
+        "links",
+        "type",
+        "size",
+        "parent-volume",
+        "target-volume",
+        "delete",
+    ),
 )
 def test_clean_simulated_windows_handle_failures_preserve_the_target(tmp_path, monkeypatch, failure):
     manager = manager_for(tmp_path)
@@ -1464,7 +1542,6 @@ def test_clean_simulated_windows_handle_failures_preserve_the_target(tmp_path, m
     assert kernel.handles == {}
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Windows handle API simulation uses Linux procfs")
 def test_clean_simulated_windows_close_failure_releases_both_handles(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     manager.paths.ensure()
@@ -1490,32 +1567,46 @@ def test_clean_windows_handle_cannot_be_redirected_by_final_junction_swap(
 ):
     manager = manager_for(tmp_path)
     manager.paths.ensure()
-    parent = manager.paths.logs / "runtime"
+    root = manager.paths.logs
+    parent = root / "runtime"
     parent.mkdir()
     target = parent / ("victim" if directory else "victim.log")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    outside_victim = outside / target.name
+    outside = tmp_path / "outside-logs"
+    outside_parent = outside / parent.name
+    outside_parent.mkdir(parents=True)
+    outside_victim = outside_parent / target.name
     if directory:
         target.mkdir()
         outside_victim.mkdir()
     else:
         target.write_bytes(b"managed")
         outside_victim.write_bytes(b"outside")
-    saved = manager.paths.logs / "saved-runtime"
+    saved = tmp_path / "saved-logs"
     original_delete = removal_module._delete_windows_guard
     swaps = []
+    opened, closed = record_windows_identity_guards(monkeypatch)
 
     def swap_parent_then_delete(descriptor, expect_directory):
-        if not swaps:
-            parent.rename(saved)
-            subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
-                check=True,
-                capture_output=True,
-                text=True,
+        if descriptor.path == target and not swaps:
+            home_guard = removal_module._open_windows_identity_guard(
+                manager.paths.root,
+                manager.paths.root.lstat(),
+                manager_module.CleanupScopeError,
             )
-            swaps.append(parent)
+            root_guard = removal_module._open_windows_identity_guard(
+                root,
+                root.lstat(),
+                manager_module.CleanupScopeError,
+            )
+            try:
+                rename_windows_identity_guard(root_guard, home_guard, saved.name)
+            finally:
+                try:
+                    removal_module._close_windows_guard(root_guard)
+                finally:
+                    removal_module._close_windows_guard(home_guard)
+            create_windows_junction(root, outside)
+            swaps.append(root)
         return original_delete(descriptor, expect_directory)
 
     monkeypatch.setattr(removal_module, "_delete_windows_guard", swap_parent_then_delete)
@@ -1524,14 +1615,15 @@ def test_clean_windows_handle_cannot_be_redirected_by_final_junction_swap(
         with pytest.raises(manager_module.CleanupScopeError, match="managed path alias"):
             manager.clean(areas=("logs",))
 
-        assert swaps == [parent]
+        assert swaps == [root]
         assert outside_victim.exists()
-        assert not (saved / target.name).exists()
+        assert not (saved / parent.name / target.name).exists()
+        assert_windows_identity_guards_closed(opened, closed)
     finally:
-        if os.path.lexists(str(parent)):
-            os.rmdir(str(parent))
+        if removal_module.is_path_alias(root):
+            os.rmdir(str(root))
         if saved.exists():
-            saved.rename(parent)
+            saved.rename(root)
 
 
 def test_clean_tolerates_a_file_disappearing_before_measurement(tmp_path, monkeypatch):
@@ -2164,6 +2256,132 @@ def test_committed_recovery_final_transaction_rmdir_cannot_escape_runtimes(tmp_p
     assert manager.paths.runtimes.is_symlink()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_committed_recovery_windows_journal_replacement_preserves_external_data(
+    tmp_path,
+    monkeypatch,
+):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    transaction = manager.paths.runtimes / (".remove-" + "a" * 32)
+    transaction.mkdir()
+    source = manager.paths.downloads / "mihomo" / "1.0.0"
+    source.mkdir(parents=True)
+    move = removal_journal_move(manager, transaction, source)
+    destination = transaction / "download-0"
+    os.replace(str(source), str(destination))
+    journal = transaction / "journal.json"
+    manager_module.atomic_write_json(journal, {"phase": "committed", "moves": [move]})
+    saved_transaction = manager.paths.runtimes / (transaction.name + "-saved")
+    outside = tmp_path / "outside-journal"
+    outside.mkdir()
+    victim = outside / journal.name
+    victim.write_bytes(b"outside")
+    original_delete = removal_module._delete_windows_guard
+    opened, closed = record_windows_identity_guards(monkeypatch)
+    swapped = []
+
+    def replace_transaction_before_journal_delete(guard, expect_directory):
+        if guard.path == journal and not swapped:
+            transaction_guard = next(
+                item
+                for item in reversed(opened)
+                if item.path == transaction and item not in closed
+            )
+            runtimes_status = manager.paths.runtimes.lstat()
+            runtimes_guard = removal_module._open_windows_identity_guard(
+                manager.paths.runtimes,
+                runtimes_status,
+                IntegrityError,
+            )
+            try:
+                rename_windows_identity_guard(
+                    transaction_guard,
+                    runtimes_guard,
+                    saved_transaction.name,
+                )
+            finally:
+                removal_module._close_windows_guard(runtimes_guard)
+            create_windows_junction(transaction, outside)
+            swapped.append(transaction)
+        return original_delete(guard, expect_directory)
+
+    monkeypatch.setattr(
+        removal_module,
+        "_delete_windows_guard",
+        replace_transaction_before_journal_delete,
+    )
+
+    try:
+        with pytest.raises(IntegrityError, match="managed path alias"):
+            manager.current("mihomo")
+
+        assert swapped == [transaction]
+        assert removal_module.is_path_alias(transaction)
+        assert victim.read_bytes() == b"outside"
+        assert not (saved_transaction / journal.name).exists()
+        assert_windows_identity_guards_closed(opened, closed)
+    finally:
+        if removal_module.is_path_alias(transaction):
+            os.rmdir(str(transaction))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_committed_recovery_windows_transaction_replacement_preserves_external_data(
+    tmp_path,
+    monkeypatch,
+):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    transaction = manager.paths.runtimes / (".remove-" + "b" * 32)
+    transaction.mkdir()
+    source = manager.paths.downloads / "mihomo" / "1.0.0"
+    source.mkdir(parents=True)
+    move = removal_journal_move(manager, transaction, source)
+    destination = transaction / "download-0"
+    os.replace(str(source), str(destination))
+    manager_module.atomic_write_json(
+        transaction / "journal.json",
+        {"phase": "committed", "moves": [move]},
+    )
+    saved_transaction = manager.paths.runtimes / (transaction.name + "-saved")
+    outside = tmp_path / "outside-transaction"
+    outside.mkdir()
+    original_delete = removal_module._delete_windows_guard
+    opened, closed = record_windows_identity_guards(monkeypatch)
+    swapped = []
+
+    def replace_transaction_before_native_delete(guard, expect_directory):
+        if guard.path == transaction and not swapped:
+            runtimes_guard = next(
+                item
+                for item in reversed(opened)
+                if item.path == manager.paths.runtimes and item not in closed
+            )
+            rename_windows_identity_guard(guard, runtimes_guard, saved_transaction.name)
+            create_windows_junction(transaction, outside)
+            swapped.append(transaction)
+        return original_delete(guard, expect_directory)
+
+    monkeypatch.setattr(
+        removal_module,
+        "_delete_windows_guard",
+        replace_transaction_before_native_delete,
+    )
+
+    try:
+        assert manager.current("mihomo") is None
+
+        assert swapped == [transaction]
+        assert removal_module.is_path_alias(transaction)
+        assert outside.is_dir()
+        assert not saved_transaction.exists()
+        assert_windows_identity_guards_closed(opened, closed)
+    finally:
+        if removal_module.is_path_alias(transaction):
+            os.rmdir(str(transaction))
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX dir_fd deletion behavior")
 @pytest.mark.parametrize("change", ("insert", "remove"))
 def test_committed_recovery_rechecks_transaction_after_journal_unlink(
@@ -2508,14 +2726,14 @@ def test_committed_recovery_keeps_a_retryable_journal_on_permission_failure(
 
         monkeypatch.setattr(removal_module.os, "unlink", deny_payload_unlink)
     else:
-        original_unlink = Path.unlink
+        original_delete = removal_module._delete_windows_guard
 
-        def deny_payload_unlink(path, *args, **kwargs):
-            if path.name == "asset.gz":
+        def deny_payload_unlink(descriptor, expect_directory):
+            if descriptor.path.name == "asset.gz":
                 raise PermissionError("payload cleanup denied")
-            return original_unlink(path, *args, **kwargs)
+            return original_delete(descriptor, expect_directory)
 
-        monkeypatch.setattr(Path, "unlink", deny_payload_unlink)
+        monkeypatch.setattr(removal_module, "_delete_windows_guard", deny_payload_unlink)
 
     with pytest.raises(RemovalCleanupError, match="quarantine cleanup failed"):
         manager.current("mihomo")

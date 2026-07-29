@@ -4,7 +4,6 @@ import ctypes
 import os
 import re
 import stat
-from ctypes import wintypes
 from pathlib import Path, PurePosixPath
 
 from ..errors import CleanupScopeError, IntegrityError, RemovalCleanupError
@@ -33,31 +32,41 @@ _WINDOWS_FILE_DISPOSITION_INFO_CLASS = 4
 _WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
+class _WindowsFileTime(ctypes.Structure):
+    _fields_ = (
+        ("low_date_time", ctypes.c_uint32),
+        ("high_date_time", ctypes.c_uint32),
+    )
+
+
 class _WindowsFileInformation(ctypes.Structure):
     _fields_ = (
-        ("file_attributes", wintypes.DWORD),
-        ("creation_time", wintypes.FILETIME),
-        ("last_access_time", wintypes.FILETIME),
-        ("last_write_time", wintypes.FILETIME),
-        ("volume_serial_number", wintypes.DWORD),
-        ("file_size_high", wintypes.DWORD),
-        ("file_size_low", wintypes.DWORD),
-        ("number_of_links", wintypes.DWORD),
-        ("file_index_high", wintypes.DWORD),
-        ("file_index_low", wintypes.DWORD),
+        ("file_attributes", ctypes.c_uint32),
+        ("creation_time", _WindowsFileTime),
+        ("last_access_time", _WindowsFileTime),
+        ("last_write_time", _WindowsFileTime),
+        ("volume_serial_number", ctypes.c_uint32),
+        ("file_size_high", ctypes.c_uint32),
+        ("file_size_low", ctypes.c_uint32),
+        ("number_of_links", ctypes.c_uint32),
+        ("file_index_high", ctypes.c_uint32),
+        ("file_index_low", ctypes.c_uint32),
     )
 
 
 class _WindowsFileDispositionInformation(ctypes.Structure):
-    _fields_ = (("delete_file", wintypes.BOOLEAN),)
+    _fields_ = (("delete_file", ctypes.c_ubyte),)
 
 
 if ctypes.sizeof(_WindowsFileDispositionInformation) != 1:  # pragma: no cover - ctypes ABI invariant
     raise RuntimeError("FILE_DISPOSITION_INFO must use the one-byte Windows BOOLEAN ABI")
+if ctypes.sizeof(_WindowsFileInformation) != 52:  # pragma: no cover - ctypes ABI invariant
+    raise RuntimeError("BY_HANDLE_FILE_INFORMATION must use the 52-byte Windows ABI")
 
 
 class _WindowsIdentityGuard(object):
-    def __init__(self, handle, volume_serial, file_index, number_of_links, is_directory, size):
+    def __init__(self, path, handle, volume_serial, file_index, number_of_links, is_directory, size):
+        self.path = Path(path)
         self.handle = handle
         self.volume_serial = volume_serial
         self.file_index = file_index
@@ -70,29 +79,29 @@ _WINDOWS_KERNEL32 = None
 if os.name == "nt":
     _WINDOWS_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _WINDOWS_KERNEL32.CreateFileW.argtypes = (
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
     )
-    _WINDOWS_KERNEL32.CreateFileW.restype = wintypes.HANDLE
+    _WINDOWS_KERNEL32.CreateFileW.restype = ctypes.c_void_p
     _WINDOWS_KERNEL32.GetFileInformationByHandle.argtypes = (
-        wintypes.HANDLE,
+        ctypes.c_void_p,
         ctypes.POINTER(_WindowsFileInformation),
     )
-    _WINDOWS_KERNEL32.GetFileInformationByHandle.restype = wintypes.BOOL
+    _WINDOWS_KERNEL32.GetFileInformationByHandle.restype = ctypes.c_int32
     _WINDOWS_KERNEL32.SetFileInformationByHandle.argtypes = (
-        wintypes.HANDLE,
+        ctypes.c_void_p,
         ctypes.c_int,
-        wintypes.LPVOID,
-        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
     )
-    _WINDOWS_KERNEL32.SetFileInformationByHandle.restype = wintypes.BOOL
-    _WINDOWS_KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    _WINDOWS_KERNEL32.CloseHandle.restype = wintypes.BOOL
+    _WINDOWS_KERNEL32.SetFileInformationByHandle.restype = ctypes.c_int32
+    _WINDOWS_KERNEL32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    _WINDOWS_KERNEL32.CloseHandle.restype = ctypes.c_int32
 
 
 def _alias_error(error_type, path):
@@ -156,6 +165,8 @@ def _close_identity_guard(descriptor):
 
 
 def _windows_status_matches_guard(status, guard):
+    if int(status.st_dev) != guard.volume_serial:
+        return False
     if guard.file_index == 0 or int(status.st_ino) != guard.file_index:
         return False
     is_directory = stat.S_ISDIR(status.st_mode)
@@ -182,12 +193,13 @@ def _open_windows_identity_guard(path, status, error_type):
     information = _WindowsFileInformation()
     if not _WINDOWS_KERNEL32.GetFileInformationByHandle(handle, ctypes.byref(information)):
         cause = _windows_error()
-        guard = _WindowsIdentityGuard(handle, 0, 0, 0, False, 0)
+        guard = _WindowsIdentityGuard(path, handle, 0, 0, 0, False, 0)
         _close_windows_guard(guard)
         raise error_type("unable to identify pinned managed removal path: %s" % path) from cause
     file_index = (int(information.file_index_high) << 32) | int(information.file_index_low)
     size = (int(information.file_size_high) << 32) | int(information.file_size_low)
     guard = _WindowsIdentityGuard(
+        path,
         handle,
         int(information.volume_serial_number),
         file_index,
