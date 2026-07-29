@@ -124,3 +124,38 @@ def test_paths_reject_windows_junction_without_touching_external_data(tmp_path):
     finally:
         if os.path.lexists(str(paths.downloads)):
             os.rmdir(str(paths.downloads))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_paths_recheck_windows_junction_after_directory_creation(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / "home")
+    outside = tmp_path / "outside-after-create"
+    outside.mkdir()
+    marker = outside / "must-survive"
+    marker.write_bytes(b"outside")
+    original_mkdir = Path.mkdir
+    replaced = []
+
+    def replace_downloads_after_creation(path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if path == paths.downloads and not replaced:
+            path.rmdir()
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(path), str(outside)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            replaced.append(path)
+        return result
+
+    monkeypatch.setattr(Path, "mkdir", replace_downloads_after_creation)
+
+    try:
+        with pytest.raises(IntegrityError, match="path alias"):
+            paths.ensure()
+        assert replaced == [paths.downloads]
+        assert marker.read_bytes() == b"outside"
+    finally:
+        if os.path.lexists(str(paths.downloads)):
+            os.rmdir(str(paths.downloads))
