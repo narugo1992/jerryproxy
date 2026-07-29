@@ -66,13 +66,13 @@ def create_windows_junction(link, target):
 
 def rename_windows_identity_guard(guard, parent_guard, new_name):
     ctypes = removal_module.ctypes
-    encoded_name = str(new_name).encode("utf-16-le")
+    encoded_name = str(parent_guard.path / new_name).encode("utf-16-le")
     pointer_size = ctypes.sizeof(ctypes.c_void_p)
     root_offset = 8 if pointer_size == 8 else 4
     length_offset = root_offset + pointer_size
     name_offset = length_offset + ctypes.sizeof(ctypes.c_uint32)
-    information = ctypes.create_string_buffer(name_offset + len(encoded_name))
-    ctypes.c_void_p.from_buffer(information, root_offset).value = parent_guard.handle
+    structure_size = ((name_offset + 2 + pointer_size - 1) // pointer_size) * pointer_size
+    information = ctypes.create_string_buffer(structure_size + len(encoded_name))
     ctypes.c_uint32.from_buffer(information, length_offset).value = len(encoded_name)
     ctypes.memmove(ctypes.addressof(information) + name_offset, encoded_name, len(encoded_name))
     if not removal_module._WINDOWS_KERNEL32.SetFileInformationByHandle(
@@ -149,9 +149,13 @@ class SimulatedWindowsKernel(object):
         file_index = int(status.st_ino)
         if self.failure == "identity":
             file_index = 0
+        elif self.failure == "modern-only":
+            file_index += 1
         information.file_index_high = (file_index >> 32) & 0xFFFFFFFF
         information.file_index_low = file_index & 0xFFFFFFFF
         volume_serial = int(status.st_dev)
+        if self.failure == "modern-only":
+            volume_serial += 1
         if self.failure == "parent-volume" and self.handles[handle].is_dir():
             volume_serial += 1
         if self.failure == "target-volume" and not self.handles[handle].is_dir():
@@ -169,6 +173,25 @@ class SimulatedWindowsKernel(object):
         information.file_attributes = (
             removal_module._WINDOWS_FILE_ATTRIBUTE_DIRECTORY if is_directory else 0
         )
+        return True
+
+    def GetFileInformationByHandleEx(self, handle, information_class, information_pointer, size):
+        assert information_class == removal_module._WINDOWS_FILE_ID_INFO_CLASS
+        assert size == 24
+        if self.failure == "modern-unavailable" or self.failure == "modern-denied":
+            return False
+        status = self.handles[handle].lstat()
+        information = information_pointer._obj
+        volume_serial = int(status.st_dev)
+        if self.failure == "parent-volume" and self.handles[handle].is_dir():
+            volume_serial += 1
+        if self.failure == "target-volume" and not self.handles[handle].is_dir():
+            volume_serial += 1
+        information.volume_serial_number = volume_serial
+        file_index = 0 if self.failure == "identity" else int(status.st_ino)
+        encoded = file_index.to_bytes(16, "little")
+        for index, value in enumerate(encoded):
+            information.file_id.identifier[index] = value
         return True
 
     def SetFileInformationByHandle(self, handle, information_class, disposition_pointer, size):
@@ -1418,6 +1441,61 @@ def test_clean_deletes_through_a_simulated_windows_identity_handle(tmp_path, mon
     assert kernel.handles == {}
 
 
+@pytest.mark.parametrize("identity_mode", ("modern-only", "modern-unavailable"))
+def test_clean_supports_modern_and_legacy_windows_stat_identities(tmp_path, monkeypatch, identity_mode):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    target = manager.paths.logs / "runtime.log"
+    target.write_bytes(b"managed")
+    kernel = SimulatedWindowsKernel(failure=identity_mode)
+    monkeypatch.setattr(removal_module, "_WINDOWS_KERNEL32", kernel)
+
+    def unsupported_file_id_error():
+        error = OSError("Windows API failure")
+        error.winerror = 50
+        return error
+
+    monkeypatch.setattr(removal_module, "_windows_error", unsupported_file_id_error)
+
+    result = manager.clean(areas=("logs",))
+
+    assert result.targets_removed == 1
+    assert not target.exists()
+    assert kernel.handles == {}
+
+
+def test_clean_rejects_switching_between_windows_identity_representations(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    target = manager.paths.logs / "runtime.log"
+    target.write_bytes(b"managed")
+    kernel = SimulatedWindowsKernel(failure="modern-only")
+    original_lstat = removal_module._lstat
+
+    def switch_to_legacy_identity_after_pin(path):
+        status = original_lstat(path)
+        if path != target or target not in kernel.handles.values():
+            return status
+
+        class LegacyIdentityStatus(object):
+            def __getattr__(self, name):
+                if name == "st_dev" or name == "st_ino":
+                    return getattr(status, name) + 1
+                return getattr(status, name)
+
+        return LegacyIdentityStatus()
+
+    monkeypatch.setattr(removal_module, "_WINDOWS_KERNEL32", kernel)
+    monkeypatch.setattr(removal_module, "_lstat", switch_to_legacy_identity_after_pin)
+    monkeypatch.setattr(removal_module, "_windows_error", lambda: OSError("Windows API failure"))
+
+    with pytest.raises(manager_module.CleanupScopeError, match="changed before deletion"):
+        manager.clean(areas=("logs",))
+
+    assert target.read_bytes() == b"managed"
+    assert kernel.handles == {}
+
+
 @pytest.mark.skipif(os.name != "posix", reason="active symbolic-link simulation requires POSIX")
 def test_force_remove_deletes_the_allowed_active_symlink_through_a_windows_handle(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
@@ -1522,6 +1600,7 @@ def test_clean_simulated_windows_handle_cannot_be_redirected_by_parent_swap(
         "size",
         "parent-volume",
         "target-volume",
+        "modern-denied",
         "delete",
     ),
 )

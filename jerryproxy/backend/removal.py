@@ -29,7 +29,9 @@ _WINDOWS_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _WINDOWS_FILE_DISPOSITION_INFO_CLASS = 4
+_WINDOWS_FILE_ID_INFO_CLASS = 18
 _WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_WINDOWS_UNSUPPORTED_FILE_ID_ERRORS = (1, 50, 87)
 
 
 class _WindowsFileTime(ctypes.Structure):
@@ -58,18 +60,31 @@ class _WindowsFileDispositionInformation(ctypes.Structure):
     _fields_ = (("delete_file", ctypes.c_ubyte),)
 
 
+class _WindowsFileId128(ctypes.Structure):
+    _fields_ = (("identifier", ctypes.c_ubyte * 16),)
+
+
+class _WindowsFileIdInformation(ctypes.Structure):
+    _fields_ = (
+        ("volume_serial_number", ctypes.c_uint64),
+        ("file_id", _WindowsFileId128),
+    )
+
+
 if ctypes.sizeof(_WindowsFileDispositionInformation) != 1:  # pragma: no cover - ctypes ABI invariant
     raise RuntimeError("FILE_DISPOSITION_INFO must use the one-byte Windows BOOLEAN ABI")
 if ctypes.sizeof(_WindowsFileInformation) != 52:  # pragma: no cover - ctypes ABI invariant
     raise RuntimeError("BY_HANDLE_FILE_INFORMATION must use the 52-byte Windows ABI")
+if ctypes.sizeof(_WindowsFileIdInformation) != 24:  # pragma: no cover - ctypes ABI invariant
+    raise RuntimeError("FILE_ID_INFO must use the 24-byte Windows ABI")
 
 
 class _WindowsIdentityGuard(object):
-    def __init__(self, path, handle, volume_serial, file_index, number_of_links, is_directory, size):
+    def __init__(self, path, handle, identities, status_identity, number_of_links, is_directory, size):
         self.path = Path(path)
         self.handle = handle
-        self.volume_serial = volume_serial
-        self.file_index = file_index
+        self.identities = tuple(identities)
+        self.status_identity = status_identity
         self.number_of_links = number_of_links
         self.is_directory = is_directory
         self.size = size
@@ -93,6 +108,13 @@ if os.name == "nt":
         ctypes.POINTER(_WindowsFileInformation),
     )
     _WINDOWS_KERNEL32.GetFileInformationByHandle.restype = ctypes.c_int32
+    _WINDOWS_KERNEL32.GetFileInformationByHandleEx.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    )
+    _WINDOWS_KERNEL32.GetFileInformationByHandleEx.restype = ctypes.c_int32
     _WINDOWS_KERNEL32.SetFileInformationByHandle.argtypes = (
         ctypes.c_void_p,
         ctypes.c_int,
@@ -165,9 +187,12 @@ def _close_identity_guard(descriptor):
 
 
 def _windows_status_matches_guard(status, guard):
-    if int(status.st_dev) != guard.volume_serial:
-        return False
-    if guard.file_index == 0 or int(status.st_ino) != guard.file_index:
+    status_identity = (int(status.st_dev), int(status.st_ino))
+    if (
+        status_identity[1] == 0
+        or status_identity != guard.status_identity
+        or status_identity not in guard.identities
+    ):
         return False
     is_directory = stat.S_ISDIR(status.st_mode)
     if is_directory != guard.is_directory:
@@ -193,16 +218,38 @@ def _open_windows_identity_guard(path, status, error_type):
     information = _WindowsFileInformation()
     if not _WINDOWS_KERNEL32.GetFileInformationByHandle(handle, ctypes.byref(information)):
         cause = _windows_error()
-        guard = _WindowsIdentityGuard(path, handle, 0, 0, 0, False, 0)
+        guard = _WindowsIdentityGuard(path, handle, (), None, 0, False, 0)
         _close_windows_guard(guard)
         raise error_type("unable to identify pinned managed removal path: %s" % path) from cause
     file_index = (int(information.file_index_high) << 32) | int(information.file_index_low)
     size = (int(information.file_size_high) << 32) | int(information.file_size_low)
+    identities = []
+    if file_index:
+        identities.append((int(information.volume_serial_number), file_index))
+    extended_information = _WindowsFileIdInformation()
+    if _WINDOWS_KERNEL32.GetFileInformationByHandleEx(
+        handle,
+        _WINDOWS_FILE_ID_INFO_CLASS,
+        ctypes.byref(extended_information),
+        ctypes.sizeof(extended_information),
+    ):
+        extended_file_index = int.from_bytes(bytes(extended_information.file_id.identifier), "little")
+        if not extended_file_index:
+            extended_file_index = file_index
+        extended_identity = (int(extended_information.volume_serial_number), extended_file_index)
+        if extended_file_index and extended_identity not in identities:
+            identities.append(extended_identity)
+    else:
+        cause = _windows_error()
+        if getattr(cause, "winerror", None) not in _WINDOWS_UNSUPPORTED_FILE_ID_ERRORS:
+            guard = _WindowsIdentityGuard(path, handle, (), None, 0, False, 0)
+            _close_windows_guard(guard)
+            raise error_type("unable to identify extended managed removal path: %s" % path) from cause
     guard = _WindowsIdentityGuard(
         path,
         handle,
-        int(information.volume_serial_number),
-        file_index,
+        identities,
+        (int(status.st_dev), int(status.st_ino)),
         int(information.number_of_links),
         bool(information.file_attributes & _WINDOWS_FILE_ATTRIBUTE_DIRECTORY),
         size,
@@ -210,6 +257,7 @@ def _open_windows_identity_guard(path, status, error_type):
     if not _windows_status_matches_guard(status, guard):
         _close_windows_guard(guard)
         raise error_type("managed removal path changed while pinning: %s" % path)
+    guard.identities = (guard.status_identity,)
     return guard
 
 
@@ -254,7 +302,7 @@ def _validate_windows_child_guard(parent_descriptor, target_descriptor, error_ty
         return
     if not isinstance(target_descriptor, _WindowsIdentityGuard):
         raise error_type("managed removal target was not pinned by a Windows handle: %s" % target)
-    if parent_descriptor.volume_serial != target_descriptor.volume_serial:
+    if parent_descriptor.status_identity[0] != target_descriptor.status_identity[0]:
         raise error_type("managed removal target changed volumes while pinning: %s" % target)
 
 
