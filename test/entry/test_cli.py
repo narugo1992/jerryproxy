@@ -931,6 +931,45 @@ def test_guided_install_collects_a_custom_relay_and_pattern(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize(
+    ("text_result", "message"),
+    [
+        (EOFError(), "interactive selection unavailable"),
+        (KeyboardInterrupt(), "interactive selection cancelled"),
+        ("", "interactive selection returned an empty value"),
+    ],
+)
+def test_guided_install_rejects_unavailable_or_empty_custom_relay_input(
+    tmp_path,
+    monkeypatch,
+    text_result,
+    message,
+):
+    class Prompt(object):
+        def __init__(self, result):
+            self.result = result
+
+        def execute(self):
+            if isinstance(self.result, BaseException):
+                raise self.result
+            return self.result
+
+    monkeypatch.setattr(common_module, "manager", lambda context: object())
+    monkeypatch.setattr(common_module, "select_backend", lambda prompt: "mihomo")
+    monkeypatch.setattr(
+        common_module,
+        "select_catalog_version",
+        lambda selected_manager, name: None,
+    )
+    monkeypatch.setattr(common_module.inquirer, "select", lambda **kwargs: Prompt("__custom__"))
+    monkeypatch.setattr(common_module.inquirer, "text", lambda **kwargs: Prompt(text_result))
+
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "install"])
+
+    assert result.exit_code == 1
+    assert message in result.output
+
+
+@pytest.mark.parametrize(
     ("activation_option", "expected"),
     [("--activate", True), ("--no-activate", False)],
 )
