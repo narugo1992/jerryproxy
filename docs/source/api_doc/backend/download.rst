@@ -10,4 +10,4 @@ AssetDownloader
 -----------------------------------------------------
 
 .. autoclass:: AssetDownloader
-   :members: __init__,download
+   :members: __init__,download_sources,download

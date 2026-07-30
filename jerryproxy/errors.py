@@ -21,6 +21,19 @@ class DownloadError(JerryProxyError):
     """Raised when an upstream asset cannot be downloaded safely."""
 
 
+class DownloadTransportError(DownloadError):
+    """Raised when one download source is unavailable for transport reasons."""
+
+    def __init__(self, message, category="transport"):
+        # type: (str, str) -> None
+        super(DownloadTransportError, self).__init__(message)
+        self.category = category
+
+
+class DownloadPolicyError(DownloadError):
+    """Raised when a download URL or response violates a safety policy."""
+
+
 class IntegrityError(JerryProxyError):
     """Raised when a downloaded or local asset fails integrity checks."""
 

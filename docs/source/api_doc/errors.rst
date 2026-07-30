@@ -36,6 +36,19 @@ DownloadError
 .. autoclass:: DownloadError
 
 
+DownloadTransportError
+-----------------------------------------------------
+
+.. autoclass:: DownloadTransportError
+   :members: __init__
+
+
+DownloadPolicyError
+-----------------------------------------------------
+
+.. autoclass:: DownloadPolicyError
+
+
 IntegrityError
 -----------------------------------------------------
 

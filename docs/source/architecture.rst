@@ -36,6 +36,15 @@ the maintenance tool. Runtime reads go through ``jerryproxy.data`` only. Users
 receive catalog updates by upgrading JerryProxy, never through an in-process
 catalog updater.
 
+Relay-health monitoring is outside the runtime graph for the same reason. The
+maintainer-owned Gist is the target source of truth; ``make
+relay_health_sync`` downloads it to an ignored local JSON file. The
+``tools.relay_health`` and ``tools.render_relay_health`` modules consume only
+local JSON paths. GitHub Actions owns publication of the latest result back to
+the Gist and of the generated Markdown to the repository Wiki. No health
+configuration or observation is imported by ``jerryproxy`` or packaged in its
+wheel.
+
 Every current managed-state operation uses one upstream ``filelock.FileLock``
 below the selected JerryProxy home. Catalog-only queries do not initialize or
 lock the home. Backend list, doctor, and self-check consume a single inventory

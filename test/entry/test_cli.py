@@ -393,7 +393,7 @@ def test_backend_group_short_command_dispatches_selected_operation(tmp_path, mon
 
 
 def test_guided_install_uses_real_inquirer_selection_boundary(tmp_path, monkeypatch):
-    selections = iter(["mihomo", ""])
+    selections = iter(["mihomo", "", "direct"])
     prompts = []
     manager = BackendManager(JerryProxyPaths(tmp_path / "home"), probe_runner=lambda installed: None)
     captured = {}
@@ -418,9 +418,16 @@ def test_guided_install_uses_real_inquirer_selection_boundary(tmp_path, monkeypa
         def resolve_artifact(self, name, version):
             return manager.resolve_artifact(name, version)
 
-        def install(self, name, version, activate):
+        def install(self, name, version, activate, relay, relay_url, relay_pattern):
             artifact = manager.resolve_artifact(name, version)
-            captured.update(name=name, version=version, activate=activate)
+            captured.update(
+                name=name,
+                version=version,
+                activate=activate,
+                relay=relay,
+                relay_url=relay_url,
+                relay_pattern=relay_pattern,
+            )
             return SimpleNamespace(
                 name=name,
                 version=artifact.version,
@@ -437,9 +444,69 @@ def test_guided_install_uses_real_inquirer_selection_boundary(tmp_path, monkeypa
     result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "install"])
 
     assert result.exit_code == 0
-    assert prompts == ["Select a backend to install:", "Select a stable version:"]
-    assert captured == {"name": "mihomo", "version": None, "activate": False}
+    assert prompts == [
+        "Select a backend to install:",
+        "Select a stable version:",
+        "Select download transport:",
+    ]
+    assert captured == {
+        "name": "mihomo",
+        "version": None,
+        "activate": False,
+        "relay": "direct",
+        "relay_url": None,
+        "relay_pattern": None,
+    }
     assert "Installed: mihomo" in result.output
+
+
+def test_guided_install_collects_a_custom_relay_and_pattern(tmp_path, monkeypatch):
+    selections = iter(["__custom__", "query_q"])
+    captured = {}
+    asset = SimpleNamespace(
+        backend="mihomo",
+        version="1.0.0",
+        name="mihomo.gz",
+        sha256="0" * 64,
+    )
+
+    class Prompt(object):
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    class GuidedManager(object):
+        platform_info = detect_platform()
+
+        def resolve_artifact(self, name, version):
+            return asset
+
+        def install(self, name, version, activate, relay, relay_url, relay_pattern):
+            captured.update(
+                relay=relay,
+                relay_url=relay_url,
+                relay_pattern=relay_pattern,
+            )
+            return SimpleNamespace(name=name, version=asset.version, executable=tmp_path / "mihomo")
+
+    monkeypatch.setattr(cli_module, "_manager", lambda context: GuidedManager())
+    monkeypatch.setattr(cli_module, "_select_backend", lambda message: "mihomo")
+    monkeypatch.setattr(cli_module, "_select_catalog_version", lambda selected_manager, name: None)
+    monkeypatch.setattr(cli_module.inquirer, "select", lambda **kwargs: Prompt(next(selections)))
+    monkeypatch.setattr(cli_module.inquirer, "text", lambda **kwargs: Prompt("https://relay.example/prefix"))
+    monkeypatch.setattr(cli_module.inquirer, "confirm", lambda **kwargs: Prompt(False))
+
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "install"])
+
+    assert result.exit_code == 0
+    assert captured == {
+        "relay": None,
+        "relay_url": "https://relay.example/prefix",
+        "relay_pattern": "query_q",
+    }
+    assert "Transport: custom relay (query_q)" in result.output
 
 
 def test_guided_install_reports_when_no_compatible_stable_version_exists(tmp_path, monkeypatch):
@@ -709,23 +776,179 @@ def test_explicit_install_prints_the_active_link(tmp_path, monkeypatch):
         sha256="0" * 64,
     )
 
+    captured = {}
+
     class InstallManager(object):
         platform_info = detect_platform()
 
         def resolve_artifact(self, name, version):
             return asset
 
-        def install(self, name, version, activate):
+        def install(self, name, version, activate, relay, relay_url, relay_pattern):
+            captured.update(
+                relay=relay,
+                relay_url=relay_url,
+                relay_pattern=relay_pattern,
+            )
             return SimpleNamespace(name=name, version="1.0.0", executable=executable)
 
         def current(self, name):
             return SimpleNamespace(link=link, link_mode="symlink")
 
     monkeypatch.setattr(cli_module, "_manager", lambda context: InstallManager())
-    result = CliRunner().invoke(cli, ["backend", "install", "mihomo", "1.0.0"])
+    result = CliRunner().invoke(
+        cli,
+        [
+            "backend",
+            "install",
+            "mihomo",
+            "1.0.0",
+            "--relay-url",
+            "https://relay.example",
+            "--relay-pattern",
+            "host_path",
+        ],
+    )
 
     assert result.exit_code == 0
+    assert captured == {
+        "relay": None,
+        "relay_url": "https://relay.example",
+        "relay_pattern": "host_path",
+    }
+    assert "Transport: custom relay (host_path)" in result.output
     assert "Active link: %s (symlink)" % link in result.output
+
+
+def test_explicit_install_defaults_to_auto_relay(tmp_path, monkeypatch):
+    captured = {}
+    asset = SimpleNamespace(
+        backend="mihomo",
+        version="1.0.0",
+        name="mihomo.gz",
+        sha256="0" * 64,
+    )
+
+    class InstallManager(object):
+        platform_info = detect_platform()
+
+        def resolve_artifact(self, name, version):
+            return asset
+
+        def install(self, name, version, activate, relay, relay_url, relay_pattern):
+            captured.update(
+                relay=relay,
+                relay_url=relay_url,
+                relay_pattern=relay_pattern,
+            )
+            return SimpleNamespace(name=name, version=asset.version, executable=tmp_path / "mihomo")
+
+        def current(self, name):
+            return SimpleNamespace(link=tmp_path / "bin" / name, link_mode="symlink")
+
+    monkeypatch.setattr(cli_module, "_manager", lambda context: InstallManager())
+
+    result = CliRunner().invoke(cli, ["backend", "install", "mihomo"])
+
+    assert result.exit_code == 0
+    assert captured == {
+        "relay": "auto",
+        "relay_url": None,
+        "relay_pattern": None,
+    }
+    assert "Transport: auto" in result.output
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--relay", "auto", "--relay-url", "https://relay.example"],
+        ["--relay-pattern", "host_path"],
+    ],
+)
+def test_install_relay_option_conflicts_are_usage_errors(arguments):
+    result = CliRunner().invoke(cli, ["backend", "install", "mihomo"] + arguments)
+
+    assert result.exit_code == 2
+
+
+def test_install_rejects_a_malformed_relay_url_without_a_traceback(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "jerryproxy",
+            "--home",
+            str(tmp_path),
+            "backend",
+            "install",
+            "mihomo",
+            "--relay-url",
+            "https://[",
+        ],
+    )
+
+    assert cli_module.main() == 1
+    captured = capsys.readouterr()
+    assert "relay URL is invalid" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_backend_install_help_explains_relay_modes_and_patterns():
+    result = CliRunner().invoke(cli, ["backend", "install", "--help"], terminal_width=72)
+
+    assert result.exit_code == 0
+    assert "--relay MODE" in result.output
+    assert "--relay-url HTTPS_BASE_URL" in result.output
+    assert "--relay-pattern PATTERN" in result.output
+    assert "Relay MODE values for --relay MODE:" in result.output
+    assert "relay contact is acceptable. There is no fallback." in result.output
+    assert "Try exactly this order: direct GitHub, gh-proxy.com," in result.output
+    assert "This is the default; a custom --relay-url" in result.output
+    assert "is never included." in result.output
+    assert "Request only https://gh-proxy.com/URL." in result.output
+    assert "Request only https://cdn.akaere.online/URL." in result.output
+    assert "Request only https://gh.geekertao.top/URL." in result.output
+    assert "Custom relay options:" in result.output
+    assert "full_url_path" in result.output
+    assert "BASE/https://github.com/OWNER/REPO/releases/download/TAG/ASSET" in result.output
+    assert "host_path" in result.output
+    assert "BASE/github.com/OWNER/REPO/releases/download/TAG/ASSET" in result.output
+    assert "query_q" in result.output
+    assert "BASE/?q=<percent-encoded-official-URL>" in result.output
+    assert "Fallback and verification:" in result.output
+    assert "Privacy boundary:" in result.output
+    assert "never sends GitHub credentials, private assets," in result.output
+    assert "subscription URLs, provider data" in result.output
+    assert "GitHub release API requests" in result.output
+    assert "through a relay." in result.output
+    assert "--relay-pattern requires --relay-url." in result.output
+    assert "jerryproxy backend install mihomo --relay auto" in result.output
+    assert "[default: auto]" in result.output
+
+
+@pytest.mark.parametrize("terminal_width", [72, 80, 100, 120])
+def test_backend_install_help_preserves_relay_layout(terminal_width):
+    result = CliRunner().invoke(
+        cli,
+        ["backend", "install", "--help"],
+        terminal_width=terminal_width,
+    )
+
+    assert result.exit_code == 0
+    assert max(len(line) for line in result.output.splitlines()) <= terminal_width
+    assert "    auto\n      Try exactly this order:" in result.output
+    assert "    gh-proxy.com\n      Request only https://gh-proxy.com/URL." in result.output
+    assert "      full_url_path\n        BASE/https://github.com/" in result.output
+    assert "      host_path\n        BASE/github.com/" in result.output
+    assert "      query_q\n        BASE/?q=<percent-encoded-official-URL>" in result.output
+    assert "auto     Try" not in result.output
+
+
+def test_backend_help_identifies_relay_install_entry_point():
+    result = CliRunner().invoke(cli, ["backend", "--help"], terminal_width=72)
+
+    assert result.exit_code == 0
+    assert "install    Install via direct GitHub or a release relay." in result.output
 
 
 def test_verify_empty_and_remove_invalid_option_combinations(tmp_path):

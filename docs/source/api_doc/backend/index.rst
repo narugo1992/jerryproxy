@@ -16,6 +16,7 @@ jerryproxy.backend
    model
    platform
    registry
+   relay
    removal
 
 \_\_all\_\_

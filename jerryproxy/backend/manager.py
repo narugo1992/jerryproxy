@@ -28,6 +28,7 @@ from .download import AssetDownloader
 from .model import ActiveBackend, BackendInventory, CleanupResult, InstalledBackend, RemovalResult
 from .platform import detect_platform
 from .registry import get_backend, iter_backend_platforms, iter_backends, version_sort_key
+from .relay import build_download_sources
 
 
 class BackendManager(object):
@@ -62,10 +63,24 @@ class BackendManager(object):
         # type: (str, Optional[str]) -> CatalogArtifact
         return self.catalog.resolve(name, version, self.platform_info)
 
-    def install(self, name, version=None, activate=True):
-        # type: (str, Optional[str], bool) -> InstalledBackend
+    def install(
+        self,
+        name,
+        version=None,
+        activate=True,
+        relay=None,
+        relay_url=None,
+        relay_pattern=None,
+    ):
+        # type: (str, Optional[str], bool, Optional[str], Optional[str], Optional[str]) -> InstalledBackend
         spec = get_backend(name)
         asset = self.resolve_artifact(spec.name, version)
+        sources = build_download_sources(
+            asset.url,
+            relay=relay,
+            relay_url=relay_url,
+            relay_pattern=relay_pattern,
+        )
         normalized_version = asset.version
         with JerryProxyOperationLock(self.paths):
             download_directory = self.paths.downloads / spec.name / normalized_version
@@ -75,8 +90,8 @@ class BackendManager(object):
             if archive.exists() and sha256_file(archive) != asset.sha256:
                 archive.unlink()
             if not archive.exists():
-                self.downloader.download(
-                    asset.url,
+                self.downloader.download_sources(
+                    sources,
                     archive,
                     asset.sha256,
                     expected_size=asset.size,

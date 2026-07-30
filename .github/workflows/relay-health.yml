@@ -1,0 +1,86 @@
+name: Relay Health
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: relay-health
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe configured relays
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install tool dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Download Gist configuration
+        run: make relay_health_sync
+      - name: Probe every configured relay pattern
+        env:
+          RELAY_HEALTH_VANTAGE: GitHub-hosted ubuntu-22.04
+        run: make relay_health_check
+      - uses: actions/upload-artifact@v7
+        with:
+          name: relay-health-data
+          path: |
+            relay_health_targets.json
+            relay_health_latest.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish Gist and Wiki
+    needs: probe
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install report dependencies
+        run: python -m pip install "tabulate>=0.9,<0.10"
+      - uses: actions/download-artifact@v8
+        with:
+          name: relay-health-data
+          path: .
+      - name: Upload latest JSON to the health Gist
+        env:
+          GH_TOKEN: ${{ secrets.RELAY_HEALTH_GIST_TOKEN }}
+        run: >-
+          gh gist edit 78fb0ee6135fcdf4f0e5c7ec38f2fd59
+          --filename relay_health_latest.json
+          relay_health_latest.json
+      - name: Render Wiki page
+        run: make relay_health_wiki
+      - name: Publish Wiki page
+        env:
+          WIKI_TOKEN: ${{ secrets.RELAY_HEALTH_WIKI_TOKEN }}
+        shell: bash
+        run: |
+          basic_auth="$(printf 'x-access-token:%s' "$WIKI_TOKEN" | base64 -w 0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" \
+            clone https://github.com/narugo1992/jerryproxy.wiki.git wiki
+          cp Relay-Health.md wiki/Relay-Health.md
+          cd wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Relay-Health.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "docs: update relay health"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" push origin HEAD

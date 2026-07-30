@@ -120,3 +120,8 @@ docs/build/
 # Logs and local smoke-test scripts or directories at repository root
 *.log
 /test_*
+
+# Local relay-health inputs and generated publications
+/relay_health_targets.json
+/relay_health_latest.json
+/Relay-Health.md

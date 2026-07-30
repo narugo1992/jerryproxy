@@ -2,12 +2,12 @@
 
 import hashlib
 import os
-from urllib.parse import urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
 import requests
 from tqdm import tqdm
 
-from ..errors import DownloadError, IntegrityError
+from ..errors import DownloadError, DownloadPolicyError, DownloadTransportError, IntegrityError
 from ..utils.fs import ensure_private_directory
 
 
@@ -21,18 +21,118 @@ class AssetDownloader(object):
         session=None,
         progress_factory=None,
         progress=True,
+        maximum_redirects=5,
     ):
-        # type: (float, int, Any, Callable, bool) -> None
+        # type: (float, int, Any, Callable, bool, int) -> None
+        if (
+            not isinstance(maximum_redirects, int)
+            or isinstance(maximum_redirects, bool)
+            or maximum_redirects < 0
+        ):
+            raise ValueError("maximum_redirects must be a non-negative integer")
         self.timeout = timeout
         self.maximum_bytes = maximum_bytes
         self.session = session or requests.Session()
         self.progress_factory = progress_factory or tqdm
         self.progress = progress
+        self.maximum_redirects = maximum_redirects
+
+    @staticmethod
+    def _validate_https_url(url):  # type: (str) -> None
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            # ValueError is expected for malformed bracket or port syntax.
+            raise DownloadPolicyError("backend download URL is invalid")
+        if parsed.scheme != "https" or not hostname:
+            raise DownloadPolicyError("backend downloads require HTTPS with a hostname")
+        if parsed.username is not None or parsed.password is not None:
+            raise DownloadPolicyError("backend download URLs must not contain user information")
+        if port is not None and (port < 1 or port > 65535):
+            raise DownloadPolicyError("backend download URL has an invalid port")
+
+    def _request(self, url):
+        try:
+            return self.session.get(
+                url,
+                allow_redirects=False,
+                headers={"User-Agent": "JerryProxy-backend-downloader"},
+                stream=True,
+                timeout=self.timeout,
+            )
+        except (
+            requests.exceptions.InvalidURL,
+            requests.exceptions.InvalidSchema,
+            requests.exceptions.MissingSchema,
+            requests.exceptions.URLRequired,
+        ):
+            # These Requests exceptions identify an invalid effective request URL.
+            raise DownloadPolicyError("backend download URL is invalid")
+        except requests.exceptions.ProxyError:
+            # ProxyError is the documented Requests proxy transport failure.
+            raise DownloadTransportError("backend download failed: proxy", "proxy")
+        except requests.exceptions.SSLError:
+            # SSLError is the documented Requests TLS transport failure.
+            raise DownloadTransportError("backend download failed: tls", "tls")
+        except requests.exceptions.Timeout:
+            # Timeout covers documented connect and read timeout failures.
+            raise DownloadTransportError("backend download failed: timeout", "timeout")
+        except requests.exceptions.ConnectionError:
+            # ConnectionError covers expected DNS and connection failures.
+            raise DownloadTransportError("backend download failed: connect", "connect")
+        except requests.exceptions.RequestException:
+            # Remaining RequestException subclasses are bounded request transport failures.
+            raise DownloadTransportError("backend download failed: request", "request")
+
+    def _open_response(self, url):
+        self._validate_https_url(url)
+        current_url = url
+        visited = set()
+        redirect_statuses = (301, 302, 303, 307, 308)
+        for redirect_count in range(self.maximum_redirects + 1):
+            identity = urldefrag(current_url)[0]
+            if identity in visited:
+                raise DownloadPolicyError("backend download redirect loop detected")
+            visited.add(identity)
+            response = self._request(current_url)
+            if response.status_code not in redirect_statuses:
+                return response
+            try:
+                location = response.headers.get("Location")
+                if not location:
+                    raise DownloadPolicyError("backend download redirect has no Location")
+                if redirect_count >= self.maximum_redirects:
+                    raise DownloadPolicyError("backend download redirect limit exceeded")
+                try:
+                    next_url = urldefrag(urljoin(current_url, location))[0]
+                except ValueError:
+                    # ValueError is expected for a malformed redirect Location URL.
+                    raise DownloadPolicyError("backend download URL is invalid")
+                self._validate_https_url(next_url)
+            finally:
+                response.close()
+            current_url = next_url
+
+    def download_sources(self, sources, destination, expected_sha256, expected_size=None):
+        # type: (tuple, Path, str, int) -> Path
+        """Try an explicit bounded source sequence on transport failures only."""
+
+        failures = []
+        for source in sources:
+            try:
+                return self.download(source.url, destination, expected_sha256, expected_size)
+            except DownloadTransportError as error:
+                failures.append("%s (%s)" % (source.label, error.category))
+        raise DownloadTransportError(
+            "backend download sources exhausted: %s" % ", ".join(failures),
+            "exhausted",
+        )
 
     def download(self, url, destination, expected_sha256, expected_size=None):
         # type: (str, Path, str, int) -> Path
-        if urlparse(url).scheme != "https":
-            raise DownloadError("backend downloads require HTTPS: %s" % url)
+        self._validate_https_url(url)
         ensure_private_directory(destination.parent)
         temporary = destination.with_name(".%s.%s.part" % (destination.name, os.getpid()))
         if temporary.exists():
@@ -51,27 +151,13 @@ class AssetDownloader(object):
             disable=not self.progress,
         )
         try:
-            try:
-                response = self.session.get(
-                    url,
-                    allow_redirects=True,
-                    headers={"User-Agent": "JerryProxy-backend-downloader"},
-                    stream=True,
-                    timeout=self.timeout,
-                )
-            except requests.exceptions.RequestException as error:
-                # RequestException covers expected DNS, TLS, proxy, connection, and timeout failures.
-                raise DownloadError("backend download failed: %s" % error)
+            response = self._open_response(url)
             with response:
-                final_url = response.url
-                if urlparse(final_url).scheme != "https":
-                    raise DownloadError("backend download redirected away from HTTPS")
-                try:
-                    response.raise_for_status()
-                except requests.exceptions.HTTPError as error:
-                    # HTTPError is expected for missing or rejected upstream release assets.
-                    status_code = error.response.status_code if error.response is not None else response.status_code
-                    raise DownloadError("backend download failed: HTTP %s" % status_code)
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise DownloadTransportError(
+                        "backend download failed: HTTP %s" % response.status_code,
+                        "http_%s" % response.status_code,
+                    )
                 content_length = response.headers.get("Content-Length")
                 declared_size = None
                 if content_length:
@@ -79,11 +165,11 @@ class AssetDownloader(object):
                         declared_size = int(content_length)
                     except ValueError:
                         # ValueError is expected when an upstream server sends a malformed length.
-                        raise DownloadError("backend download has an invalid Content-Length")
+                        raise DownloadPolicyError("backend download has an invalid Content-Length")
                     if declared_size < 0:
-                        raise DownloadError("backend download has an invalid Content-Length")
+                        raise DownloadPolicyError("backend download has an invalid Content-Length")
                     if declared_size > self.maximum_bytes:
-                        raise DownloadError("backend asset exceeds the download safety limit")
+                        raise DownloadPolicyError("backend asset exceeds the download safety limit")
                 if progress.total is None and declared_size is not None:
                     progress.total = declared_size
                     progress.refresh()
@@ -101,13 +187,16 @@ class AssetDownloader(object):
                                 continue
                             total += len(block)
                             if total > self.maximum_bytes:
-                                raise DownloadError("backend asset exceeds the download safety limit")
+                                raise DownloadPolicyError("backend asset exceeds the download safety limit")
                             digest.update(block)
                             stream.write(block)
                             progress.update(len(block))
-                    except requests.exceptions.RequestException as error:
+                    except requests.exceptions.RequestException:
                         # Stream failures include interrupted and malformed chunked responses.
-                        raise DownloadError("backend download failed while streaming: %s" % error)
+                        raise DownloadTransportError(
+                            "backend download failed while streaming",
+                            "stream",
+                        )
                     stream.flush()
                     os.fsync(stream.fileno())
             if expected_size is not None and total != expected_size:

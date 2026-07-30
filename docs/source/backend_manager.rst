@@ -31,6 +31,52 @@ installing:
    jerryproxy backend install sing-box 1.13.14
    jerryproxy backend verify
 
+Release relay transport
+-----------------------
+
+``--relay auto`` is the default. It tries direct GitHub first, then the three
+built-in release relays in a fixed order. Use ``--relay direct`` when no relay
+contact is acceptable. A named relay is a single-source request and does not
+silently contact the other candidates:
+
+.. code-block:: shell
+
+   jerryproxy backend install mihomo --relay auto
+   jerryproxy backend install mihomo --relay direct
+   jerryproxy backend install mihomo --relay gh-proxy.com
+
+Automatic fallback advances only after a transport failure such as DNS, TLS,
+proxy, timeout, streaming, or HTTP failure. Redirect-policy, response-size,
+integrity, and local-filesystem failures are terminal. The installed manifest
+always records the official catalog URL, and the complete archive must match
+the official size and SHA-256 regardless of transport.
+
+Use ``--relay-url`` for one invocation-scoped custom HTTPS relay. The optional
+``--relay-pattern`` selects one of three constrained URL shapes and defaults to
+``full_url_path``:
+
+.. list-table:: Custom relay URL patterns
+   :header-rows: 1
+
+   * - Pattern
+     - Effective request form
+   * - ``full_url_path``
+     - ``BASE/https://github.com/OWNER/REPO/releases/download/...``
+   * - ``host_path``
+     - ``BASE/github.com/OWNER/REPO/releases/download/...``
+   * - ``query_q``
+     - ``BASE/?q=<percent-encoded-official-URL>``
+
+.. code-block:: shell
+
+   jerryproxy backend install mihomo \
+     --relay-url https://relay.example/prefix \
+     --relay-pattern host_path
+
+``--relay`` and ``--relay-url`` are mutually exclusive.
+``--relay-pattern`` requires ``--relay-url``. The same details are available
+at the point of use through ``jerryproxy backend install --help``.
+
 The backend command surface has seven operations: ``available``, ``install``,
 ``list``, ``switch``, ``verify``, ``remove``, and ``clean``. ``available``
 uses positional depth instead of separate discovery commands: no target shows

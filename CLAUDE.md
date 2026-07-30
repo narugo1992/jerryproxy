@@ -93,6 +93,16 @@ authentication, extraction, process, or permission errors to warnings.
   byte progress/status display on stderr. Preserve system proxy/CA behavior,
   keep stdout machine-readable, and retain deterministic injection points for
   unit tests.
+- Complete CLI installs default to `--relay auto`: direct GitHub first, then
+  the built-in relays in their documented fixed order, advancing only after a
+  transport failure. `--relay direct` prohibits relay fallback, and an
+  invocation-scoped `--relay-url` replaces the implicit default without an
+  option conflict.
+- Backend release relays may transport only public official GitHub Release
+  asset URLs. Automatic fallback is the CLI default, begins with direct GitHub,
+  and catches transport failures only; integrity, redirect-policy, size-bound,
+  and local filesystem failures are terminal. Manifests retain the official
+  catalog URL rather than the effective relay URL.
 - Keep `urllib3` below 2 while Python 3.7/OpenSSL 1.1.0 standalone build
   compatibility remains a target; use the latest patched 1.26 release floor.
 - Serialize all managed-state reads and mutations for one logical home through
@@ -197,6 +207,11 @@ authentication, extraction, process, or permission errors to warnings.
 - Future runtime drivers own generated configuration and backend control APIs.
 - Future subscription management may fetch and inventory containers, but must
   not normalize protocol-specific credentials/settings into a second core.
+- Relay-health target configuration lives in the maintainer Gist, not in this
+  repository or package. `make relay_health_sync` downloads one ignored local
+  JSON file. `tools.relay_health` and `tools.render_relay_health` operate only
+  on local files; Gist result upload and Wiki Git publication belong only to
+  the repository workflow. Relay-health code must not enter `jerryproxy`.
 
 Do not allow remotely downloaded Python plugins in the initial architecture.
 Backend drivers execute high-privilege lifecycle operations and must remain
@@ -215,6 +230,9 @@ make docs
 make package
 make build
 make build_linux
+make relay_health_sync
+make relay_health_check
+make relay_health_wiki
 make check
 python3.7 -m pytest test -m unittest
 ```

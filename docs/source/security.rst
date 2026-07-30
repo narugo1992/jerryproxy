@@ -10,6 +10,12 @@ Current enforced backend invariants:
   digest supplied directly by GitHub's release API and using official checksum
   text only for legacy assets without that field;
 * bounded HTTPS download and bounded extraction;
+* release relays accept only public official GitHub Release asset URLs, never
+  authenticated API requests, private assets, subscription URLs, or arbitrary
+  headers;
+* relay selection changes transport only: exact catalog identity, complete
+  size, and official SHA-256 verification remain mandatory, and fallback never
+  hides a policy or integrity failure;
 * streamed ``requests`` downloads with byte-oriented ``tqdm`` status on
   stderr, preserving stdout for structured output;
 * archive traversal, symlink, and special-file rejection;

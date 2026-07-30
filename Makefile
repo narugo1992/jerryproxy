@@ -1,4 +1,4 @@
-.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check check
+.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check relay_health_sync relay_health_check relay_health_wiki check
 
 PYTHON ?= $(shell which python)
 PYTHON37 ?= python3.7
@@ -14,6 +14,14 @@ DIST_DIR      := ${PROJ_DIR}/dist
 TEST_DIR      := ${PROJ_DIR}/test
 SRC_DIR       := ${PROJ_DIR}/jerryproxy
 TOOLS_DIR     := ${PROJ_DIR}/tools
+
+RELAY_HEALTH_GIST_ID ?= 78fb0ee6135fcdf4f0e5c7ec38f2fd59
+RELAY_HEALTH_TARGETS_URL ?= https://gist.githubusercontent.com/narugo1992/${RELAY_HEALTH_GIST_ID}/raw/relay_health_targets.json
+RELAY_HEALTH_TARGETS ?= ${PROJ_DIR}/relay_health_targets.json
+RELAY_HEALTH_RESULTS ?= ${PROJ_DIR}/relay_health_latest.json
+RELAY_HEALTH_WIKI ?= ${PROJ_DIR}/Relay-Health.md
+RELAY_HEALTH_TIMEOUT ?= 20
+RELAY_HEALTH_VANTAGE ?= local
 
 RANGE_DIR      ?= .
 RANGE_TEST_DIR := ${TEST_DIR}/${RANGE_DIR}
@@ -59,6 +67,9 @@ help:
 	@echo "                      RANGE_DIR=<path>"
 	@echo "  make catalog_update - Refresh the packaged backend catalog from GitHub"
 	@echo "  make catalog_check  - Validate the packaged catalog without network access"
+	@echo "  make relay_health_sync - Download relay targets from the health Gist"
+	@echo "  make relay_health_check - Probe the local relay target JSON"
+	@echo "  make relay_health_wiki - Render local relay JSON as Wiki Markdown"
 
 install_dev:
 	$(PYTHON) -m pip install -e .
@@ -154,5 +165,26 @@ catalog_update:
 
 catalog_check:
 	$(PYTHON) -m tools.backend_catalog --validate-only
+
+relay_health_sync:
+	curl --fail --location --silent --show-error \
+		--max-time 30 \
+		--max-filesize 1048576 \
+		--output "${RELAY_HEALTH_TARGETS}.tmp" \
+		"${RELAY_HEALTH_TARGETS_URL}?refresh=$$(date +%s)"
+	mv "${RELAY_HEALTH_TARGETS}.tmp" "${RELAY_HEALTH_TARGETS}"
+
+relay_health_check:
+	$(PYTHON) -m tools.relay_health \
+		--targets "${RELAY_HEALTH_TARGETS}" \
+		--output "${RELAY_HEALTH_RESULTS}" \
+		--timeout "${RELAY_HEALTH_TIMEOUT}" \
+		--vantage "${RELAY_HEALTH_VANTAGE}"
+
+relay_health_wiki:
+	$(PYTHON) -m tools.render_relay_health \
+		--targets "${RELAY_HEALTH_TARGETS}" \
+		--results "${RELAY_HEALTH_RESULTS}" \
+		--output "${RELAY_HEALTH_WIKI}"
 
 check: lint catalog_check unittest pdocs package test_cli

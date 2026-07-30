@@ -6,7 +6,13 @@ import requests
 
 import jerryproxy.backend.download as download_module
 from jerryproxy.backend.download import AssetDownloader
-from jerryproxy.errors import DownloadError, IntegrityError
+from jerryproxy.backend.relay import DownloadSource
+from jerryproxy.errors import (
+    DownloadError,
+    DownloadPolicyError,
+    DownloadTransportError,
+    IntegrityError,
+)
 
 
 class FakeResponse(object):
@@ -25,12 +31,17 @@ class FakeResponse(object):
         self.status_code = status_code
         self.chunks = list(chunks) if chunks is not None else [payload]
         self.stream_error = stream_error
+        self.closed = False
 
     def __enter__(self):
         return self
 
     def __exit__(self, exception_type, exception, traceback):
+        self.close()
         return False
+
+    def close(self):
+        self.closed = True
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -115,7 +126,7 @@ def test_download_verifies_digest_size_and_requests_streaming_contract(tmp_path)
         (
             "https://example.test/backend.gz",
             {
-                "allow_redirects": True,
+                "allow_redirects": False,
                 "headers": {"User-Agent": "JerryProxy-backend-downloader"},
                 "stream": True,
                 "timeout": 60.0,
@@ -144,30 +155,71 @@ def test_download_rejects_non_https_without_a_request(tmp_path):
     assert session.calls == []
 
 
-def test_download_rejects_non_https_redirect(tmp_path):
-    payload = b"backend"
-    downloader, _ = make_downloader(FakeResponse(payload, final_url="http://mirror.test/backend"))
+def test_download_rejects_url_user_information_without_a_request(tmp_path):
+    downloader, session = make_downloader()
 
-    with pytest.raises(DownloadError):
-        downloader.download(
-            "https://example.test/backend.gz",
-            tmp_path / "x",
-            hashlib.sha256(payload).hexdigest(),
-        )
+    with pytest.raises(DownloadPolicyError, match="user information"):
+        downloader.download("https://user:secret@example.test/backend.gz", tmp_path / "x", "0" * 64)
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://example.test:99999/backend.gz", "https://example.test:0/backend.gz", "https://["],
+)
+def test_download_rejects_an_invalid_url_without_a_request(tmp_path, url):
+    downloader, session = make_downloader()
+
+    with pytest.raises(DownloadPolicyError, match="invalid"):
+        downloader.download(url, tmp_path / "x", "0" * 64)
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("maximum_redirects", [-1, 1.5, True])
+def test_downloader_rejects_an_invalid_redirect_budget(maximum_redirects):
+    with pytest.raises(ValueError, match="non-negative integer"):
+        AssetDownloader(maximum_redirects=maximum_redirects)
+
+
+def test_download_rejects_non_https_redirect_before_contact(tmp_path):
+    response = FakeResponse(status_code=302, headers={"Location": "http://mirror.test/backend"})
+    downloader, session = make_downloader(response)
+
+    with pytest.raises(DownloadPolicyError, match="HTTPS"):
+        downloader.download("https://example.test/backend.gz", tmp_path / "x", "0" * 64)
+
+    assert [call[0] for call in session.calls] == ["https://example.test/backend.gz"]
+    assert response.closed
+
+
+def test_download_rejects_a_malformed_redirect_location(tmp_path):
+    response = FakeResponse(status_code=302, headers={"Location": "https://["})
+    downloader, session = make_downloader(response)
+
+    with pytest.raises(DownloadPolicyError, match="invalid"):
+        downloader.download("https://example.test/backend.gz", tmp_path / "x", "0" * 64)
+
+    assert [call[0] for call in session.calls] == ["https://example.test/backend.gz"]
+    assert response.closed
 
 
 @pytest.mark.parametrize(
     ("response", "error", "message"),
     [
         (FakeResponse(status_code=404), None, "HTTP 404"),
-        (None, requests.exceptions.ConnectionError("network unavailable"), "network unavailable"),
-        (None, requests.exceptions.Timeout("connection timed out"), "connection timed out"),
+        (None, requests.exceptions.ProxyError("secret proxy URL"), "proxy"),
+        (None, requests.exceptions.SSLError("certificate details"), "tls"),
+        (None, requests.exceptions.ConnectionError("network unavailable"), "connect"),
+        (None, requests.exceptions.Timeout("connection timed out"), "timeout"),
+        (None, requests.exceptions.RequestException("request details"), "request"),
     ],
 )
 def test_download_translates_request_failures(tmp_path, response, error, message):
     downloader, _ = make_downloader(response=response, error=error)
 
-    with pytest.raises(DownloadError, match=message):
+    with pytest.raises(DownloadTransportError, match=message):
         downloader.download(
             "https://example.test/backend.gz",
             tmp_path / "backend.gz",
@@ -339,3 +391,139 @@ def test_download_progress_reports_failure_and_closes(tmp_path):
     progress = factory.instances[0]
     assert progress.descriptions[-1] == "Download failed backend.gz"
     assert progress.closed
+
+
+class SequenceSession(object):
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        response = self.responses.pop(0)
+        if isinstance(response, requests.exceptions.RequestException):
+            raise response
+        return response
+
+
+def test_download_follows_bounded_relative_https_redirects(tmp_path):
+    payload = b"redirected backend"
+    redirect = FakeResponse(
+        status_code=302,
+        final_url="https://example.test/backend.gz",
+        headers={"Location": "/objects/backend.gz"},
+    )
+    final = FakeResponse(payload, final_url="https://example.test/objects/backend.gz")
+    session = SequenceSession([redirect, final])
+    downloader = AssetDownloader(session=session, progress=False)
+
+    downloader.download(
+        "https://example.test/backend.gz",
+        tmp_path / "backend.gz",
+        hashlib.sha256(payload).hexdigest(),
+    )
+
+    assert [call[0] for call in session.calls] == [
+        "https://example.test/backend.gz",
+        "https://example.test/objects/backend.gz",
+    ]
+    assert redirect.closed
+    assert final.closed
+
+
+@pytest.mark.parametrize(
+    ("response", "maximum_redirects", "message"),
+    [
+        (FakeResponse(status_code=302, headers={}), 5, "no Location"),
+        (
+            FakeResponse(status_code=302, headers={"Location": "/backend.gz"}),
+            5,
+            "redirect loop",
+        ),
+        (
+            FakeResponse(status_code=302, headers={"Location": "/next.gz"}),
+            0,
+            "redirect limit",
+        ),
+    ],
+)
+def test_download_rejects_invalid_redirect_sequences(tmp_path, response, maximum_redirects, message):
+    session = SequenceSession([response])
+    downloader = AssetDownloader(session=session, progress=False, maximum_redirects=maximum_redirects)
+
+    with pytest.raises(DownloadPolicyError, match=message):
+        downloader.download("https://example.test/backend.gz", tmp_path / "backend.gz", "0" * 64)
+
+    assert response.closed
+
+
+def test_download_sources_falls_back_only_after_transport_failure(tmp_path):
+    payload = b"fallback backend"
+    session = SequenceSession([FakeResponse(status_code=503), FakeResponse(payload)])
+    downloader = AssetDownloader(session=session, progress=False)
+    sources = (
+        DownloadSource("first", "https://first.example/backend.gz"),
+        DownloadSource("second", "https://second.example/backend.gz"),
+    )
+
+    downloader.download_sources(
+        sources,
+        tmp_path / "backend.gz",
+        hashlib.sha256(payload).hexdigest(),
+        expected_size=len(payload),
+    )
+
+    assert [call[0] for call in session.calls] == [item.url for item in sources]
+
+
+def test_download_sources_never_hides_integrity_failure(tmp_path):
+    session = SequenceSession([FakeResponse(b"wrong"), FakeResponse(b"unused")])
+    downloader = AssetDownloader(session=session, progress=False)
+    sources = (
+        DownloadSource("first", "https://first.example/backend.gz"),
+        DownloadSource("second", "https://second.example/backend.gz"),
+    )
+
+    with pytest.raises(IntegrityError):
+        downloader.download_sources(sources, tmp_path / "backend.gz", "0" * 64)
+
+    assert [call[0] for call in session.calls] == [sources[0].url]
+
+
+def test_download_sources_never_falls_back_after_an_invalid_redirect_url(tmp_path):
+    redirect = FakeResponse(status_code=302, headers={"Location": "https://*/asset"})
+    session = SequenceSession(
+        [
+            redirect,
+            requests.exceptions.InvalidURL("invalid redirect URL"),
+            FakeResponse(b"must not be requested"),
+        ]
+    )
+    downloader = AssetDownloader(session=session, progress=False)
+    sources = (
+        DownloadSource("first", "https://first.example/backend.gz"),
+        DownloadSource("second", "https://second.example/backend.gz"),
+    )
+
+    with pytest.raises(DownloadPolicyError, match="URL is invalid"):
+        downloader.download_sources(sources, tmp_path / "backend.gz", "0" * 64)
+
+    assert [call[0] for call in session.calls] == [
+        sources[0].url,
+        "https://*/asset",
+    ]
+    assert redirect.closed
+
+
+def test_download_sources_reports_sanitized_exhaustion(tmp_path):
+    session = SequenceSession([FakeResponse(status_code=503), FakeResponse(status_code=404)])
+    downloader = AssetDownloader(session=session, progress=False)
+    sources = (
+        DownloadSource("first", "https://first.example/backend.gz"),
+        DownloadSource("second", "https://second.example/backend.gz"),
+    )
+
+    with pytest.raises(DownloadTransportError, match=r"first \(http_503\), second \(http_404\)"):
+        downloader.download_sources(sources, tmp_path / "backend.gz", "0" * 64)
+
+    assert [call[0] for call in session.calls] == [item.url for item in sources]

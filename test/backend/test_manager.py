@@ -464,7 +464,10 @@ def test_install_resolves_downloads_and_activates_exact_release(tmp_path):
         platform="linux-amd64",
         asset_id=1,
         name=asset_name,
-        url="https://example.test/%s" % asset_name,
+        url=(
+            "https://github.com/MetaCubeX/mihomo/releases/download/"
+            "v1.19.29/%s" % asset_name
+        ),
         sha256=digest,
         size=source.stat().st_size,
         updated_at="2026-01-01T00:00:00Z",
@@ -483,8 +486,14 @@ def test_install_resolves_downloads_and_activates_exact_release(tmp_path):
             return asset
 
     class Downloader(object):
-        def download(self, url, destination, expected_sha256, expected_size=None):
-            assert url == asset.url
+        def download_sources(self, sources, destination, expected_sha256, expected_size=None):
+            assert [source.label for source in sources] == [
+                "direct",
+                "gh-proxy.com",
+                "cdn.akaere.online",
+                "gh.geekertao.top",
+            ]
+            assert sources[0].url == asset.url
             assert expected_sha256 == digest
             assert expected_size == source.stat().st_size
             with pytest.raises(JerryProxyBusyError):
@@ -513,7 +522,7 @@ def test_install_resolves_downloads_and_activates_exact_release(tmp_path):
         downloader=Downloader(),
         probe_runner=probe,
     )
-    installed = manager.install("mihomo", "v1.19.29")
+    installed = manager.install("mihomo", "v1.19.29", relay="auto")
 
     assert installed.version == "1.19.29"
     assert installed.executable.read_bytes() == payload

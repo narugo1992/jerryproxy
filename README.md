@@ -25,6 +25,8 @@ Implemented now:
   directly by GitHub's release API;
 - streamed backend downloads through `requests`, with a `tqdm` byte progress
   bar showing connection, transfer speed/ETA, completion, and failure status;
+- direct, ordered automatic, named built-in, and invocation-scoped custom
+  GitHub Release relay transports for backend bootstrap;
 - bounded HTTPS downloads and safe ZIP/TAR/GZip extraction;
 - immutable installations under
   `~/.jerryproxy/backends/<backend>/<version>/`;
@@ -142,6 +144,44 @@ Install and activate one exact catalog version:
 jerryproxy backend install mihomo 1.19.29
 jerryproxy backend list mihomo --active
 ```
+
+Automatic transport fallback is the default. It tries GitHub first and contacts
+the built-in relays only if the preceding source has a transport failure. Use
+`--relay direct` when no relay contact is acceptable, or select one relay
+explicitly:
+
+```shell
+jerryproxy backend install mihomo --relay auto
+jerryproxy backend install mihomo --relay gh-proxy.com
+```
+
+`auto` is the default and tries direct GitHub, then `gh-proxy.com`,
+`cdn.akaere.online`, and `gh.geekertao.top`. It advances only after a
+transport failure; an integrity, redirect-policy, response-size, or
+local-filesystem failure stops immediately. Named relay mode contacts only
+that relay.
+
+A relay that is not built in can be used for one invocation. JerryProxy
+supports the three common GitHub Release URL shapes:
+
+| Pattern | Effective request form |
+|---|---|
+| `full_url_path` | `BASE/https://github.com/OWNER/REPO/releases/download/...` |
+| `host_path` | `BASE/github.com/OWNER/REPO/releases/download/...` |
+| `query_q` | `BASE/?q=<percent-encoded-official-URL>` |
+
+```shell
+jerryproxy backend install mihomo \
+  --relay-url https://relay.example/prefix \
+  --relay-pattern host_path
+```
+
+Relay transport never changes the catalog identity recorded in the installed
+manifest. The complete downloaded archive must still match the official byte
+size and SHA-256 before extraction. A public relay can observe the client IP
+and public release-asset path; JerryProxy never sends GitHub credentials,
+private assets, subscription URLs, or release API calls through it. Run
+`jerryproxy backend install --help` for the full mode and pattern semantics.
 
 Update to the newest packaged stable version and verify installed executable
 fingerprints:
@@ -332,6 +372,20 @@ prefers GitHub API digests, and reads official checksum text only for legacy
 assets where the API has no digest. It never downloads backend archives to
 calculate catalog fingerprints. The updater is not included in the wheel.
 
+Relay-health monitoring is also repository infrastructure, not JerryProxy
+runtime behavior. Its 57-site configuration lives in a dedicated
+[Gist](https://gist.github.com/narugo1992/78fb0ee6135fcdf4f0e5c7ec38f2fd59).
+`make relay_health_sync` downloads that configuration to an ignored local JSON
+file, `make relay_health_check` writes the latest bounded observations, and
+`make relay_health_wiki` renders the same local JSON as a GitHub Wiki page.
+The scheduled workflow publishes the result JSON back to the Gist and pushes
+the generated Markdown to the Wiki; neither tool module reads or writes Gists.
+Publication uses separate `RELAY_HEALTH_GIST_TOKEN` and
+`RELAY_HEALTH_WIKI_TOKEN` repository secrets, and the probe job receives
+neither token. Before the first publish run, the repository owner must create
+the initial Wiki page through GitHub so that `jerryproxy.wiki.git` exists; the
+workflow can update `Relay-Health.md` after that one-time bootstrap.
+
 ## Planned user experience
 
 The intended stable workflow is:
@@ -389,6 +443,9 @@ make build
 make build_linux
 make catalog_check
 make catalog_update
+make relay_health_sync
+make relay_health_check
+make relay_health_wiki
 make check
 ```
 
