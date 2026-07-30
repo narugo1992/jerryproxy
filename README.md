@@ -379,12 +379,15 @@ runtime behavior. Its 57-site configuration lives in a dedicated
 file, `make relay_health_check` writes the latest bounded observations, and
 `make relay_health_wiki` renders the same local JSON as a GitHub Wiki page.
 The scheduled workflow publishes the result JSON back to the Gist and pushes
-the generated Markdown to the Wiki; neither tool module reads or writes Gists.
+the generated Markdown to the dedicated
+[Relay Health](https://github.com/narugo1992/jerryproxy/wiki/Relay-Health)
+Wiki page; neither tool module reads or writes Gists. The manually maintained
+Wiki Home page remains a stable navigation entry and is never overwritten by
+the workflow.
 Publication uses separate `RELAY_HEALTH_GIST_TOKEN` and
 `RELAY_HEALTH_WIKI_TOKEN` repository secrets, and the probe job receives
-neither token. Before the first publish run, the repository owner must create
-the initial Wiki page through GitHub so that `jerryproxy.wiki.git` exists; the
-workflow can update `Relay-Health.md` after that one-time bootstrap.
+neither token. The workflow owns only `Relay-Health.md` in the initialized
+`jerryproxy.wiki.git` repository.
 
 ## Planned user experience
 

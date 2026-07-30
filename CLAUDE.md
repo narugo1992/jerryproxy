@@ -211,7 +211,9 @@ authentication, extraction, process, or permission errors to warnings.
   repository or package. `make relay_health_sync` downloads one ignored local
   JSON file. `tools.relay_health` and `tools.render_relay_health` operate only
   on local files; Gist result upload and Wiki Git publication belong only to
-  the repository workflow. Relay-health code must not enter `jerryproxy`.
+  the repository workflow. The workflow owns only the generated
+  `Relay-Health.md` page; the Wiki `Home.md` navigation page is maintained
+  separately. Relay-health code must not enter `jerryproxy`.
 
 Do not allow remotely downloaded Python plugins in the initial architecture.
 Backend drivers execute high-privilege lifecycle operations and must remain
