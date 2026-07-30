@@ -334,7 +334,7 @@ def test_catalog_check_reports_errors_and_missing_platform_assets(tmp_path, monk
         def versions(self, name):
             return ()
 
-        def available_versions(self, name, platform_info):
+        def compatible_versions(self, name, platform_info):
             return ()
 
     monkeypatch.setattr(selfcheck_module.BackendCatalog, "load", lambda: EmptyCatalog())

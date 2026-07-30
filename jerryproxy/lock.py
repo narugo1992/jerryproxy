@@ -67,13 +67,29 @@ def filelock_status():
 class JerryProxyOperationLock(object):
     """Serialize all managed-state access for one JerryProxy home."""
 
-    def __init__(self, paths, timeout=0.0):
+    def __init__(self, paths, timeout=0.0, initialize=True):
         self.paths = paths
         self.timeout = timeout
+        self.initialize = initialize
         self._exit_stack = None
 
+    def _validate_existing_lock(self):  # type: () -> None
+        from .home import is_path_alias
+
+        if (
+            not self.paths.root.is_dir()
+            or not self.paths.locks.is_dir()
+            or is_path_alias(self.paths.locks)
+            or not self.paths.lock_file.is_file()
+            or is_path_alias(self.paths.lock_file)
+        ):
+            raise FileNotFoundError("JerryProxy home has no existing operation lock")
+
     def __enter__(self):
-        self.paths._ensure_lock_bootstrap()
+        if self.initialize:
+            self.paths._ensure_lock_bootstrap()
+        else:
+            self._validate_existing_lock()
         lock = FileLock(str(self.paths.lock_file), timeout=self.timeout, mode=0o600)
         stack = ExitStack()
         try:
@@ -84,10 +100,13 @@ class JerryProxyOperationLock(object):
                 "JerryProxy operation already in progress for home: %s" % self.paths.root
             ) from error
         with stack:
-            self.paths._ensure_layout_locked()
-            from .backend.removal import _recover_removal_transactions
+            if self.initialize:
+                self.paths._ensure_layout_locked()
+                from .backend.removal import _recover_removal_transactions
 
-            _recover_removal_transactions(self.paths)
+                _recover_removal_transactions(self.paths)
+            else:
+                self._validate_existing_lock()
             self._exit_stack = stack.pop_all()
         return self
 

@@ -62,10 +62,10 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         run: |
           make build
-          ./dist/jerryproxy backend available
-          ./dist/jerryproxy backend available mihomo --limit 2
-          version="$(./dist/jerryproxy backend available mihomo --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
-          ./dist/jerryproxy backend available mihomo "$version"
+          ./dist/jerryproxy backend list known
+          ./dist/jerryproxy backend list known mihomo --limit 2
+          version="$(./dist/jerryproxy backend list known mihomo --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
+          ./dist/jerryproxy backend list known mihomo "$version"
           ./dist/jerryproxy --home build/catalog-self-check self-check
       - name: Publish catalog refresh branch
         id: publish

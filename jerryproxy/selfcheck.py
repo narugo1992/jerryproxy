@@ -203,7 +203,7 @@ def _check_backend_catalog():
         for spec in iter_backends():
             versions = catalog.versions(spec.name)
             total_releases += len(versions)
-            if not catalog.available_versions(spec.name, platform_info):
+            if not catalog.compatible_versions(spec.name, platform_info):
                 missing.append(spec.name)
     except (BackendCatalogError, OSError, RuntimeError, ValueError) as error:
         # Packaged catalog parsing and platform selection may fail independently.

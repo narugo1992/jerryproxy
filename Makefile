@@ -156,11 +156,11 @@ test_cli:
 	$(PYTHON) -m jerryproxy --version
 	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" home
 	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" self-check --color
-	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend available
-	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend available mihomo --limit 2
-	version="$$( $(PYTHON) -m jerryproxy backend available mihomo --limit 1 --json | $(PYTHON) -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])' )"; \
-		$(PYTHON) -m jerryproxy backend available mihomo "$$version"
-	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend list --active
+	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend list known
+	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend list known mihomo --limit 2
+	version="$$( $(PYTHON) -m jerryproxy backend list known mihomo --limit 1 --json | $(PYTHON) -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])' )"; \
+		$(PYTHON) -m jerryproxy backend list known mihomo "$$version"
+	$(PYTHON) -m jerryproxy --home "${BUILD_DIR}/test-home" backend current
 
 catalog_update:
 	$(PYTHON) -m tools.backend_catalog

@@ -12,7 +12,7 @@ modules, classes, functions, or data objects.
 
    api_doc/index
    api_doc/backend/index
-   api_doc/cli
+   api_doc/cli/index
    api_doc/config/index
    api_doc/data/index
    api_doc/errors
@@ -23,7 +23,7 @@ modules, classes, functions, or data objects.
 
 * :doc:`api_doc/index`
 * :doc:`api_doc/backend/index`
-* :doc:`api_doc/cli`
+* :doc:`api_doc/cli/index`
 * :doc:`api_doc/config/index`
 * :doc:`api_doc/data/index`
 * :doc:`api_doc/errors`

@@ -19,15 +19,17 @@ installing:
 
 .. code-block:: shell
 
-   jerryproxy backend available
-   jerryproxy backend available mihomo --limit 5
-   jerryproxy backend available mihomo --all-platforms --limit 5
-   jerryproxy backend available mihomo 1.19.29
+   jerryproxy backend list known
+   jerryproxy backend list known mihomo --limit 5
+   jerryproxy backend list known mihomo --all-platforms --limit 5
+   jerryproxy backend list known mihomo 1.19.29
    jerryproxy backend install mihomo
    jerryproxy backend install mihomo 1.19.29
    jerryproxy backend install mihomo 1.19.28 --no-activate
-   jerryproxy backend switch mihomo 1.19.28
-   jerryproxy backend list mihomo --active
+   jerryproxy backend use mihomo 1.19.28
+   jerryproxy backend current mihomo
+   jerryproxy backend which mihomo
+   jerryproxy backend list mihomo --paths
    jerryproxy backend install sing-box 1.13.14
    jerryproxy backend verify
 
@@ -77,20 +79,28 @@ Use ``--relay-url`` for one invocation-scoped custom HTTPS relay. The optional
 ``--relay-pattern`` requires ``--relay-url``. The same details are available
 at the point of use through ``jerryproxy backend install --help``.
 
-The backend command surface has seven operations: ``available``, ``install``,
-``list``, ``switch``, ``verify``, ``remove``, and ``clean``. ``available``
-uses positional depth instead of separate discovery commands: no target shows
-the supported backends, ``NAME`` shows stable versions, and ``NAME VERSION``
-shows the exact host artifact and full SHA-256 evidence. ``install NAME`` is
-also the update operation because it resolves and activates the newest
+The backend command surface has eight operations: ``list``, ``install``,
+``current``, ``use``, ``which``, ``verify``, ``uninstall``, and ``clean``.
+``list [NAME]`` shows local immutable installations. ``list known`` uses
+positional depth for the packaged catalog: no target shows known backends,
+``NAME`` shows compatible stable versions, and ``NAME VERSION`` shows the
+exact host artifact and full SHA-256 evidence. Catalog queries never access the
+network and always identify the packaged snapshot timestamp. ``install NAME``
+is also the update operation because it resolves and activates the newest
 compatible packaged release when ``VERSION`` is omitted.
 
 With ``--json``, those three depths have explicit machine shapes:
-``available --json`` returns an array of backend overview records,
-``available NAME --json`` returns an array of release records (possibly
-empty), and ``available NAME VERSION --json`` returns one exact artifact
-object. The exact object includes the asset name, URL, byte size, platform,
-full SHA-256 digest, and verification source.
+``list known --json`` returns an array of backend overview records,
+``list known NAME --json`` returns every matching release record unless an
+explicit ``--limit`` is supplied, and ``list known NAME VERSION --json``
+returns one exact artifact object. The exact object includes the asset name,
+URL, byte size, platform, full SHA-256 digest, and verification source.
+
+``current [NAME]`` reports the selected versions without mixing that query into
+the local inventory view. ``which NAME`` prints only the integrity-verified
+immutable executable for the current version, while ``which NAME VERSION``
+selects an exact installed version. Add ``--paths`` to ``list`` only when the
+executable and current-link paths are needed.
 
 Interactive and automated use
 -----------------------------
@@ -102,33 +112,34 @@ backend command with a missing target also guides the remaining choices:
 
    jerryproxy backend
    jerryproxy backend install
-   jerryproxy backend switch
-   jerryproxy backend remove
+   jerryproxy backend use
+   jerryproxy backend which
+   jerryproxy backend uninstall
    jerryproxy backend clean
 
 Supplying the complete positional target and options skips selection prompts,
 so the same commands remain deterministic for scripts. Read-only commands
 whose no-argument meaning is already complete keep that behavior:
-``available`` shows the catalog, while ``list`` and ``verify`` operate across
-all installed backends. Add ``--active`` to ``list`` to show only selected
-versions.
+``list``, ``current``, and ``verify`` operate across all installed backends,
+while ``list known`` shows the packaged catalog.
 
 Removal and cleanup
 -------------------
 
 Destructive commands always show one final ``InquirerPy`` confirmation unless
-``-y/--yes`` is explicit. Remove one inactive version, force removal of one
-active version, or remove every version of one backend:
+``-y/--yes`` is explicit. Uninstall one inactive version, explicitly
+deactivate and uninstall one current version, or uninstall every version of one
+backend:
 
 .. code-block:: shell
 
-   jerryproxy backend remove mihomo 1.19.29
-   jerryproxy backend remove mihomo 1.19.29 --force
-   jerryproxy backend remove mihomo -A
-   jerryproxy backend remove mihomo -A --downloads
+   jerryproxy backend uninstall mihomo 1.19.29
+   jerryproxy backend uninstall mihomo 1.19.29 --deactivate
+   jerryproxy backend uninstall mihomo -A
+   jerryproxy backend uninstall mihomo -A --cache
 
-``--downloads`` includes the matching verified release cache in the same
-home-wide transaction. Removal first moves every selected cache, immutable
+``--cache`` includes the matching verified release archive in the same
+home-wide transaction. Uninstallation first moves every selected cache, immutable
 version, active link, and active manifest into a private
 ``runtimes/.remove-*`` quarantine using atomic renames. A private
 ``journal.json`` with no format-version field is persisted before the first
@@ -144,19 +155,20 @@ retry disposal. In non-interactive automation, add ``-y`` only after specifying
 the complete target.
 
 Cleanup can target one cached backend version, one backend cache, selected
-global areas, all downloads, or every disposable area:
+global areas, all cache, or every disposable area:
 
 .. code-block:: shell
 
    jerryproxy backend clean mihomo 1.19.29
    jerryproxy backend clean mihomo
-   jerryproxy backend clean --downloads
+   jerryproxy backend clean --cache
    jerryproxy backend clean --logs --runtimes
    jerryproxy backend clean -A
 
-``clean -A`` empties ``downloads``, ``logs``, ``providers``, and ``runtimes``.
+``clean -A`` empties cache, logs, providers, and runtimes. The managed cache is
+stored internally below ``downloads``.
 It never deletes ``backends``, ``bin``, ``active``, or ``locks``. Backend and
-version scopes apply only to downloads because the other state areas do not
+version scopes apply only to cache because the other state areas do not
 yet have a stable per-backend ownership layout. Empty targets are idempotent.
 Managed symlink and Windows reparse-point components, including junctions, are
 rejected instead of followed. Download cleanup shares the same home-wide

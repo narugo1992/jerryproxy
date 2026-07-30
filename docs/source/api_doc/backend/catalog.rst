@@ -17,4 +17,4 @@ BackendCatalog
 -----------------------------------------------------
 
 .. autoclass:: BackendCatalog
-   :members: __init__,load,from_values,backend_names,versions,available_versions,resolve,summary
+   :members: __init__,load,from_values,backend_names,versions,compatible_versions,resolve,summary

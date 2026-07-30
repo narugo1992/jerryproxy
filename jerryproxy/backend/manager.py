@@ -45,9 +45,17 @@ class BackendManager(object):
         # type: (JerryProxyPaths, Optional[PlatformInfo], BackendCatalog, AssetDownloader, Callable) -> None
         self.paths = paths
         self.platform_info = platform_info or detect_platform()
-        self.catalog = catalog or BackendCatalog.load()
+        self._catalog = catalog
         self.downloader = downloader or AssetDownloader()
         self.probe_runner = probe_runner or self._probe_installed
+
+    @property
+    def catalog(self):  # type: () -> BackendCatalog
+        """Load the packaged catalog only when an operation requires it."""
+
+        if self._catalog is None:
+            self._catalog = BackendCatalog.load()
+        return self._catalog
 
     @classmethod
     def from_home(cls, home=None):  # type: (Optional[str]) -> "BackendManager"
@@ -56,8 +64,8 @@ class BackendManager(object):
     def supported(self):  # type: () -> Iterable[BackendSpec]
         return iter_backends()
 
-    def available(self, name):  # type: (str) -> tuple
-        return self.catalog.available_versions(name, self.platform_info)
+    def compatible_versions(self, name):  # type: (str) -> tuple
+        return self.catalog.compatible_versions(name, self.platform_info)
 
     def resolve_artifact(self, name, version=None):
         # type: (str, Optional[str]) -> CatalogArtifact
@@ -303,15 +311,40 @@ class BackendManager(object):
             raise BackendNotInstalledError("%s %s executable is missing" % (spec.name, normalized_version))
         return installed
 
-    def verify(self, name=None):  # type: (Optional[str]) -> List[InstalledBackend]
+    def verify(self, name=None, version=None):
+        # type: (Optional[str], Optional[str]) -> List[InstalledBackend]
         """Re-hash installed executables and return every verified version."""
+
+        if version is not None and name is None:
+            raise ValueError("a verification version requires a backend name")
         with JerryProxyOperationLock(self.paths):
-            installed = self._list_installed_locked(name=name)
+            if version is None:
+                installed = self._list_installed_locked(name=name)
+            else:
+                installed = [self._get_installed_locked(name, version)]
             for item in installed:
                 self._verify_installed_executable(item)
             return installed
 
-    def switch(self, name, version):  # type: (str, str) -> ActiveBackend
+    def which(self, name, version=None):
+        # type: (str, Optional[str]) -> Union[ActiveBackend, InstalledBackend]
+        """Return one integrity-verified executable selection without running it."""
+
+        with JerryProxyOperationLock(self.paths):
+            if version is None:
+                current = self._current_locked(name)
+                if current is None:
+                    raise BackendNotInstalledError("%s has no current version" % get_backend(name).name)
+                installed = self._get_installed_locked(current.name, current.version)
+                self._verify_installed_executable(installed)
+                return current
+            installed = self._get_installed_locked(name, version)
+            self._verify_installed_executable(installed)
+            return installed
+
+    def use(self, name, version):  # type: (str, str) -> ActiveBackend
+        """Activate one exact already installed backend version."""
+
         with JerryProxyOperationLock(self.paths):
             return self._switch_locked(name, version)
 
@@ -455,38 +488,39 @@ class BackendManager(object):
                 active=tuple(self._list_active_locked(name)),
             )
 
-    def remove(self, name, version, force=False, downloads=False):
+    def uninstall(self, name, version, deactivate=False, cache=False):
         # type: (str, str, bool, bool) -> RemovalResult
-        """Remove one installed version and optionally its cached downloads."""
+        """Uninstall one version and optionally its matching release cache."""
 
         spec = get_backend(name)
         normalized_version = spec.normalize_version(version)
         with JerryProxyOperationLock(self.paths):
-            cleanup_targets = self._download_cleanup_targets(spec.name, normalized_version) if downloads else []
+            cleanup_targets = self._download_cleanup_targets(spec.name, normalized_version) if cache else []
             installed = self._get_installed_locked(spec.name, normalized_version)
             active = self._current_locked(spec.name)
             if active is not None and active.version == installed.version:
-                if not force:
+                if not deactivate:
                     raise BackendActiveError(
-                        "%s %s is active; switch versions or use --force" % (spec.name, installed.version)
+                        "%s %s is current; use another version or pass --deactivate"
+                        % (spec.name, installed.version)
                     )
             cleanup = self._remove_transaction_locked(
                 (installed,),
                 active if active and active.version == installed.version else None,
                 cleanup_targets,
-                downloads,
+                cache,
             )
         return RemovalResult(spec.name, (installed.version,), cleanup)
 
-    def remove_all(self, name, downloads=False):  # type: (str, bool) -> RemovalResult
-        """Remove every installed version of one backend and deactivate it."""
+    def uninstall_all(self, name, cache=False):  # type: (str, bool) -> RemovalResult
+        """Uninstall every version of one backend and deactivate it."""
 
         spec = get_backend(name)
         with JerryProxyOperationLock(self.paths):
-            cleanup_targets = self._download_cleanup_targets(spec.name, None) if downloads else []
+            cleanup_targets = self._download_cleanup_targets(spec.name, None) if cache else []
             installed = self._list_installed_locked(spec.name)
             active = self._current_locked(spec.name)
-            cleanup = self._remove_transaction_locked(installed, active, cleanup_targets, downloads)
+            cleanup = self._remove_transaction_locked(installed, active, cleanup_targets, cache)
         return RemovalResult(spec.name, tuple(item.version for item in installed), cleanup)
 
     def clean(self, name=None, version=None, areas=None):

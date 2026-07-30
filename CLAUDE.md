@@ -131,7 +131,7 @@ authentication, extraction, process, or permission errors to warnings.
 - Install through a private staging directory and atomically rename only after
   validation succeeds.
 - Never overwrite an installed version with different bytes.
-- A failed install, switch, or forced active-version removal must leave the
+- A failed install, use, or active-version uninstall must leave the
   previous active backend usable. If rollback itself fails, preserve every
   remaining recovery artifact instead of deleting the evidence.
 - Removal stages selected downloads, installed versions, and active state into
@@ -171,17 +171,51 @@ authentication, extraction, process, or permission errors to warnings.
 - Keep complete backend commands deterministic for automation. Missing targets
   may enter guided `InquirerPy` selection, while established no-argument
   read-only commands retain their all-backend meaning.
-- Keep the public backend command surface to `available`, `install`, `list`,
-  `switch`, `verify`, `remove`, and `clean`. Catalog discovery uses
-  `available [NAME] [VERSION]`; do not reintroduce separate supported-backend,
-  version-list, or artifact commands.
+- Keep the public backend command surface to `list`, `install`, `current`,
+  `use`, `which`, `verify`, `uninstall`, and `clean`. Catalog discovery uses
+  `list known [NAME] [VERSION]`; `known` is a reserved first query token, not a
+  separate command. Do not expose `available`, `switch`, `remove`, compatibility
+  aliases, or separate supported-backend, version-list, or artifact commands.
 - `install NAME` is the single install/update entry point. Active-state queries
-  use `list [NAME] --active`; do not reintroduce separate update or current
-  commands.
-- Keep `available --json`, `available NAME --json`, and
-  `available NAME VERSION --json` as overview-array, release-array, and exact
-  artifact-object shapes respectively. Keep `list NAME` scoped to that
-  backend; unrelated active state must not affect the query.
+  use `current [NAME]`; do not introduce a separate update command. `use NAME
+  VERSION` activates an already installed exact version and never installs or
+  downloads it. `which NAME [VERSION]` returns only a manager-validated
+  immutable executable path and never executes it.
+- Keep `list known --json`, `list known NAME --json`, and `list known NAME
+  VERSION --json` as overview-array, release-array, and exact artifact-object
+  shapes respectively. Unspecified JSON limits return all records. Human
+  truncation must report the shown and total counts. Keep `list NAME` scoped to
+  that backend; unrelated active state must not affect the query.
+- Human `list [NAME]` output is compact by default; executable and active-link
+  paths require `--paths`. Read-only `list`, `current`, `which`, and `verify`
+  commands keep stdout deterministic and support documented JSON output.
+- Public destructive vocabulary is `uninstall --deactivate --cache` and `clean
+  --cache`; do not expose `remove`, `--force`, or `--downloads`. Internal state
+  directories may retain the `downloads` name.
+
+## CLI structure and maintenance
+
+- All Click command implementation belongs under `jerryproxy/cli/`. Do not add
+  `jerryproxy/cli.py`, `jerryproxy/_cli*.py`, or command implementations in
+  unrelated package modules. The repository-level `jerryproxy_cli.py` may only
+  remain as the minimal PyInstaller launcher.
+- Mirror the public command tree in the Python package tree. A leaf subcommand
+  is one same-named `.py` module. A command with children is one same-named
+  package, and that package's `__init__.py` assembles only its immediate child
+  commands. `jerryproxy/cli/__init__.py` alone assembles the root command.
+- Keep private cross-command helpers inside `jerryproxy/cli/` in clearly private
+  modules such as `_common.py` and `_completion.py`. Leaf modules own their
+  command-specific behavior; do not recreate a monolithic dispatcher or expose
+  private compatibility aliases from package initializers.
+- The project is unpublished. CLI redesigns must remove obsolete commands,
+  options, modules, aliases, and tests cleanly instead of retaining backward-
+  compatibility shims without an explicit release requirement.
+- Every command help page begins with one sentence that states its purpose,
+  then documents forms, behavior boundaries, interaction, output, important
+  options, and examples as applicable. Verify the actual Click-rendered
+  `--help` at 72, 80, 100, and 120 columns; readable source docstrings alone are
+  not evidence. Human tabular output must use `tabulate`, never hand-built
+  column formatting.
 
 ## Secrets and state
 

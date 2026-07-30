@@ -262,7 +262,7 @@ def _crash_after_removal_move(home, move_number):
             return getattr(host_os, name)
 
     manager_module.os = CrashOsProxy()
-    manager.remove("mihomo", "1.0.0", force=True)
+    manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
 
 def _crash_before_removal_commit(home):
@@ -280,7 +280,7 @@ def _crash_before_removal_commit(home):
         write_journal(transaction, moves, phase)
 
     removal_module._write_removal_journal = crash_before_commit
-    manager.remove("mihomo", "1.0.0", force=True)
+    manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
 
 def _crash_during_removal_commit_write(home):
@@ -299,7 +299,7 @@ def _crash_during_removal_commit_write(home):
         write_journal(transaction, moves, phase)
 
     removal_module._write_removal_journal = crash_with_temporary_journal
-    manager.remove("mihomo", "1.0.0", force=True)
+    manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
 
 def _crash_after_removal_commit(home):
@@ -314,7 +314,7 @@ def _crash_after_removal_commit(home):
         host_os._exit(28)
 
     removal_module._dispose_removal_transaction = crash_before_disposal
-    manager.remove("mihomo", "1.0.0", force=True)
+    manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
 
 def test_manager_public_construction_and_supported_catalog(tmp_path):
@@ -351,7 +351,7 @@ def test_install_and_switch_versions(tmp_path):
         assert active.link.is_symlink()
         assert os.readlink(str(active.link)).startswith("../backends/mihomo/1.0.0/")
 
-    switched = manager.switch("mihomo", "2.0.0")
+    switched = manager.use("mihomo", "2.0.0")
     assert switched.version == "2.0.0"
     assert switched.executable == second.executable
     assert switched.link.read_bytes() == b"version two"
@@ -373,7 +373,7 @@ def test_install_and_switch_versions(tmp_path):
         "version",
     }
 
-    rolled_back = manager.switch("mihomo", "1.0.0")
+    rolled_back = manager.use("mihomo", "1.0.0")
     assert rolled_back.link.read_bytes() == b"version one"
 
 
@@ -381,14 +381,14 @@ def test_active_version_removal_fails_closed(tmp_path):
     manager = manager_for(tmp_path)
     install_fake_mihomo(manager, tmp_path, "1.0.0", b"version one", activate=True)
     with pytest.raises(BackendActiveError):
-        manager.remove("mihomo", "1.0.0")
+        manager.uninstall("mihomo", "1.0.0")
     assert manager.current("mihomo").version == "1.0.0"
 
 
 def test_force_remove_deactivates_exact_version(tmp_path):
     manager = manager_for(tmp_path)
     installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"version one", activate=True)
-    manager.remove("mihomo", "1.0.0", force=True)
+    manager.uninstall("mihomo", "1.0.0", deactivate=True)
     assert not installed.manifest.parent.exists()
     assert manager.current("mihomo") is None
 
@@ -541,8 +541,39 @@ def test_verify_detects_installed_executable_tampering(tmp_path):
     with pytest.raises(IntegrityError, match="executable SHA-256 mismatch"):
         manager.verify("mihomo")
     with pytest.raises(IntegrityError, match="executable SHA-256 mismatch"):
-        manager.switch("mihomo", "1.0.0")
+        manager.use("mihomo", "1.0.0")
     assert manager.current("mihomo") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX active-link validation")
+def test_which_validates_current_and_exact_installed_executables(tmp_path):
+    manager = manager_for(tmp_path)
+    installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"original", activate=True)
+
+    current = manager.which("mihomo")
+    exact = manager.which("mihomo", "1.0.0")
+
+    assert current.version == installed.version
+    assert current.executable == installed.executable
+    assert current.link.is_symlink()
+    assert exact == installed
+
+    installed.executable.write_bytes(b"tampered")
+    with pytest.raises(IntegrityError, match="executable SHA-256 mismatch"):
+        manager.which("mihomo")
+    with pytest.raises(IntegrityError, match="executable SHA-256 mismatch"):
+        manager.which("mihomo", "1.0.0")
+
+
+def test_which_rejects_missing_current_missing_version_and_malformed_version(tmp_path):
+    manager = manager_for(tmp_path)
+
+    with pytest.raises(BackendNotInstalledError, match="has no current version"):
+        manager.which("mihomo")
+    with pytest.raises(BackendNotInstalledError, match="is not installed"):
+        manager.which("mihomo", "1.0.0")
+    with pytest.raises(ValueError, match="invalid backend version"):
+        manager.which("mihomo", "../outside")
 
 
 def test_install_probes_the_staged_executable_before_publication(tmp_path, monkeypatch):
@@ -562,7 +593,7 @@ def test_install_probes_the_staged_executable_before_publication(tmp_path, monke
     assert installed.manifest.is_file()
     assert calls[0][0][-1] == "-v"
     assert calls[0][1]["timeout"] == 20
-    manager.switch("mihomo", "1.0.0")
+    manager.use("mihomo", "1.0.0")
     assert len(calls) == 2
 
 
@@ -589,7 +620,7 @@ def test_copied_home_cannot_activate_another_platform_binary(tmp_path):
     manager_module.atomic_write_json(installed.manifest, value)
 
     with pytest.raises(BackendNotInstalledError, match="was installed for windows-amd64"):
-        manager.switch("mihomo", "1.0.0")
+        manager.use("mihomo", "1.0.0")
 
 
 def test_installed_manifest_identity_must_match_its_directory(tmp_path):
@@ -682,7 +713,7 @@ def test_switch_rolls_back_link_and_manifest_on_write_failure(tmp_path, monkeypa
 
     monkeypatch.setattr(manager_module, "atomic_write_json", fail_manifest_write)
     with pytest.raises(OSError, match="simulated manifest failure"):
-        manager.switch("mihomo", "2.0.0")
+        manager.use("mihomo", "2.0.0")
 
     assert manager.current("mihomo").version == "1.0.0"
     assert (manager.paths.bin / "mihomo").read_bytes() == b"version one"
@@ -704,7 +735,7 @@ def test_switch_preserves_recovery_backups_when_rollback_fails(tmp_path, monkeyp
     monkeypatch.setattr(manager, "_restore_path", fail_restore)
 
     with pytest.raises(OSError, match="simulated rollback failure"):
-        manager.switch("mihomo", "2.0.0")
+        manager.use("mihomo", "2.0.0")
 
     assert len(list(manager.paths.bin.glob("*.rollback"))) == 1
     assert len(list(manager.paths.active.glob("*.rollback"))) == 1
@@ -719,7 +750,7 @@ def test_first_switch_removes_new_link_when_manifest_write_fails(tmp_path, monke
 
     monkeypatch.setattr(manager_module, "atomic_write_json", fail_manifest_write)
     with pytest.raises(OSError, match="simulated first manifest failure"):
-        manager.switch("mihomo", "1.0.0")
+        manager.use("mihomo", "1.0.0")
 
     assert not os.path.lexists(str(manager.paths.bin / "mihomo"))
     assert not (manager.paths.active / "mihomo.json").exists()
@@ -740,7 +771,7 @@ def test_switch_replaces_stale_temporary_link_through_public_api(tmp_path):
     temporary = manager.paths.bin / (".mihomo.%s.tmp" % os.getpid())
     temporary.write_bytes(b"stale")
 
-    active = manager.switch("mihomo", "1.0.0")
+    active = manager.use("mihomo", "1.0.0")
 
     assert active.link.read_bytes() == b"version one"
     assert not temporary.exists()
@@ -755,7 +786,7 @@ def test_switch_cleans_temporary_link_when_atomic_replace_fails(tmp_path, monkey
 
     monkeypatch.setattr(manager_module.os, "replace", fail_replace)
     with pytest.raises(OSError, match="simulated atomic replace failure"):
-        manager.switch("mihomo", "1.0.0")
+        manager.use("mihomo", "1.0.0")
 
     assert manager.current("mihomo") is None
     assert not list(manager.paths.bin.glob(".mihomo.*.tmp"))
@@ -768,11 +799,11 @@ def test_backend_operations_share_one_home_wide_lock(tmp_path):
 
     with JerryProxyOperationLock(manager.paths):
         with pytest.raises(JerryProxyBusyError):
-            manager.switch("mihomo", "2.0.0")
+            manager.use("mihomo", "2.0.0")
         with pytest.raises(JerryProxyBusyError):
-            manager.remove("mihomo", "2.0.0")
+            manager.uninstall("mihomo", "2.0.0")
         with pytest.raises(JerryProxyBusyError):
-            manager.remove_all("mihomo")
+            manager.uninstall_all("mihomo")
         with pytest.raises(JerryProxyBusyError):
             manager.clean("mihomo")
         with pytest.raises(JerryProxyBusyError):
@@ -789,6 +820,8 @@ def test_backend_operations_share_one_home_wide_lock(tmp_path):
             manager.list_active()
         with pytest.raises(JerryProxyBusyError):
             manager.list_cached_versions()
+        with pytest.raises(JerryProxyBusyError):
+            manager.which("mihomo")
         archive = tmp_path / "mihomo-1.0.0.gz"
         with pytest.raises(JerryProxyBusyError):
             manager.install_from_archive(
@@ -1599,7 +1632,7 @@ def test_force_remove_deletes_the_allowed_active_symlink_through_a_windows_handl
     monkeypatch.setattr(removal_module, "_WINDOWS_KERNEL32", kernel)
     monkeypatch.setattr(removal_module, "_windows_error", lambda: OSError("Windows API failure"))
 
-    result = manager.remove("mihomo", "1.0.0", force=True)
+    result = manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
     assert result.versions == ("1.0.0",)
     assert not active_link.exists()
@@ -1628,7 +1661,7 @@ def test_force_remove_tolerates_allowed_active_symlink_disappearing_before_windo
     monkeypatch.setattr(removal_module, "_windows_error", lambda: OSError("Windows API failure"))
     monkeypatch.setattr(removal_module, "_lstat", remove_active_link_before_pin)
 
-    result = manager.remove("mihomo", "1.0.0", force=True)
+    result = manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
     assert result.versions == ("1.0.0",)
     assert len(disappeared) == 1
@@ -1813,7 +1846,7 @@ def test_remove_cleans_the_empty_backend_parent(tmp_path):
     installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"backend", activate=False)
     backend_root = installed.manifest.parent.parent
 
-    result = manager.remove("mihomo", "1.0.0")
+    result = manager.uninstall("mihomo", "1.0.0")
 
     assert result.versions == ("1.0.0",)
     assert not backend_root.exists()
@@ -1833,7 +1866,7 @@ def test_remove_propagates_unexpected_backend_parent_removal_errors(tmp_path, mo
     monkeypatch.setattr(type(backend_root), "rmdir", deny_backend_parent_removal)
 
     with pytest.raises(PermissionError, match="backend parent removal denied"):
-        manager.remove("mihomo", "1.0.0")
+        manager.uninstall("mihomo", "1.0.0")
 
     assert backend_root.is_dir()
     assert installed.manifest.is_file()
@@ -1852,7 +1885,7 @@ def test_forced_remove_failure_restores_the_active_backend(tmp_path, monkeypatch
     monkeypatch.setattr(manager_module.os, "replace", fail_active_link_move)
 
     with pytest.raises(PermissionError, match="active link move denied"):
-        manager.remove("mihomo", "1.0.0", force=True)
+        manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
     assert installed.manifest.is_file()
     assert manager.current("mihomo").version == "1.0.0"
@@ -1875,7 +1908,7 @@ def test_forced_remove_preserves_recovery_backups_when_restore_fails(tmp_path, m
     monkeypatch.setattr(manager_module.os, "replace", fail_stage_and_restore)
 
     with pytest.raises(OSError, match="installed rollback denied"):
-        manager.remove("mihomo", "1.0.0", force=True)
+        manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
     quarantines = [path for path in manager.paths.runtimes.glob(".remove-*") if path.is_dir()]
     assert len(quarantines) == 1
@@ -1902,7 +1935,7 @@ def test_forced_remove_detects_a_restored_path_replaced_during_rollback(tmp_path
     monkeypatch.setattr(manager_module.os, "replace", replace_restored_install)
 
     with pytest.raises(IntegrityError, match="restored a different filesystem object"):
-        manager.remove("mihomo", "1.0.0", force=True)
+        manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
     assert (preserved / "manifest.json").is_file()
     assert installed.manifest.parent.is_dir()
@@ -1922,7 +1955,7 @@ def test_remove_all_failure_keeps_the_active_backend_usable(tmp_path, monkeypatc
     monkeypatch.setattr(manager_module.os, "replace", fail_active_version_move)
 
     with pytest.raises(PermissionError, match="active version move denied"):
-        manager.remove_all("mihomo")
+        manager.uninstall_all("mihomo")
 
     assert first.manifest.is_file()
     assert second.manifest.is_file()
@@ -1946,7 +1979,7 @@ def test_remove_download_cleanup_failure_does_not_change_installed_state(tmp_pat
     monkeypatch.setattr(manager_module.os, "replace", fail_download_move)
 
     with pytest.raises(PermissionError, match="download move denied"):
-        manager.remove("mihomo", "1.0.0", force=True, downloads=True)
+        manager.uninstall("mihomo", "1.0.0", deactivate=True, cache=True)
 
     assert installed.manifest.is_file()
     assert cached.is_file()
@@ -1984,7 +2017,7 @@ def test_remove_rolls_back_a_download_parent_swapped_during_rename(tmp_path, mon
     monkeypatch.setattr(manager_module, "os", SwapOsProxy())
 
     with pytest.raises(IntegrityError, match="payload identity changed"):
-        manager.remove("mihomo", "1.0.0", downloads=True)
+        manager.uninstall("mihomo", "1.0.0", cache=True)
 
     quarantine = next(path for path in manager.paths.runtimes.glob(".remove-*") if path.is_dir())
     assert (quarantine / "download-0" / marker.name).read_bytes() == b"outside"
@@ -2018,7 +2051,7 @@ def test_remove_rolls_back_when_rename_moves_a_different_source_object(tmp_path,
     monkeypatch.setattr(manager_module, "os", SwapOsProxy())
 
     with pytest.raises(IntegrityError, match="payload identity changed"):
-        manager.remove("mihomo", "1.0.0", downloads=True)
+        manager.uninstall("mihomo", "1.0.0", cache=True)
 
     quarantine = next(path for path in manager.paths.runtimes.glob(".remove-*") if path.is_dir())
     assert (saved / "archive.gz").read_bytes() == b"managed"
@@ -2062,7 +2095,7 @@ def test_remove_rolls_back_a_download_junction_swapped_during_rename(tmp_path, m
 
     try:
         with pytest.raises(IntegrityError, match="payload identity changed"):
-            manager.remove("mihomo", "1.0.0", downloads=True)
+            manager.uninstall("mihomo", "1.0.0", cache=True)
         quarantine = next(path for path in manager.paths.runtimes.glob(".remove-*") if path.is_dir())
         assert (quarantine / "download-0" / marker.name).read_bytes() == b"outside"
         assert not cached.exists()
@@ -2092,7 +2125,7 @@ def test_remove_tolerates_a_download_target_disappearing_after_collection(tmp_pa
 
     monkeypatch.setattr(manager_module.os.path, "lexists", remove_download_before_staging)
 
-    result = manager.remove("mihomo", "1.0.0", downloads=True)
+    result = manager.uninstall("mihomo", "1.0.0", cache=True)
 
     assert result.cleanup.targets_removed == 0
     assert result.cleanup.bytes_reclaimed == 0
@@ -2110,7 +2143,7 @@ def test_removal_reports_committed_quarantine_cleanup_failure(tmp_path, monkeypa
     with monkeypatch.context() as context:
         context.setattr(removal_module, "_dispose_removal_transaction", fail_quarantine_cleanup)
         with pytest.raises(RemovalCleanupError, match="removal committed.*clean --runtimes"):
-            manager.remove("mihomo", "1.0.0", force=True)
+            manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
     assert not installed.manifest.parent.exists()
     assert manager.current("mihomo") is None
@@ -2189,7 +2222,7 @@ def test_crash_after_commit_finishes_quarantine_disposal(tmp_path):
 def test_empty_remove_all_is_idempotent_and_leaves_no_transaction(tmp_path):
     manager = manager_for(tmp_path)
 
-    result = manager.remove_all("mihomo", downloads=True)
+    result = manager.uninstall_all("mihomo", cache=True)
 
     assert result.versions == ()
     assert result.cleanup.targets_removed == 0
@@ -2943,7 +2976,7 @@ def test_remove_rejects_nested_managed_symlink_without_touching_external_data(tm
     (installed.manifest.parent / "nested").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(IntegrityError, match="managed symlink"):
-        manager.remove("mihomo", "1.0.0")
+        manager.uninstall("mihomo", "1.0.0")
 
     assert marker.read_bytes() == b"outside"
     assert installed.manifest.is_file()
@@ -3013,7 +3046,7 @@ def test_remove_rejects_nested_windows_junction_without_touching_external_data(t
 
     try:
         with pytest.raises(IntegrityError, match="path alias"):
-            manager.remove("mihomo", "1.0.0")
+            manager.uninstall("mihomo", "1.0.0")
         assert marker.read_bytes() == b"outside"
         assert installed.manifest.is_file()
     finally:
@@ -3029,7 +3062,7 @@ def test_remove_all_and_download_cleanup_share_one_result(tmp_path):
     cached.parent.mkdir(parents=True)
     cached.write_bytes(b"cache")
 
-    result = manager.remove_all("mihomo", downloads=True)
+    result = manager.uninstall_all("mihomo", cache=True)
 
     assert result.name == "mihomo"
     assert set(result.versions) == {"1.0.0", "2.0.0"}
@@ -3049,7 +3082,7 @@ def test_posix_symlink_failure_does_not_downgrade_to_copy(tmp_path, monkeypatch)
 
     monkeypatch.setattr(manager_module.os, "symlink", fail_symlink)
     with pytest.raises(OSError, match="simulated symlink failure"):
-        manager.switch("mihomo", "1.0.0")
+        manager.use("mihomo", "1.0.0")
     assert manager.current("mihomo") is None
     assert not (manager.paths.bin / "mihomo").exists()
 
@@ -3071,13 +3104,22 @@ def test_windows_symlink_failure_uses_and_replaces_a_verified_copy(tmp_path, mon
 
     monkeypatch.setattr(manager_module, "os", WindowsOsProxy())
 
-    first = manager.switch("mihomo", "1.0.0")
-    second = manager.switch("mihomo", "2.0.0")
+    first = manager.use("mihomo", "1.0.0")
+    second = manager.use("mihomo", "2.0.0")
+    selected = manager.which("mihomo")
+    exact = manager.which("mihomo", "2.0.0")
 
     assert first.link_mode == "copy"
     assert second.link_mode == "copy"
+    assert selected.link_mode == "copy"
+    assert selected.executable == exact.executable
     assert not second.link.is_symlink()
     assert second.link.read_bytes() == b"version two"
+
+    second.link.write_bytes(b"tampered active copy")
+    with pytest.raises(BackendNotInstalledError, match="copy failed integrity verification"):
+        manager.which("mihomo")
+    assert manager.which("mihomo", "2.0.0") == exact
 
 
 @pytest.mark.parametrize("failure", ["launch", "exit", "output"])
@@ -3102,7 +3144,7 @@ def test_default_probe_rejects_unusable_executables_during_switch(tmp_path, monk
     install_fake_mihomo(manager, tmp_path, "1.0.0", b"backend", activate=False)
 
     with pytest.raises(IntegrityError, match="probe"):
-        manager.switch("mihomo", "1.0.0")
+        manager.use("mihomo", "1.0.0")
     assert manager.current("mihomo") is None
 
 
@@ -3133,7 +3175,7 @@ def test_switch_cleans_partial_backups_when_manifest_backup_fails(tmp_path, monk
 
     monkeypatch.setattr(manager_module.shutil, "copy2", fail_copy)
     with pytest.raises(OSError, match="backup unavailable"):
-        manager.switch("mihomo", "2.0.0")
+        manager.use("mihomo", "2.0.0")
 
     assert manager.current("mihomo").version == "1.0.0"
     assert not list(manager.paths.bin.glob("*.rollback"))

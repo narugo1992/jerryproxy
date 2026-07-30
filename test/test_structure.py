@@ -22,6 +22,34 @@ def test_every_test_directory_is_a_python_package():
     )
 
 
+def test_cli_implementation_mirrors_the_public_command_tree():
+    project_root = Path(__file__).parent.parent
+    package_root = project_root / "jerryproxy"
+    cli_root = package_root / "cli"
+
+    assert not (package_root / "cli.py").exists()
+    assert not list(package_root.glob("_cli*.py"))
+    assert {path.name for path in cli_root.glob("*.py")} == {
+        "__init__.py",
+        "_common.py",
+        "_completion.py",
+        "doctor.py",
+        "home.py",
+        "self_check.py",
+    }
+    assert {path.name for path in (cli_root / "backend").glob("*.py")} == {
+        "__init__.py",
+        "clean.py",
+        "current.py",
+        "install.py",
+        "list.py",
+        "uninstall.py",
+        "use.py",
+        "verify.py",
+        "which.py",
+    }
+
+
 def test_backend_catalog_resource_reads_stay_inside_the_data_module():
     project_root = Path(__file__).parent.parent
     catalog_source = project_root / "jerryproxy" / "backend" / "catalog.py"

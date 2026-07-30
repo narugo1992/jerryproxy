@@ -89,7 +89,7 @@ pip install jerryproxy
 ```
 
 Backend catalogs are static package resources. Upgrade JerryProxy itself to
-refresh the available release inventory:
+refresh the known release inventory:
 
 ```shell
 python -m pip install -U jerryproxy
@@ -110,24 +110,28 @@ Inspect built-in backend drivers and the selected home:
 jerryproxy home
 jerryproxy doctor
 jerryproxy self-check
-jerryproxy backend available
-jerryproxy backend available mihomo --limit 5
-jerryproxy backend available mihomo 1.19.29
+jerryproxy backend list known
+jerryproxy backend list known mihomo --limit 5
+jerryproxy backend list known mihomo 1.19.29
 ```
 
-The backend command surface has seven operations: `available`, `install`,
-`list`, `switch`, `verify`, `remove`, and `clean`. The positional depth of
-`available` selects the catalog view: no target shows supported backends, a
-backend shows its stable versions, and a backend plus version shows the exact
-host artifact and full SHA-256 evidence.
+The backend command surface has eight operations: `list`, `install`, `current`,
+`use`, `which`, `verify`, `uninstall`, and `clean`. `list [NAME]` shows local
+installations. The positional depth of `list known` selects the packaged
+catalog view: no target shows known backends, a backend shows compatible stable
+versions, and a backend plus version shows the exact host artifact and full
+SHA-256 evidence. Catalog queries are offline and identify the packaged
+snapshot timestamp; upgrade JerryProxy to refresh them.
 
 With `--json`, the same three depths have explicit machine shapes:
-`available --json` returns an array of backend overview records,
-`available NAME --json` returns an array of release records (possibly empty),
-and `available NAME VERSION --json` returns one exact artifact object.
+`list known --json` returns an array of backend overview records,
+`list known NAME --json` returns every matching release record unless an
+explicit `--limit` is supplied, and `list known NAME VERSION --json` returns
+one exact artifact object.
 
 Run `jerryproxy backend` for a guided operation menu. Commands whose target is
-omitted, such as `backend install`, `backend switch`, `backend remove`, and
+omitted, such as `backend install`, `backend use`, `backend which`, and
+`backend uninstall`, as well as the scope-free form of
 `backend clean`, use `InquirerPy` to collect the missing choices. Supplying the
 complete target and options keeps the command deterministic and suitable for
 shell scripts.
@@ -136,14 +140,15 @@ Install and activate the newest verified stable version for this host:
 
 ```shell
 jerryproxy backend install mihomo
-jerryproxy backend list mihomo --active
+jerryproxy backend current mihomo
+jerryproxy backend which mihomo
 ```
 
 Install and activate one exact catalog version:
 
 ```shell
 jerryproxy backend install mihomo 1.19.29
-jerryproxy backend list mihomo --active
+jerryproxy backend current mihomo
 ```
 
 Automatic transport fallback is the default. It tries GitHub first and contacts
@@ -192,12 +197,14 @@ jerryproxy backend install mihomo
 jerryproxy backend verify
 ```
 
-Install another version without activating it, then switch atomically:
+Install another version without activating it, then use it atomically:
 
 ```shell
 jerryproxy backend install mihomo 1.19.28 --no-activate
-jerryproxy backend switch mihomo 1.19.28
+jerryproxy backend use mihomo 1.19.28
+jerryproxy backend current mihomo
 jerryproxy backend list mihomo
+jerryproxy backend list mihomo --paths
 ```
 
 On Unix-like systems the active command is a relative symbolic link:
@@ -211,19 +218,19 @@ On Windows the command normally ends in `.exe`. If symbolic-link creation is
 not permitted, JerryProxy atomically copies the verified executable and records
 `link_mode: copy` in `~/.jerryproxy/active/mihomo.json`.
 
-Remove an inactive version:
+Uninstall an inactive version:
 
 ```shell
-jerryproxy backend remove mihomo 1.19.29
+jerryproxy backend uninstall mihomo 1.19.29
 ```
 
-Every removal and cleanup asks for a final destructive-operation confirmation.
+Every uninstall and cleanup asks for a final destructive-operation confirmation.
 Use `-y/--yes` only in automation where the complete target is already known.
-Removing one active version also requires `--force`; selecting that active
-version through guided mode makes the deactivation part of the confirmed
+Uninstalling one current version also requires `--deactivate`; selecting that
+version through guided mode makes deactivation part of the confirmed
 operation.
 
-Removal atomically stages matching downloads, installed versions, and active
+Uninstallation atomically stages matching cache, installed versions, and current
 state in a private `runtimes/.remove-*` quarantine. A private journal is written
 before the first move. If the process stops during staging, the next home-wide
 lock acquisition restores the original paths in reverse order. If it stops
@@ -232,26 +239,28 @@ ambiguous recovery state fails closed instead of guessing. If final quarantine
 disposal fails, the CLI reports the committed removal and the retained data can
 be retried with `backend clean --runtimes -y`.
 
-Remove every installed Mihomo version, deactivate it, and also discard its
+Uninstall every installed Mihomo version, deactivate it, and also discard its
 cached release archives:
 
 ```shell
-jerryproxy backend remove mihomo -A --downloads
+jerryproxy backend uninstall mihomo -A --cache
 ```
 
-Clean one cached release, all downloads for one backend, or selected global
+Clean one cached release, all cache for one backend, or selected global
 data areas:
 
 ```shell
 jerryproxy backend clean mihomo 1.19.29
 jerryproxy backend clean mihomo
+jerryproxy backend clean --cache
 jerryproxy backend clean --logs --runtimes
 jerryproxy backend clean -A
 ```
 
-`clean -A` empties `downloads`, `logs`, `providers`, and `runtimes`. It never
-removes installed versions, active links, manifests, or operation locks; use
-`backend remove` for installations.
+`clean -A` empties cache, logs, providers, and runtimes. The managed cache is
+stored internally below `downloads`. Cleanup never removes installed versions,
+current links, manifests, or operation locks; use `backend uninstall` for
+installations.
 
 ## Directory layout
 

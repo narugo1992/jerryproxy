@@ -93,9 +93,9 @@ def test_packaged_catalog_covers_all_backends_and_registered_platforms():
         )
         assert len({item.version for item in versions}) == len(versions)
         for platform_info in iter_backend_platforms(spec.name):
-            available = catalog.available_versions(spec.name, platform_info)
-            assert available, "%s has no verified stable %s artifact" % (spec.name, platform_info.asset_key)
-            artifact = available[0].artifact_for(platform_info)
+            compatible = catalog.compatible_versions(spec.name, platform_info)
+            assert compatible, "%s has no verified stable %s artifact" % (spec.name, platform_info.asset_key)
+            artifact = compatible[0].artifact_for(platform_info)
             assert artifact.verified
             assert artifact.platform == platform_info.asset_key
             assert artifact.url.startswith("https://github.com/%s/releases/download/" % spec.repository)
@@ -104,10 +104,10 @@ def test_packaged_catalog_covers_all_backends_and_registered_platforms():
 
 
 @pytest.mark.parametrize("backend", ["mihomo", "sing-box", "xray", "v2ray"])
-def test_catalog_resolves_first_available_stable_version(backend):
+def test_catalog_resolves_first_compatible_stable_version(backend):
     catalog = BackendCatalog.load()
     platform_info = detect_platform()
-    expected = catalog.available_versions(backend, platform_info)[0]
+    expected = catalog.compatible_versions(backend, platform_info)[0]
     artifact = catalog.resolve(backend, platform_info=platform_info)
 
     assert artifact.version == expected.version

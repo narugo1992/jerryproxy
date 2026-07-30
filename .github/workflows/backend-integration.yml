@@ -46,12 +46,19 @@ jobs:
       - name: Resolve, install, activate, and verify
         shell: bash
         run: |
-          version="$(python -m jerryproxy backend available "${{ matrix.backend }}" --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
-          echo "JERRYPROXY_BACKEND_VERSION=$version" >> "$GITHUB_ENV"
-          python -m jerryproxy backend available "${{ matrix.backend }}" "$version"
+          versions="$(python -m jerryproxy backend list known "${{ matrix.backend }}" --limit 2 --json)"
+          version="$(printf '%s' "$versions" | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
+          alternate="$(printf '%s' "$versions" | python -c 'import json,sys; print(json.load(sys.stdin)[1]["version"])')"
+          echo "JERRYPROXY_BACKEND_VERSION=$alternate" >> "$GITHUB_ENV"
+          python -m jerryproxy backend list known "${{ matrix.backend }}" "$version"
           python -m jerryproxy --home backend-home backend install "${{ matrix.backend }}"
-          python -m jerryproxy --home backend-home backend list "${{ matrix.backend }}" --active
-          python -m jerryproxy --home backend-home backend verify "${{ matrix.backend }}"
+          python -m jerryproxy --home backend-home backend current "${{ matrix.backend }}"
+          python -m jerryproxy --home backend-home backend which "${{ matrix.backend }}"
+          python -m jerryproxy --home backend-home backend install "${{ matrix.backend }}" "$alternate" --no-activate
+          python -m jerryproxy --home backend-home backend use "${{ matrix.backend }}" "$alternate"
+          python -m jerryproxy --home backend-home backend current "${{ matrix.backend }}"
+          python -m jerryproxy --home backend-home backend which "${{ matrix.backend }}" "$alternate"
+          python -m jerryproxy --home backend-home backend verify "${{ matrix.backend }}" "$alternate"
       - name: Execute managed backend version command
         shell: bash
         run: |
@@ -75,17 +82,19 @@ jobs:
           if completed.returncode != 0:
               raise SystemExit(completed.returncode)
           PY
-      - name: Exercise reinstall and removal lifecycle
+      - name: Exercise reinstall and uninstall lifecycle
         shell: bash
         run: |
           python -m jerryproxy --home backend-home backend install "${{ matrix.backend }}"
-          if python -m jerryproxy --home backend-home backend remove "${{ matrix.backend }}" \
+          python -m jerryproxy --home backend-home backend use "${{ matrix.backend }}" "$JERRYPROXY_BACKEND_VERSION"
+          if python -m jerryproxy --home backend-home backend uninstall "${{ matrix.backend }}" \
             "$JERRYPROXY_BACKEND_VERSION" -y; then
-            echo "Active backend removal unexpectedly succeeded without --force" >&2
+            echo "Current backend uninstall unexpectedly succeeded without --deactivate" >&2
             exit 1
           fi
-          python -m jerryproxy --home backend-home backend remove "${{ matrix.backend }}" "$JERRYPROXY_BACKEND_VERSION" --force -y
-          python -m jerryproxy --home backend-home backend list "${{ matrix.backend }}" --active
+          python -m jerryproxy --home backend-home backend uninstall "${{ matrix.backend }}" "$JERRYPROXY_BACKEND_VERSION" --deactivate --cache -y
+          python -m jerryproxy --home backend-home backend current
+          python -m jerryproxy --home backend-home backend uninstall "${{ matrix.backend }}" -A -y
 
   musl-lifecycle:
     name: sing-box lifecycle (Alpine musl)
@@ -104,12 +113,14 @@ jobs:
               cp -R /workspace /tmp/source
               python3 -m venv /tmp/jerryproxy
               /tmp/jerryproxy/bin/python -m pip install --no-cache-dir /tmp/source >/dev/null
-              version="$(/tmp/jerryproxy/bin/jerryproxy backend available sing-box --limit 1 --json | /tmp/jerryproxy/bin/python -c '\''import json,sys; print(json.load(sys.stdin)[0]["version"])'\'')"
-              artifact="$(/tmp/jerryproxy/bin/jerryproxy backend available sing-box "$version")"
+              version="$(/tmp/jerryproxy/bin/jerryproxy backend list known sing-box --limit 1 --json | /tmp/jerryproxy/bin/python -c '\''import json,sys; print(json.load(sys.stdin)[0]["version"])'\'')"
+              artifact="$(/tmp/jerryproxy/bin/jerryproxy backend list known sing-box "$version")"
               printf "%s\n" "$artifact"
               printf "%s\n" "$artifact" | grep -F "Catalog target: linux-amd64-musl"
               printf "%s\n" "$artifact" | grep -F -- "-linux-amd64-musl.tar.gz"
               /tmp/jerryproxy/bin/jerryproxy --home /tmp/home backend install sing-box
+              /tmp/jerryproxy/bin/jerryproxy --home /tmp/home backend current sing-box
+              /tmp/jerryproxy/bin/jerryproxy --home /tmp/home backend which sing-box
               /tmp/jerryproxy/bin/jerryproxy --home /tmp/home backend verify sing-box
               /tmp/home/bin/sing-box version
             '

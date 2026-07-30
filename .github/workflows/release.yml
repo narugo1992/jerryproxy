@@ -82,13 +82,13 @@ jobs:
       - run: python -m pip check
       - run: jerryproxy --version
       - run: jerryproxy --home package-smoke-home self-check --color
-      - run: python -m jerryproxy backend available
-      - run: python -m jerryproxy backend available mihomo --limit 2
+      - run: python -m jerryproxy backend list known
+      - run: python -m jerryproxy backend list known mihomo --limit 2
       - name: Exercise exact artifact lookup from the release package
         shell: bash
         run: |
-          version="$(python -m jerryproxy backend available mihomo --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
-          python -m jerryproxy backend available mihomo "$version"
+          version="$(python -m jerryproxy backend list known mihomo --limit 1 --json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
+          python -m jerryproxy backend list known mihomo "$version"
 
   publish:
     name: Publish through PyPI Trusted Publishing

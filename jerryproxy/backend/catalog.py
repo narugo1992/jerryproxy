@@ -221,27 +221,27 @@ class BackendCatalog(object):
         spec = get_backend(name)
         return self._versions[spec.name]
 
-    def available_versions(self, name, platform_info=None):
+    def compatible_versions(self, name, platform_info=None):
         # type: (str, PlatformInfo) -> tuple
         platform_info = platform_info or detect_platform()
-        available = []
+        compatible = []
         for version in self.versions(name):
             artifact = version.artifact_for(platform_info)
             if artifact is not None and artifact.verified:
-                available.append(version)
-        return tuple(available)
+                compatible.append(version)
+        return tuple(compatible)
 
     def resolve(self, name, version=None, platform_info=None):
         # type: (str, Optional[str], PlatformInfo) -> CatalogArtifact
         spec = get_backend(name)
         platform_info = platform_info or detect_platform()
         if version is None:
-            available = self.available_versions(spec.name, platform_info)
-            if not available:
+            compatible = self.compatible_versions(spec.name, platform_info)
+            if not compatible:
                 raise UnsupportedPlatformError(
                     "%s has no verified catalog asset for %s" % (spec.name, platform_info.key)
                 )
-            selected = available[0]
+            selected = compatible[0]
         else:
             normalized = spec.normalize_version(version)
             selected = next((item for item in self.versions(spec.name) if item.version == normalized), None)
@@ -270,11 +270,11 @@ class BackendCatalog(object):
         result = {}
         for name in self.backend_names:
             versions = self.versions(name)
-            available = self.available_versions(name, platform_info)
+            compatible = self.compatible_versions(name, platform_info)
             result[name] = {
                 "releases": len(versions),
-                "available": len(available),
-                "latest": available[0].version if available else None,
+                "compatible": len(compatible),
+                "latest": compatible[0].version if compatible else None,
             }
         return result
 
