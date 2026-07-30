@@ -535,6 +535,12 @@ def test_relay_warnings_keep_the_full_self_check_exit_code_zero(tmp_path):
     )
 
     assert exit_code == 0
-    assert "Summary: 9 OK, 3 WARN, 0 FAIL, 0 ERR" in lines
+    status = filelock_status()
+    expected = (
+        "Summary: 9 OK, 3 WARN, 0 FAIL, 0 ERR"
+        if status.level == "OK"
+        else "Summary: 8 OK, 4 WARN, 0 FAIL, 0 ERR"
+    )
+    assert expected in lines
     assert lines[-1] == "Self-check PASSED with warnings"
     assert all("secret" not in line for line in lines)
