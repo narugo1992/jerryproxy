@@ -49,6 +49,61 @@ def test_cli_implementation_mirrors_the_public_command_tree():
         "which.py",
     }
 
+    cli_framework_imports = []
+    for source in package_root.rglob("*.py"):
+        if cli_root in source.parents:
+            continue
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported = {alias.name.split(".", 1)[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported = {node.module.split(".", 1)[0]}
+            else:
+                imported = set()
+            if imported.intersection({"click", "InquirerPy"}):
+                cli_framework_imports.append(str(source.relative_to(project_root)))
+    assert not cli_framework_imports, (
+        "Click and InquirerPy imports must stay inside jerryproxy/cli/: "
+        + ", ".join(sorted(set(cli_framework_imports)))
+    )
+
+    from jerryproxy.cli import cli
+
+    expected_root_modules = {
+        "backend": "jerryproxy.cli.backend",
+        "doctor": "jerryproxy.cli.doctor",
+        "home": "jerryproxy.cli.home",
+        "self-check": "jerryproxy.cli.self_check",
+    }
+    assert set(cli.commands) == set(expected_root_modules)
+    assert cli.callback.__module__ == "jerryproxy.cli"
+    assert {
+        name: command.callback.__module__
+        for name, command in cli.commands.items()
+    } == expected_root_modules
+
+    backend_group = cli.commands["backend"]
+    expected_backend_modules = {
+        name: "jerryproxy.cli.backend.%s" % name
+        for name in (
+            "clean",
+            "current",
+            "install",
+            "list",
+            "uninstall",
+            "use",
+            "verify",
+            "which",
+        )
+    }
+    assert set(backend_group.commands) == set(expected_backend_modules)
+    assert backend_group.callback.__module__ == "jerryproxy.cli.backend"
+    assert {
+        name: command.callback.__module__
+        for name, command in backend_group.commands.items()
+    } == expected_backend_modules
+
 
 def test_backend_catalog_resource_reads_stay_inside_the_data_module():
     project_root = Path(__file__).parent.parent

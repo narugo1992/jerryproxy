@@ -210,6 +210,10 @@ authentication, extraction, process, or permission errors to warnings.
   is one same-named `.py` module. A command with children is one same-named
   package, and that package's `__init__.py` assembles only its immediate child
   commands. `jerryproxy/cli/__init__.py` alone assembles the root command.
+- Keep Click and InquirerPy ownership inside `jerryproxy/cli/`; product library
+  modules must not import either CLI framework. Define each public leaf callback
+  in its same-named module and each command-group callback in that group's
+  `__init__.py`; package initializers only assemble their direct children.
 - Keep private cross-command helpers inside `jerryproxy/cli/` in clearly private
   modules such as `_common.py` and `_completion.py`. Leaf modules own their
   command-specific behavior; do not recreate a monolithic dispatcher or expose
