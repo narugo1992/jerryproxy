@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import sys
 from urllib.parse import urldefrag, urljoin, urlparse
 
 import requests
@@ -9,6 +10,10 @@ from tqdm import tqdm
 
 from ..errors import DownloadError, DownloadPolicyError, DownloadTransportError, IntegrityError
 from ..utils.fs import ensure_private_directory
+
+
+def _write_status(message):  # type: (str) -> None
+    print(message, file=sys.stderr)
 
 
 class AssetDownloader(object):
@@ -22,13 +27,10 @@ class AssetDownloader(object):
         progress_factory=None,
         progress=True,
         maximum_redirects=5,
+        status_reporter=None,
     ):
-        # type: (float, int, Any, Callable, bool, int) -> None
-        if (
-            not isinstance(maximum_redirects, int)
-            or isinstance(maximum_redirects, bool)
-            or maximum_redirects < 0
-        ):
+        # type: (float, int, Any, Callable, bool, int, Callable) -> None
+        if not isinstance(maximum_redirects, int) or isinstance(maximum_redirects, bool) or maximum_redirects < 0:
             raise ValueError("maximum_redirects must be a non-negative integer")
         self.timeout = timeout
         self.maximum_bytes = maximum_bytes
@@ -36,6 +38,7 @@ class AssetDownloader(object):
         self.progress_factory = progress_factory or tqdm
         self.progress = progress
         self.maximum_redirects = maximum_redirects
+        self.status_reporter = status_reporter if status_reporter is not None else (_write_status if progress else None)
 
     @staticmethod
     def _validate_https_url(url):  # type: (str) -> None
@@ -122,9 +125,18 @@ class AssetDownloader(object):
         failures = []
         for source in sources:
             try:
-                return self.download(source.url, destination, expected_sha256, expected_size)
+                downloaded = self.download(source.url, destination, expected_sha256, expected_size)
             except DownloadTransportError as error:
                 failures.append("%s (%s)" % (source.label, error.category))
+                if self.status_reporter is not None:
+                    self.status_reporter("Backend download source %s failed: %s." % (source.label, error.category))
+            else:
+                if failures and self.status_reporter is not None:
+                    self.status_reporter(
+                        "Backend download source selected: %s after %d transport failure(s)."
+                        % (source.label, len(failures))
+                    )
+                return downloaded
         raise DownloadTransportError(
             "backend download sources exhausted: %s" % ", ".join(failures),
             "exhausted",

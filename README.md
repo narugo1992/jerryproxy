@@ -376,18 +376,26 @@ Relay-health monitoring is also repository infrastructure, not JerryProxy
 runtime behavior. Its 57-site configuration lives in a dedicated
 [Gist](https://gist.github.com/narugo1992/78fb0ee6135fcdf4f0e5c7ec38f2fd59).
 `make relay_health_sync` downloads that configuration to an ignored local JSON
-file, `make relay_health_check` writes the latest bounded observations, and
-`make relay_health_wiki` renders the same local JSON as a GitHub Wiki page.
-The scheduled workflow publishes the result JSON back to the Gist and pushes
-the generated Markdown to the dedicated
+file. The repository tool pins the official Xray probe asset and its expected
+64 KiB digest, so the Gist controls relay hosts and URL patterns but cannot
+replace the integrity reference. `make relay_health_check` records a direct
+GitHub control plus the bounded relay observations, `make relay_health_wiki`
+renders the local JSON, and `make relay_health_gate` rejects malformed results
+or an integrity mismatch.
+
+The scheduled workflow probes and renders before any remote mutation, then
+uses separate jobs to publish the result JSON to the Gist and the generated
+Markdown to the dedicated
 [Relay Health](https://github.com/narugo1992/jerryproxy/wiki/Relay-Health)
-Wiki page; neither tool module reads or writes Gists. The manually maintained
-Wiki Home page remains a stable navigation entry and is never overwritten by
-the workflow.
+Wiki page. A final credential-free gate verifies every stage and marks an
+integrity security event as failed after publishing the evidence. Neither tool
+module reads or writes Gists. The manually maintained Wiki Home page remains a
+stable navigation entry and is never overwritten by the workflow.
 Publication uses separate `RELAY_HEALTH_GIST_TOKEN` and
-`RELAY_HEALTH_WIKI_TOKEN` repository secrets, and the probe job receives
-neither token. The workflow owns only `Relay-Health.md` in the initialized
-`jerryproxy.wiki.git` repository.
+`RELAY_HEALTH_WIKI_TOKEN` repository secrets in separate jobs. Each publisher
+verifies that its token belongs to `narugo1992`; the probe, render, and gate
+steps receive neither token. The workflow owns only `Relay-Health.md` in the
+initialized `jerryproxy.wiki.git` repository.
 
 ## Planned user experience
 
@@ -449,6 +457,7 @@ make catalog_update
 make relay_health_sync
 make relay_health_check
 make relay_health_wiki
+make relay_health_gate
 make check
 ```
 

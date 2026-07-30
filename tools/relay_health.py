@@ -8,11 +8,32 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 import requests
 
-PATTERNS = ("full_url_path", "host_path", "query_q")
+from jerryproxy.backend.relay import ALLOWED_PATTERNS, custom_relay, render_relay_url
+from jerryproxy.errors import DownloadPolicyError
+
+PATTERNS = ALLOWED_PATTERNS
+PATTERN_DESCRIPTIONS = {
+    "full_url_path": "https://{relay}/{url}",
+    "host_path": "https://{relay}/{host_path}",
+    "query_q": "https://{relay}/?q={url_encoded}",
+}
+RECOMMENDATIONS = (
+    "manual_named_candidate",
+    "manual_transport_only",
+    "manual_transport_verified",
+    "named_profile_candidate",
+)
+PINNED_PROBE = {
+    "backend": "xray",
+    "range_bytes": 65536,
+    "size": 21136402,
+    "slice_sha256": "ddb68d27be87e93b84dbdaf36048685c5697cc7873147340d13b20f0a0418ad5",
+    "url": "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip",
+}
 MAXIMUM_TARGETS = 500
 MAXIMUM_RANGE_BYTES = 1024 * 1024
 MAXIMUM_TARGET_BYTES = 1024 * 1024
@@ -125,13 +146,16 @@ def _validate_probe(value):
         raise RelayHealthError("probe range_bytes is outside the allowed range")
     if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
         raise RelayHealthError("probe slice_sha256 must be a lowercase SHA-256 digest")
-    return {
+    probe = {
         "backend": str(value.get("backend") or "fixed GitHub Release asset"),
         "range_bytes": range_bytes,
         "size": size,
         "slice_sha256": digest,
         "url": url,
     }
+    if probe != PINNED_PROBE:
+        raise RelayHealthError("probe must match the repository-reviewed pinned asset")
+    return probe
 
 
 def load_targets(path):
@@ -146,8 +170,8 @@ def load_targets(path):
     if not isinstance(document, dict):
         raise RelayHealthError("relay-health targets must be an object")
     allowed_patterns = document.get("allowed_patterns")
-    if not isinstance(allowed_patterns, dict) or set(allowed_patterns) != set(PATTERNS):
-        raise RelayHealthError("allowed_patterns must declare the three supported pattern names")
+    if allowed_patterns != PATTERN_DESCRIPTIONS:
+        raise RelayHealthError("allowed_patterns must match the supported relay URL forms")
     probe = _validate_probe(document.get("probe"))
     raw_targets = document.get("targets")
     if not isinstance(raw_targets, list) or not raw_targets or len(raw_targets) > MAXIMUM_TARGETS:
@@ -167,6 +191,9 @@ def load_targets(path):
         enabled = raw_target.get("enabled")
         if not isinstance(enabled, bool):
             raise RelayHealthError("target enabled must be a boolean: %s" % identifier)
+        recommendation = raw_target.get("recommendation")
+        if recommendation not in RECOMMENDATIONS:
+            raise RelayHealthError("target recommendation is invalid: %s" % identifier)
         patterns = raw_target.get("patterns")
         if (
             not isinstance(patterns, list)
@@ -182,21 +209,18 @@ def load_targets(path):
                 "id": identifier,
                 "note": str(raw_target.get("note") or ""),
                 "patterns": list(patterns),
-                "recommendation": str(raw_target.get("recommendation") or "unclassified"),
+                "recommendation": recommendation,
             }
         )
     return document, probe, targets
 
 
 def _render_url(hostname, pattern, official_url):
-    parsed = urlparse(official_url)
-    if pattern == "full_url_path":
-        return "https://%s/%s" % (hostname, official_url)
-    if pattern == "host_path":
-        return "https://%s/%s%s" % (hostname, parsed.hostname, parsed.path)
-    if pattern == "query_q":
-        return "https://%s/?q=%s" % (hostname, quote(official_url, safe=""))
-    raise RelayHealthError("unsupported relay pattern: %s" % pattern)
+    try:
+        profile = custom_relay("https://%s" % hostname, pattern)
+        return render_relay_url(profile, official_url)
+    except DownloadPolicyError as error:
+        raise RelayHealthError(str(error))
 
 
 def _failure(pattern, started, reason, transport="ok", http_code=0, response=None):
@@ -221,11 +245,8 @@ def _failure(pattern, started, reason, transport="ok", http_code=0, response=Non
     }
 
 
-def probe_pattern(session, target, pattern, probe, timeout):
-    """Run one bounded Range request and return a sanitized observation."""
-
+def _probe_url(session, url, pattern, probe, timeout):
     started = time.monotonic()
-    url = _render_url(target["hostname"], pattern, probe["url"])
     headers = {
         "Range": "bytes=0-%d" % (probe["range_bytes"] - 1),
         "User-Agent": "JerryProxy-relay-health",
@@ -301,6 +322,13 @@ def probe_pattern(session, target, pattern, probe, timeout):
             response.close()
 
 
+def probe_pattern(session, target, pattern, probe, timeout):
+    """Run one bounded relay Range request and return a sanitized observation."""
+
+    url = _render_url(target["hostname"], pattern, probe["url"])
+    return _probe_url(session, url, pattern, probe, timeout)
+
+
 def _target_status(patterns, enabled):
     if not enabled:
         return "not_checked"
@@ -328,6 +356,7 @@ def run(targets_path, output_path, timeout, vantage):
     pattern_passes = 0
     with requests.Session() as session:
         session.max_redirects = MAXIMUM_REDIRECTS
+        direct_control = _probe_url(session, probe["url"], "direct", probe, timeout)
         for target in targets:
             patterns = []
             if target["enabled"]:
@@ -350,6 +379,7 @@ def run(targets_path, output_path, timeout, vantage):
         statuses[result["status"]] = statuses.get(result["status"], 0) + 1
     output = {
         "completed_at_utc": _utc_now(),
+        "direct_control": direct_control,
         "official_asset": probe,
         "results": results,
         "source_audit": document.get("source_audit"),
@@ -368,6 +398,53 @@ def run(targets_path, output_path, timeout, vantage):
     return output
 
 
+def gate_results(path):
+    """Validate one published snapshot and reject integrity security events."""
+
+    document = _read_json(path)
+    if not isinstance(document, dict):
+        raise RelayHealthError("relay-health results must be an object")
+    direct_control = document.get("direct_control")
+    results = document.get("results")
+    summary = document.get("summary")
+    if not isinstance(direct_control, dict) or not isinstance(results, list) or not isinstance(summary, dict):
+        raise RelayHealthError("relay-health results are incomplete")
+    direct_status = direct_control.get("status")
+    if direct_status not in ("pass", "fail", "integrity_mismatch"):
+        raise RelayHealthError("relay-health direct control status is invalid")
+    target_statuses = {}
+    pattern_checks = 0
+    pattern_passes = 0
+    integrity_mismatch = direct_status == "integrity_mismatch"
+    for result in results:
+        if not isinstance(result, dict) or not isinstance(result.get("patterns"), list):
+            raise RelayHealthError("relay-health results contain an invalid target")
+        target_status = result.get("status")
+        if target_status not in ("pass", "degraded", "fail", "not_checked", "integrity_mismatch"):
+            raise RelayHealthError("relay-health results contain an invalid target status")
+        target_statuses[target_status] = target_statuses.get(target_status, 0) + 1
+        integrity_mismatch = integrity_mismatch or target_status == "integrity_mismatch"
+        for observation in result["patterns"]:
+            if not isinstance(observation, dict):
+                raise RelayHealthError("relay-health results contain an invalid pattern observation")
+            pattern_status = observation.get("status")
+            if pattern_status not in ("pass", "fail", "integrity_mismatch"):
+                raise RelayHealthError("relay-health results contain an invalid pattern status")
+            pattern_checks += 1
+            pattern_passes += pattern_status == "pass"
+            integrity_mismatch = integrity_mismatch or pattern_status == "integrity_mismatch"
+    if integrity_mismatch:
+        raise RelayHealthError("relay-health integrity mismatch detected")
+    if (
+        summary.get("endpoints") != len(results)
+        or summary.get("pattern_checks") != pattern_checks
+        or summary.get("exact_pattern_passes") != pattern_passes
+        or summary.get("endpoint_statuses") != target_statuses
+    ):
+        raise RelayHealthError("relay-health result summary does not match its observations")
+    return summary
+
+
 def main(argv=None):
     """CLI entry point for local relay-health probing."""
 
@@ -376,7 +453,15 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, default=Path("relay_health_latest.json"))
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--vantage", default="local")
+    parser.add_argument("--gate-results", type=Path)
     arguments = parser.parse_args(argv)
+    if arguments.gate_results is not None:
+        try:
+            summary = gate_results(arguments.gate_results)
+        except RelayHealthError as error:
+            parser.error(str(error))
+        print(json.dumps(summary, sort_keys=True))
+        return 0
     if arguments.timeout <= 0 or arguments.timeout > 120:
         parser.error("--timeout must be greater than zero and at most 120 seconds")
     try:

@@ -209,11 +209,14 @@ authentication, extraction, process, or permission errors to warnings.
   not normalize protocol-specific credentials/settings into a second core.
 - Relay-health target configuration lives in the maintainer Gist, not in this
   repository or package. `make relay_health_sync` downloads one ignored local
-  JSON file. `tools.relay_health` and `tools.render_relay_health` operate only
-  on local files; Gist result upload and Wiki Git publication belong only to
-  the repository workflow. The workflow owns only the generated
-  `Relay-Health.md` page; the Wiki `Home.md` navigation page is maintained
-  separately. Relay-health code must not enter `jerryproxy`.
+  JSON file. The tool must pin the reviewed official probe asset and constrain
+  every Gist-controlled display classification before probing or rendering.
+  `tools.relay_health` and `tools.render_relay_health` operate only on local
+  files; Gist result upload and Wiki Git publication belong only to separate
+  credential-scoped jobs in the repository workflow. Publishers must verify
+  the `narugo1992` identity before mutation. The workflow owns only the
+  generated `Relay-Health.md` page; the Wiki `Home.md` navigation page is
+  maintained separately. Relay-health code must not enter `jerryproxy`.
 
 Do not allow remotely downloaded Python plugins in the initial architecture.
 Backend drivers execute high-privilege lifecycle operations and must remain
@@ -235,6 +238,7 @@ make build_linux
 make relay_health_sync
 make relay_health_check
 make relay_health_wiki
+make relay_health_gate
 make check
 python3.7 -m pytest test -m unittest
 ```

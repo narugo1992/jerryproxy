@@ -460,7 +460,8 @@ def test_download_rejects_invalid_redirect_sequences(tmp_path, response, maximum
 def test_download_sources_falls_back_only_after_transport_failure(tmp_path):
     payload = b"fallback backend"
     session = SequenceSession([FakeResponse(status_code=503), FakeResponse(payload)])
-    downloader = AssetDownloader(session=session, progress=False)
+    messages = []
+    downloader = AssetDownloader(session=session, progress=False, status_reporter=messages.append)
     sources = (
         DownloadSource("first", "https://first.example/backend.gz"),
         DownloadSource("second", "https://second.example/backend.gz"),
@@ -474,6 +475,36 @@ def test_download_sources_falls_back_only_after_transport_failure(tmp_path):
     )
 
     assert [call[0] for call in session.calls] == [item.url for item in sources]
+    assert messages == [
+        "Backend download source first failed: http_503.",
+        "Backend download source selected: second after 1 transport failure(s).",
+    ]
+    assert all("https://" not in message for message in messages)
+
+
+def test_download_sources_reports_default_fallback_status_on_stderr(tmp_path, capsys):
+    payload = b"fallback backend"
+    session = SequenceSession([FakeResponse(status_code=503), FakeResponse(payload)])
+    downloader = AssetDownloader(session=session, progress_factory=FakeProgressFactory(), progress=True)
+    sources = (
+        DownloadSource("first", "https://first.example/backend.gz"),
+        DownloadSource("second", "https://second.example/backend.gz"),
+    )
+
+    downloader.download_sources(
+        sources,
+        tmp_path / "backend.gz",
+        hashlib.sha256(payload).hexdigest(),
+        expected_size=len(payload),
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "Backend download source first failed: http_503.",
+        "Backend download source selected: second after 1 transport failure(s).",
+    ]
+    assert "https://" not in captured.err
 
 
 def test_download_sources_never_hides_integrity_failure(tmp_path):
@@ -517,7 +548,8 @@ def test_download_sources_never_falls_back_after_an_invalid_redirect_url(tmp_pat
 
 def test_download_sources_reports_sanitized_exhaustion(tmp_path):
     session = SequenceSession([FakeResponse(status_code=503), FakeResponse(status_code=404)])
-    downloader = AssetDownloader(session=session, progress=False)
+    messages = []
+    downloader = AssetDownloader(session=session, progress=False, status_reporter=messages.append)
     sources = (
         DownloadSource("first", "https://first.example/backend.gz"),
         DownloadSource("second", "https://second.example/backend.gz"),
@@ -527,3 +559,8 @@ def test_download_sources_reports_sanitized_exhaustion(tmp_path):
         downloader.download_sources(sources, tmp_path / "backend.gz", "0" * 64)
 
     assert [call[0] for call in session.calls] == [item.url for item in sources]
+    assert messages == [
+        "Backend download source first failed: http_503.",
+        "Backend download source second failed: http_404.",
+    ]
+    assert all("https://" not in message for message in messages)

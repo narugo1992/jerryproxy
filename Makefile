@@ -1,4 +1,4 @@
-.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check relay_health_sync relay_health_check relay_health_wiki check
+.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check relay_health_sync relay_health_check relay_health_wiki relay_health_gate check
 
 PYTHON ?= $(shell which python)
 PYTHON37 ?= python3.7
@@ -70,6 +70,7 @@ help:
 	@echo "  make relay_health_sync - Download relay targets from the health Gist"
 	@echo "  make relay_health_check - Probe the local relay target JSON"
 	@echo "  make relay_health_wiki - Render local relay JSON as Wiki Markdown"
+	@echo "  make relay_health_gate - Reject malformed or integrity-mismatch results"
 
 install_dev:
 	$(PYTHON) -m pip install -e .
@@ -186,5 +187,8 @@ relay_health_wiki:
 		--targets "${RELAY_HEALTH_TARGETS}" \
 		--results "${RELAY_HEALTH_RESULTS}" \
 		--output "${RELAY_HEALTH_WIKI}"
+
+relay_health_gate:
+	$(PYTHON) -m tools.relay_health --gate-results "${RELAY_HEALTH_RESULTS}"
 
 check: lint catalog_check unittest pdocs package test_cli

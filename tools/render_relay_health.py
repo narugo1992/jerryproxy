@@ -15,6 +15,12 @@ STATUS = {
     "integrity_mismatch": ("🛑", "Integrity mismatch"),
     "not_checked": ("⚪", "Not checked"),
 }
+PROFILE_LABELS = {
+    "manual_named_candidate": "Named candidate",
+    "manual_transport_only": "Transport only",
+    "manual_transport_verified": "Transport verified",
+    "named_profile_candidate": "Built-in candidate",
+}
 
 
 class RelayHealthRenderError(RuntimeError):
@@ -34,6 +40,13 @@ def _read_json(path):
 def _status(value):
     symbol, label = STATUS.get(value, ("⚪", "Unknown"))
     return "%s %s" % (symbol, label)
+
+
+def _profile_label(value):
+    try:
+        return PROFILE_LABELS[value]
+    except (KeyError, TypeError):
+        raise RelayHealthRenderError("target recommendation is invalid")
 
 
 def _freshness(completed_at):
@@ -58,6 +71,9 @@ def render(targets_path, results_path):
     raw_results = results.get("results") if isinstance(results, dict) else None
     if not isinstance(raw_targets, list) or not isinstance(raw_results, list):
         raise RelayHealthRenderError("targets and results must contain arrays")
+    direct_control = results.get("direct_control")
+    if not isinstance(direct_control, dict) or direct_control.get("status") not in STATUS:
+        raise RelayHealthRenderError("results must contain a valid direct control observation")
     try:
         targets_sha256 = hashlib.sha256(targets_path.read_bytes()).hexdigest()
     except OSError as error:
@@ -76,7 +92,7 @@ def render(targets_path, results_path):
             rows.append(
                 [
                     "[%s](https://%s)" % (result["hostname"], result["hostname"]),
-                    target.get("recommendation", "unclassified"),
+                    _profile_label(target.get("recommendation")),
                     "-",
                     _status(result.get("status")),
                     "not_checked",
@@ -89,7 +105,7 @@ def render(targets_path, results_path):
             rows.append(
                 [
                     "[%s](https://%s)" % (result["hostname"], result["hostname"]),
-                    target.get("recommendation", "unclassified"),
+                    _profile_label(target.get("recommendation")),
                     observation.get("pattern", "unknown"),
                     _status(observation.get("status")),
                     observation.get("failure_reason", "unknown"),
@@ -109,6 +125,8 @@ def render(targets_path, results_path):
         ["Checked at", completed_at],
         ["Freshness", _freshness(completed_at)],
         ["Vantage", vantage],
+        ["Direct GitHub control", _status(direct_control.get("status"))],
+        ["Direct control reason", direct_control.get("failure_reason", "unknown")],
         ["Relays", summary.get("endpoints", 0)],
         ["Passing patterns", "%s / %s" % (summary.get("exact_pattern_passes", 0), summary.get("pattern_checks", 0))],
     ]

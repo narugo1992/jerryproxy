@@ -14,12 +14,12 @@ permissions:
 
 jobs:
   probe:
-    name: Probe configured relays
+    name: Probe and render configured relays
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.11"
           cache: pip
@@ -31,32 +31,35 @@ jobs:
         env:
           RELAY_HEALTH_VANTAGE: GitHub-hosted ubuntu-22.04
         run: make relay_health_check
-      - uses: actions/upload-artifact@v7
+      - name: Render Wiki page before publication
+        run: make relay_health_wiki
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: relay-health-data
           path: |
             relay_health_targets.json
             relay_health_latest.json
+            Relay-Health.md
           if-no-files-found: error
           retention-days: 7
 
-  publish:
-    name: Publish Gist and Wiki
+  publish_gist:
+    name: Publish latest Gist snapshot
     needs: probe
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-          cache: pip
-      - name: Install report dependencies
-        run: python -m pip install "tabulate>=0.9,<0.10"
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: relay-health-data
           path: .
+      - name: Verify Gist publisher identity and ownership
+        env:
+          GH_TOKEN: ${{ secrets.RELAY_HEALTH_GIST_TOKEN }}
+        shell: bash
+        run: |
+          test "$(gh api user --jq .login)" = "narugo1992"
+          test "$(gh api gists/78fb0ee6135fcdf4f0e5c7ec38f2fd59 --jq .owner.login)" = "narugo1992"
       - name: Upload latest JSON to the health Gist
         env:
           GH_TOKEN: ${{ secrets.RELAY_HEALTH_GIST_TOKEN }}
@@ -64,23 +67,84 @@ jobs:
           gh gist edit 78fb0ee6135fcdf4f0e5c7ec38f2fd59
           --filename relay_health_latest.json
           relay_health_latest.json
-      - name: Render Wiki page
-        run: make relay_health_wiki
-      - name: Publish Wiki page
+      - name: Verify Gist read-back
         env:
-          WIKI_TOKEN: ${{ secrets.RELAY_HEALTH_WIKI_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELAY_HEALTH_GIST_TOKEN }}
         shell: bash
         run: |
-          basic_auth="$(printf 'x-access-token:%s' "$WIKI_TOKEN" | base64 -w 0)"
+          expected="$(sha256sum relay_health_latest.json | cut -d ' ' -f 1)"
+          actual="$(gh gist view 78fb0ee6135fcdf4f0e5c7ec38f2fd59 --raw --filename relay_health_latest.json | sha256sum | cut -d ' ' -f 1)"
+          test "$actual" = "$expected"
+
+  publish_wiki:
+    name: Publish Relay Health Wiki page
+    needs: [probe, publish_gist]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: relay-health-data
+          path: .
+      - name: Verify Wiki publisher identity
+        env:
+          GH_TOKEN: ${{ secrets.RELAY_HEALTH_WIKI_TOKEN }}
+        run: test "$(gh api user --jq .login)" = "narugo1992"
+      - name: Publish generated Wiki page
+        env:
+          GH_TOKEN: ${{ secrets.RELAY_HEALTH_WIKI_TOKEN }}
+        shell: bash
+        run: |
+          basic_auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" \
             clone https://github.com/narugo1992/jerryproxy.wiki.git wiki
+          test "$(git -C wiki remote get-url origin)" = "https://github.com/narugo1992/jerryproxy.wiki.git"
           cp Relay-Health.md wiki/Relay-Health.md
-          cd wiki
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Relay-Health.md
-          if git diff --cached --quiet; then
-            exit 0
+          git -C wiki config user.name "github-actions[bot]"
+          git -C wiki config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C wiki add Relay-Health.md
+          if ! git -C wiki diff --cached --quiet; then
+            git -C wiki commit -m "docs: update relay health"
+            git -C wiki -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" push origin HEAD
           fi
-          git commit -m "docs: update relay health"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" push origin HEAD
+      - name: Verify Wiki read-back
+        env:
+          GH_TOKEN: ${{ secrets.RELAY_HEALTH_WIKI_TOKEN }}
+        shell: bash
+        run: |
+          basic_auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" \
+            clone --depth 1 https://github.com/narugo1992/jerryproxy.wiki.git wiki-readback
+          cmp Relay-Health.md wiki-readback/Relay-Health.md
+          test -f wiki-readback/Home.md
+
+  publication_gate:
+    name: Relay health publication gate
+    needs: [probe, publish_gist, publish_wiki]
+    if: ${{ always() }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Require every publication stage
+        env:
+          PROBE_RESULT: ${{ needs.probe.result }}
+          GIST_RESULT: ${{ needs.publish_gist.result }}
+          WIKI_RESULT: ${{ needs.publish_wiki.result }}
+        shell: bash
+        run: |
+          test "$PROBE_RESULT" = "success"
+          test "$GIST_RESULT" = "success"
+          test "$WIKI_RESULT" = "success"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install gate dependencies
+        run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: relay-health-data
+          path: .
+      - name: Reject integrity security events
+        run: make relay_health_gate
