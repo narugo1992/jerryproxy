@@ -443,6 +443,8 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
         ("cli backend install mi", "3", "plain,mihomo\n"),
         ("cli backend list known mi", "4", "plain,mihomo\n"),
         ("cli backend install unsupported 1", "4", "\n"),
+        ("cli backend use unsupported 1", "4", "\n"),
+        ("cli backend list known mihomo 1 extra", "6", "\n"),
     ):
         result = runner.invoke(
             cli,
