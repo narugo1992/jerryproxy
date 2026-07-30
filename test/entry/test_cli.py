@@ -441,6 +441,9 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
 
     home = tmp_path / "installed"
     install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=False)
+    lock_file = home / "locks" / "jerryproxy.lock"
+    if lock_file.exists():
+        lock_file.unlink()
     version_words = "cli --home %s backend use mihomo 1" % shlex.quote(home.as_posix())
     version = runner.invoke(
         cli,

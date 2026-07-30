@@ -1,5 +1,6 @@
 """Home-wide process locking through the upstream filelock package."""
 
+import os
 import re
 import sys
 from contextlib import ExitStack
@@ -80,10 +81,12 @@ class JerryProxyOperationLock(object):
             not self.paths.root.is_dir()
             or not self.paths.locks.is_dir()
             or is_path_alias(self.paths.locks)
-            or not self.paths.lock_file.is_file()
-            or is_path_alias(self.paths.lock_file)
         ):
             raise FileNotFoundError("JerryProxy home has no existing operation lock")
+        if os.path.lexists(str(self.paths.lock_file)) and (
+            not self.paths.lock_file.is_file() or is_path_alias(self.paths.lock_file)
+        ):
+            raise FileNotFoundError("JerryProxy home has no safe operation lock path")
 
     def __enter__(self):
         if self.initialize:
