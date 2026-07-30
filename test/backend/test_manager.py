@@ -864,6 +864,40 @@ def test_inventory_does_not_initialize_an_empty_home(tmp_path):
     assert not manager.paths.root.exists()
 
 
+def test_exact_reads_on_an_empty_home_fail_without_initializing_it(tmp_path):
+    manager = manager_for(tmp_path)
+
+    with pytest.raises(ValueError, match="requires a backend name"):
+        manager.verify(version="1.0.0")
+    with pytest.raises(BackendNotInstalledError, match="mihomo 1.0.0 is not installed"):
+        manager.verify("mihomo", "1.0.0")
+
+    assert not manager.paths.root.exists()
+
+
+@pytest.mark.parametrize("existing", ["file", "foreign-content"])
+def test_inventory_rejects_an_existing_non_managed_home(tmp_path, existing):
+    manager = manager_for(tmp_path)
+    if existing == "file":
+        manager.paths.root.write_bytes(b"not a directory")
+    else:
+        manager.paths.root.mkdir()
+        (manager.paths.root / "foreign.txt").write_bytes(b"not managed state")
+
+    with pytest.raises(IntegrityError, match="home is not a directory|home is incomplete"):
+        manager.inventory()
+
+
+def test_exact_reads_reject_missing_targets_in_a_complete_home(tmp_path):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+
+    with pytest.raises(BackendNotInstalledError, match="mihomo 1.0.0 is not installed"):
+        manager.get_installed("mihomo", "1.0.0")
+    with pytest.raises(BackendNotInstalledError, match="mihomo has no current version"):
+        manager.which("mihomo")
+
+
 @pytest.mark.parametrize("areas", [("backends",), ("locks",), ("locks", "backends")])
 def test_inventory_rejects_partial_managed_state_without_repair(tmp_path, areas):
     manager = manager_for(tmp_path)

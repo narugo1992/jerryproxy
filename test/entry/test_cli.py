@@ -379,13 +379,27 @@ def test_backend_inventory_use_current_which_verify_and_uninstall_commands(tmp_p
     assert current_records[0]["mode"] in ("copy", "symlink")
     assert current_records[0]["link"]
 
+    current_table = runner.invoke(
+        cli,
+        ["--home", str(home), "backend", "current", "mihomo"],
+    )
+    assert current_table.exit_code == 0
+    assert "BACKEND" in current_table.output
+    assert "mihomo" in current_table.output
+    assert "2.0.0" in current_table.output
+
     which = runner.invoke(cli, ["--home", str(home), "backend", "which", "mihomo"])
     exact = runner.invoke(cli, ["--home", str(home), "backend", "which", "mihomo", "1.0.0", "--json"])
+    monkeypatch.setattr(common_module, "select_backend", lambda message, names=None: "mihomo")
+    guided_which = runner.invoke(cli, ["--home", str(home), "backend", "which"])
     assert which.exit_code == 0
     executable_name = "mihomo.exe" if os.name == "nt" else "mihomo"
-    assert Path(which.output.strip()) == home / "backends" / "mihomo" / "2.0.0" / executable_name
+    which_path = home / "backends" / "mihomo" / "2.0.0" / executable_name
+    assert Path(which.output.strip()) == which_path
     assert exact.exit_code == 0
     assert json.loads(exact.output)["version"] == "1.0.0"
+    assert guided_which.exit_code == 0
+    assert Path(guided_which.output.strip()) == which_path
 
     doctor = runner.invoke(cli, ["--home", str(home), "doctor"])
     assert doctor.exit_code == 0
@@ -420,6 +434,18 @@ def test_list_paths_is_explicit_and_current_target_requires_active_state(tmp_pat
     assert str(installed.executable) in paths.output
     assert current.exit_code == 1
     assert "mihomo has no current version" in current.output
+
+
+def test_backend_list_rejects_ambiguous_query_arity():
+    runner = CliRunner()
+
+    local = runner.invoke(cli, ["backend", "list", "mihomo", "1.0.0"])
+    known = runner.invoke(cli, ["backend", "list", "known", "mihomo", "1.0.0", "extra"])
+
+    assert local.exit_code == 2
+    assert "local list accepts at most one backend NAME" in local.output
+    assert known.exit_code == 2
+    assert "list known accepts at most NAME and VERSION" in known.output
 
 
 def test_which_rejects_tampering_and_exact_verify_ignores_unrelated_version(tmp_path):
