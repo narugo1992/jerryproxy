@@ -733,7 +733,10 @@ def test_guided_install_translates_confirmation_failures(tmp_path, monkeypatch, 
     monkeypatch.setattr(cli_module, "_select_backend", lambda message: "mihomo")
     monkeypatch.setattr(cli_module, "_select_catalog_version", lambda selected_manager, name: None)
     monkeypatch.setattr(cli_module.inquirer, "confirm", lambda **kwargs: Prompt())
-    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "install"])
+    result = CliRunner().invoke(
+        cli,
+        ["--home", str(tmp_path), "backend", "install", "--relay", "direct"],
+    )
 
     assert result.exit_code == 1
     assert "interactive selection" in result.output
