@@ -41,7 +41,8 @@ Implemented now:
 - confirmed single-version or whole-backend removal, with optional matching
   download-cache cleanup;
 - scoped cleanup for downloads, logs, providers, and generated runtime data;
-- a lightweight packaged-CLI self-check with isolated failure diagnostics;
+- a packaged-CLI self-check with isolated local diagnostics plus bounded,
+  integrity-checked availability probes for the three built-in relays;
 - two-stage standalone validation that builds Linux in a pinned Python 3.7
   Docker image and executes every downloaded artifact in clean environments;
 - deterministic offline unit tests, Sphinx documentation, packaging checks,
@@ -286,9 +287,13 @@ tree cannot be mutated under unrelated locks.
 `jerryproxy self-check` actively validates the packaged Python runtime, host
 platform mapping, private home layout and write access, POSIX directory modes,
 backend registry, `filelock` compatibility, and one lock-consistent
-installed/active backend inventory. Results use four levels: green `OK`, yellow
-`WARN`, red `FAIL`, and red `ERR`. Only `FAIL` and `ERR` make the command exit
-nonzero.
+installed/active backend inventory. It then streams one fixed 1 MiB Range from
+a pinned public Xray release through each built-in relay. The probe separates
+response-header latency, first-chunk latency, and the speed of the remaining
+chunks, uses a five-second network timeout per relay, and requires HTTPS, HTTP 206, the exact
+`Content-Range`, byte count, and pinned slice SHA-256. Results use four levels:
+green `OK`, yellow `WARN`, red `FAIL`, and red `ERR`. Relay unavailability or
+invalid content is `WARN`; only `FAIL` and `ERR` make the command exit nonzero.
 
 Python 3.7-3.9 install the newest `filelock` lines still compatible with those
 interpreters. Those legacy lines are affected by CVE-2025-68146, so self-check
@@ -301,7 +306,9 @@ Windows, and macOS compatibility, so their bundled `filelock` is also on the
 legacy warning line. Users who prioritize the upstream lock hardening over that
 binary compatibility should use the Python 3.10+ pip installation.
 
-The check is local and network-free. It does not download or start a backend:
+The check never downloads a complete backend, starts a backend, or mutates
+backend state. A fully successful run transfers 3 MiB across the three relay
+checks. `requests` retains the host's standard proxy and CA behavior:
 
 ```shell
 jerryproxy --home ./test_self_check self-check
@@ -377,11 +384,14 @@ runtime behavior. Its 57-site configuration lives in a dedicated
 [Gist](https://gist.github.com/narugo1992/78fb0ee6135fcdf4f0e5c7ec38f2fd59).
 `make relay_health_sync` downloads that configuration to an ignored local JSON
 file. The repository tool pins the official Xray probe asset and its expected
-64 KiB digest, so the Gist controls relay hosts and URL patterns but cannot
+1 MiB digest, so the Gist controls relay hosts and URL patterns but cannot
 replace the integrity reference. `make relay_health_check` records a direct
-GitHub control plus the bounded relay observations, `make relay_health_wiki`
-renders the local JSON, and `make relay_health_gate` rejects malformed results
-or an integrity mismatch.
+GitHub control plus three 1 MiB samples per enabled relay pattern. Each sample
+uses a ten-second network timeout and records response-header latency, the first
+non-empty chunk latency, post-startup stream speed, and chunk count. The
+short-window success count provides the stability measure.
+`make relay_health_wiki` renders the local JSON, and `make relay_health_gate`
+rejects malformed results or an integrity mismatch.
 
 The scheduled workflow probes and renders before any remote mutation, then
 uses separate jobs to publish the result JSON to the Gist and the generated
@@ -395,7 +405,8 @@ Publication uses separate `RELAY_HEALTH_GIST_TOKEN` and
 `RELAY_HEALTH_WIKI_TOKEN` repository secrets in separate jobs. Each publisher
 verifies that its token belongs to `narugo1992`; the probe, render, and gate
 steps receive neither token. The workflow owns only `Relay-Health.md` in the
-initialized `jerryproxy.wiki.git` repository.
+initialized `jerryproxy.wiki.git` repository and verifies that the manually
+maintained `Home.md` hash is unchanged before and after publication.
 
 ## Planned user experience
 

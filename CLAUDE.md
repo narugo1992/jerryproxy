@@ -117,6 +117,13 @@ authentication, extraction, process, or permission errors to warnings.
   recursively acquiring a second lock.
 - Read operations use the same home-wide lock. CLI list, doctor, and self-check
   must consume one `BackendInventory` snapshot for installed and active state.
+- Self-check must probe each built-in relay with one streamed, fixed 1 MiB Range
+  from the repository-pinned public Xray asset. Use a five-second Requests
+  timeout, require an HTTPS redirect chain, HTTP 206, exact `Content-Range`,
+  exact byte count, and the pinned slice SHA-256. Report response-header latency,
+  first-chunk latency, and post-startup stream speed separately. Relay availability and content failures
+  are `WARN`; they never create a nonzero exit code without a separate `FAIL` or
+  `ERR`. Never display effective URLs or response-controlled diagnostics.
 - Python 3.7-3.9 use the newest compatible legacy `filelock` lines. Report that
   known limitation as `WARN`, recommend Python 3.10+, and do not attempt a local
   security repair. Python 3.10+ must use `filelock>=3.30` so fork ownership is
@@ -216,7 +223,11 @@ authentication, extraction, process, or permission errors to warnings.
   credential-scoped jobs in the repository workflow. Publishers must verify
   the `narugo1992` identity before mutation. The workflow owns only the
   generated `Relay-Health.md` page; the Wiki `Home.md` navigation page is
-  maintained separately. Relay-health code must not enter `jerryproxy`.
+  maintained separately and its hash must remain unchanged across publication.
+  Relay health uses three streamed 1 MiB samples per pattern with a ten-second
+  Requests timeout, records response-header latency, first-chunk latency, and
+  post-startup stream speed separately, and summarizes short-window stability.
+  Relay-health code must not enter `jerryproxy`.
 
 Do not allow remotely downloaded Python plugins in the initial architecture.
 Backend drivers execute high-privilege lifecycle operations and must remain

@@ -13,6 +13,34 @@ ALLOWED\_PATTERNS
    :no-value:
 
 
+RELAY\_PROBE\_URL
+-----------------------------------------------------
+
+.. autodata:: RELAY_PROBE_URL
+   :no-value:
+
+
+RELAY\_PROBE\_SIZE
+-----------------------------------------------------
+
+.. autodata:: RELAY_PROBE_SIZE
+   :no-value:
+
+
+RELAY\_PROBE\_BYTES
+-----------------------------------------------------
+
+.. autodata:: RELAY_PROBE_BYTES
+   :no-value:
+
+
+RELAY\_PROBE\_SHA256
+-----------------------------------------------------
+
+.. autodata:: RELAY_PROBE_SHA256
+   :no-value:
+
+
 RelayProfile
 -----------------------------------------------------
 

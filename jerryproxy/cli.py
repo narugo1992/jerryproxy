@@ -214,7 +214,15 @@ def doctor_command(context):  # type: (click.Context) -> None
 )
 @click.pass_context
 def self_check_command(context, color):  # type: (click.Context, bool) -> None
-    """Run isolated local checks and report every detected failure."""
+    """Check local state plus bounded availability of built-in relays.
+
+    Relay checks stream and verify a fixed 1 MiB Range from a pinned GitHub
+    Release asset with a 5-second network timeout. Response-header latency,
+    latency to the first chunk, and subsequent stream speed are reported
+    separately.
+    Relay failures are WARN results; only local FAIL or ERR results produce a
+    nonzero exit code.
+    """
 
     use_color = ansi_color_enabled(click.get_text_stream("stdout"), requested=color)
 

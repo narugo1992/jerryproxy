@@ -27,11 +27,21 @@ determined from exact upstream release assets for the current OS and CPU.
 Packaged CLI self-check
 -----------------------
 
-``jerryproxy self-check`` performs a small network-free validation of the
-runtime, platform mapping, private state tree, write access, backend registry,
-``filelock`` compatibility, and one lock-consistent backend inventory. Results
-are ``OK`` (green), ``WARN`` (yellow), ``FAIL`` (red), or ``ERR`` (red). Only
-``FAIL`` and ``ERR`` produce a nonzero exit status.
+``jerryproxy self-check`` validates the runtime, platform mapping, private state
+tree, write access, backend registry, ``filelock`` compatibility, and one
+lock-consistent backend inventory. It then streams a fixed 1 MiB Range from a
+pinned public Xray release through each of the three built-in relays. Each relay
+request has a five-second network timeout. The check requires an HTTPS redirect
+chain, HTTP 206, the exact ``Content-Range`` and byte count, and the pinned
+slice SHA-256. It reports response-header latency, first-chunk latency, and the
+speed of the remaining chunks separately.
+
+Results are ``OK`` (green), ``WARN`` (yellow), ``FAIL`` (red), or ``ERR``
+(red). Relay timeout, transport, HTTP, or content failures are ``WARN`` and do
+not make the command fail. Only ``FAIL`` and ``ERR`` produce a nonzero exit
+status. A fully successful run transfers 3 MiB; it never downloads or starts a
+complete backend and does not mutate backend state. Standard Requests proxy and
+CA environment behavior remains active.
 
 Python 3.7 through 3.9 use the newest ``filelock`` lines that still support
 those interpreters. Those legacy lines are affected by CVE-2025-68146, so the

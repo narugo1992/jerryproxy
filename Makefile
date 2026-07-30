@@ -20,7 +20,8 @@ RELAY_HEALTH_TARGETS_URL ?= https://gist.githubusercontent.com/narugo1992/${RELA
 RELAY_HEALTH_TARGETS ?= ${PROJ_DIR}/relay_health_targets.json
 RELAY_HEALTH_RESULTS ?= ${PROJ_DIR}/relay_health_latest.json
 RELAY_HEALTH_WIKI ?= ${PROJ_DIR}/Relay-Health.md
-RELAY_HEALTH_TIMEOUT ?= 20
+RELAY_HEALTH_TIMEOUT ?= 10
+RELAY_HEALTH_ATTEMPTS ?= 3
 RELAY_HEALTH_VANTAGE ?= local
 
 RANGE_DIR      ?= .
@@ -180,6 +181,7 @@ relay_health_check:
 		--targets "${RELAY_HEALTH_TARGETS}" \
 		--output "${RELAY_HEALTH_RESULTS}" \
 		--timeout "${RELAY_HEALTH_TIMEOUT}" \
+		--attempts "${RELAY_HEALTH_ATTEMPTS}" \
 		--vantage "${RELAY_HEALTH_VANTAGE}"
 
 relay_health_wiki:

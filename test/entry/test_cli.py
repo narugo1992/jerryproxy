@@ -9,12 +9,21 @@ import pytest
 from click.testing import CliRunner
 
 import jerryproxy.cli as cli_module
+import jerryproxy.selfcheck as selfcheck_module
 from jerryproxy.backend.catalog import BackendCatalog
 from jerryproxy.backend.manager import BackendManager
 from jerryproxy.backend.platform import detect_platform
 from jerryproxy.cli import cli, main
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.lock import filelock_status
+from test.selfcheck.fakes import verified_relay_session_factory
+
+
+@pytest.fixture(autouse=True)
+def _isolate_self_check_relay_network(monkeypatch):
+    relay_factory = verified_relay_session_factory(monkeypatch)
+    monkeypatch.setattr(selfcheck_module.requests, "Session", relay_factory)
+    return relay_factory
 
 
 def install_fake_mihomo(home, tmp_path, version, payload, activate):
@@ -74,12 +83,25 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     result = CliRunner().invoke(cli, ["--home", str(tmp_path), "self-check"])
 
     assert result.exit_code == 0
-    assert "[1/9] Python runtime: OK" in result.output
-    assert "[7/9] packaged backend catalog: OK" in result.output
-    assert "[8/9] filelock compatibility:" in result.output
-    assert "[9/9] backend inventory: OK" in result.output
+    assert "[1/12] Python runtime: OK" in result.output
+    assert "[7/12] packaged backend catalog: OK" in result.output
+    assert "[8/12] filelock compatibility:" in result.output
+    assert "[9/12] backend inventory: OK" in result.output
+    assert "[12/12] relay gh.geekertao.top: OK" in result.output
     assert "0 FAIL, 0 ERR" in result.output
     assert "Self-check PASSED" in result.output
+
+
+def test_self_check_help_discloses_bounded_network_behavior():
+    result = CliRunner().invoke(cli, ["self-check", "--help"])
+    normalized = " ".join(result.output.split())
+
+    assert result.exit_code == 0
+    assert "fixed 1 MiB Range" in normalized
+    assert "5-second network timeout" in normalized
+    assert "Response-header latency" in normalized
+    assert "latency to the first chunk" in normalized
+    assert "WARN" in normalized
 
 
 def test_self_check_can_force_ansi_color(tmp_path):

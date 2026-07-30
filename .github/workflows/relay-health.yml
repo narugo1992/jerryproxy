@@ -99,14 +99,18 @@ jobs:
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" \
             clone https://github.com/narugo1992/jerryproxy.wiki.git wiki
           test "$(git -C wiki remote get-url origin)" = "https://github.com/narugo1992/jerryproxy.wiki.git"
+          test -f wiki/Home.md
+          home_sha256="$(sha256sum wiki/Home.md | cut -d ' ' -f 1)"
           cp Relay-Health.md wiki/Relay-Health.md
           git -C wiki config user.name "github-actions[bot]"
           git -C wiki config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C wiki add Relay-Health.md
+          test "$(sha256sum wiki/Home.md | cut -d ' ' -f 1)" = "$home_sha256"
           if ! git -C wiki diff --cached --quiet; then
             git -C wiki commit -m "docs: update relay health"
             git -C wiki -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" push origin HEAD
           fi
+          printf '%s\n' "$home_sha256" > wiki-home.sha256
       - name: Verify Wiki read-back
         env:
           GH_TOKEN: ${{ secrets.RELAY_HEALTH_WIKI_TOKEN }}
@@ -116,7 +120,7 @@ jobs:
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" \
             clone --depth 1 https://github.com/narugo1992/jerryproxy.wiki.git wiki-readback
           cmp Relay-Health.md wiki-readback/Relay-Health.md
-          test -f wiki-readback/Home.md
+          test "$(sha256sum wiki-readback/Home.md | cut -d ' ' -f 1)" = "$(cat wiki-home.sha256)"
 
   publication_gate:
     name: Relay health publication gate

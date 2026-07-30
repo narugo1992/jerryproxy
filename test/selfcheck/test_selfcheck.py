@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -8,19 +9,30 @@ from jerryproxy.errors import BackendCatalogError, JerryProxyBusyError, Unsuppor
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.lock import JerryProxyOperationLock, filelock_status
 from jerryproxy.selfcheck import CheckResult, ansi_color_enabled, build_checks, run_checks, run_self_check
+from test.selfcheck.fakes import (
+    FakeRelayResponse,
+    RelaySessionFactory,
+    relay_payload,
+    verified_relay_session_factory,
+)
 
 
-def test_self_check_validates_an_empty_private_home(tmp_path):
+def test_self_check_validates_an_empty_private_home(tmp_path, monkeypatch):
     lines = []
+    relay_factory = verified_relay_session_factory(monkeypatch)
 
-    exit_code = run_self_check(JerryProxyPaths(tmp_path), output=lines.append)
+    exit_code = run_self_check(
+        JerryProxyPaths(tmp_path),
+        output=lines.append,
+        relay_session_factory=relay_factory,
+    )
 
     assert exit_code == 0
     status = filelock_status()
     expected = (
-        "Summary: 9 OK, 0 WARN, 0 FAIL, 0 ERR"
+        "Summary: 12 OK, 0 WARN, 0 FAIL, 0 ERR"
         if status.level == "OK"
-        else "Summary: 8 OK, 1 WARN, 0 FAIL, 0 ERR"
+        else "Summary: 11 OK, 1 WARN, 0 FAIL, 0 ERR"
     )
     assert expected in lines
     assert lines[-1] in ("Self-check PASSED", "Self-check PASSED with warnings")
@@ -133,13 +145,17 @@ def test_color_detection_falls_back_when_stream_has_no_usable_tty(monkeypatch):
     assert ansi_color_enabled(BrokenTerminal()) is False
 
 
-def test_self_check_reports_corrupt_active_inventory_without_stopping_other_checks(tmp_path):
+def test_self_check_reports_corrupt_active_inventory_without_stopping_other_checks(tmp_path, monkeypatch):
     paths = JerryProxyPaths(tmp_path)
     paths.ensure()
     (paths.active / "mihomo.json").write_text("{not-json", encoding="ascii")
     lines = []
 
-    exit_code = run_self_check(paths, output=lines.append)
+    exit_code = run_self_check(
+        paths,
+        output=lines.append,
+        relay_session_factory=verified_relay_session_factory(monkeypatch),
+    )
 
     assert exit_code == 1
     assert any("backend inventory: ERR" in line for line in lines)
@@ -342,3 +358,183 @@ def test_filelock_check_maps_legacy_status_to_warning(tmp_path, monkeypatch):
     result = dict(build_checks(JerryProxyPaths(tmp_path)))["filelock compatibility"]()
 
     assert result == CheckResult.warn("legacy filelock")
+
+
+def test_relay_checks_use_exact_bounded_range_and_report_metrics(tmp_path, monkeypatch):
+    lines = []
+    relay_factory = verified_relay_session_factory(monkeypatch)
+
+    exit_code = run_self_check(
+        JerryProxyPaths(tmp_path),
+        output=lines.append,
+        relay_session_factory=relay_factory,
+    )
+
+    assert exit_code == 0
+    assert len(relay_factory.sessions) == 3
+    assert sum(
+        "relay " in line
+        and "verified 1 MiB; response" in line
+        and "; first chunk" in line
+        and "; stream " in line
+        for line in lines
+    ) == 3
+    for session in relay_factory.sessions:
+        assert session.closed is True
+        assert session.max_redirects == 5
+        assert len(session.calls) == 1
+        url, options = session.calls[0]
+        assert url.startswith("https://")
+        assert options["headers"]["Range"] == "bytes=0-1048575"
+        assert options["allow_redirects"] is True
+        assert options["stream"] is True
+        assert options["timeout"] == 5.0
+        assert session.outcome.closed is True
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (
+            selfcheck_module.requests.exceptions.TooManyRedirects("private redirect URL"),
+            "redirect limit exceeded",
+        ),
+        (selfcheck_module.requests.exceptions.Timeout("private timeout URL"), "request timed out"),
+        (selfcheck_module.requests.exceptions.SSLError("private TLS URL"), "TLS validation failed"),
+        (selfcheck_module.requests.exceptions.ConnectionError("private connect URL"), "connection failed"),
+        (selfcheck_module.requests.exceptions.ProxyError("private proxy URL"), "system proxy connection failed"),
+        (selfcheck_module.requests.exceptions.RequestException("private request URL"), "request failed"),
+    ],
+)
+def test_relay_transport_failures_are_sanitized_warnings(tmp_path, error, expected):
+    relay_factory = RelaySessionFactory(lambda: error)
+    relay_check = dict(build_checks(JerryProxyPaths(tmp_path), relay_factory))["relay gh-proxy.com"]
+
+    result = relay_check()
+
+    assert result.level == "WARN"
+    assert expected in result.detail
+    assert "private" not in result.detail
+
+
+def test_relay_http_failure_is_a_sanitized_warning(tmp_path):
+    response = FakeRelayResponse(relay_payload(), status_code=403)
+    relay_factory = RelaySessionFactory(lambda: response)
+    relay_check = dict(build_checks(JerryProxyPaths(tmp_path), relay_factory))["relay gh-proxy.com"]
+
+    result = relay_check()
+
+    assert result == CheckResult.warn("bounded 1 MiB verification failed: HTTP response was not 206")
+    assert "signed-value" not in result.detail
+
+
+@pytest.mark.parametrize(
+    "response, expected",
+    [
+        (
+            FakeRelayResponse(
+                relay_payload(),
+                history=[
+                    SimpleNamespace(url="https://relay.example/%d" % index)
+                    for index in range(6)
+                ],
+            ),
+            "redirect limit exceeded",
+        ),
+        (
+            FakeRelayResponse(
+                relay_payload(),
+                history=[SimpleNamespace(url="http://private.example/signed-query")],
+            ),
+            "redirect chain did not remain HTTPS",
+        ),
+    ],
+)
+def test_relay_redirect_policy_failures_are_sanitized_warnings(tmp_path, response, expected):
+    relay_factory = RelaySessionFactory(lambda: response)
+    relay_check = dict(build_checks(JerryProxyPaths(tmp_path), relay_factory))["relay gh-proxy.com"]
+
+    result = relay_check()
+
+    assert result.level == "WARN"
+    assert expected in result.detail
+    assert "private" not in result.detail
+
+
+@pytest.mark.parametrize(
+    "response_factory, expected",
+    [
+        (
+            lambda: FakeRelayResponse(relay_payload(), content_range="bytes 0-1/2"),
+            "Content-Range did not match the pinned asset",
+        ),
+        (
+            lambda: FakeRelayResponse(relay_payload()[:-1]),
+            "response body was not exactly 1 MiB",
+        ),
+        (
+            lambda: FakeRelayResponse(relay_payload()),
+            "pinned 1 MiB sample digest did not match",
+        ),
+    ],
+)
+def test_relay_content_failures_are_warnings(tmp_path, response_factory, expected, monkeypatch):
+    monkeypatch.setattr(selfcheck_module, "RELAY_PROBE_SHA256", "0" * 64)
+    relay_factory = RelaySessionFactory(response_factory)
+    relay_check = dict(build_checks(JerryProxyPaths(tmp_path), relay_factory))["relay gh-proxy.com"]
+
+    result = relay_check()
+
+    assert result.level == "WARN"
+    assert expected in result.detail
+
+
+def test_relay_probe_stops_after_one_bounded_overflow_chunk(tmp_path):
+    response = FakeRelayResponse(relay_payload() + b"unexpected trailing response" * 4096)
+    relay_factory = RelaySessionFactory(lambda: response)
+    relay_check = dict(build_checks(JerryProxyPaths(tmp_path), relay_factory))["relay gh-proxy.com"]
+
+    result = relay_check()
+
+    assert result == CheckResult.warn("bounded 1 MiB verification failed: response body was not exactly 1 MiB")
+    assert response.iterated_bytes <= selfcheck_module.RELAY_PROBE_BYTES + 64 * 1024
+
+
+def test_relay_probe_ignores_empty_chunks_before_a_valid_stream(tmp_path, monkeypatch):
+    payload = relay_payload()
+    monkeypatch.setattr(
+        selfcheck_module,
+        "RELAY_PROBE_SHA256",
+        hashlib.sha256(payload).hexdigest(),
+    )
+    chunks = [b""] + [
+        payload[offset : offset + 64 * 1024]
+        for offset in range(0, len(payload), 64 * 1024)
+    ]
+    relay_factory = RelaySessionFactory(
+        lambda: FakeRelayResponse(payload, chunks=chunks)
+    )
+    relay_check = dict(build_checks(JerryProxyPaths(tmp_path), relay_factory))["relay gh-proxy.com"]
+
+    result = relay_check()
+
+    assert result.level == "OK"
+    assert "over 16 chunks" in result.detail
+
+
+def test_relay_warnings_keep_the_full_self_check_exit_code_zero(tmp_path):
+    lines = []
+    relay_factory = RelaySessionFactory(
+        lambda: selfcheck_module.requests.exceptions.Timeout("secret request target")
+    )
+
+    exit_code = run_self_check(
+        JerryProxyPaths(tmp_path),
+        output=lines.append,
+        relay_session_factory=relay_factory,
+    )
+
+    assert exit_code == 0
+    assert "Summary: 9 OK, 3 WARN, 0 FAIL, 0 ERR" in lines
+    assert lines[-1] == "Self-check PASSED with warnings"
+    assert all("secret" not in line for line in lines)

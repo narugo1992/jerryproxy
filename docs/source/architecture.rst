@@ -6,7 +6,7 @@ JerryProxy separates backend distribution from backend runtime behavior:
 .. code-block:: text
 
    CLI
-    ├── Self-check (isolated local runtime and state diagnostics)
+    ├── Self-check (local diagnostics plus bounded built-in relay probes)
     ├── Home-wide filelock (managed-state serialization)
     ├── Backend registry (identity and exact asset names)
     ├── Static catalog reader (packaged stable releases, offline)
@@ -40,12 +40,22 @@ Relay-health monitoring is outside the runtime graph for the same reason. The
 maintainer-owned Gist is the relay-host and pattern source of truth; ``make
 relay_health_sync`` downloads it to an ignored local JSON file. The reviewed
 official probe asset and expected Range digest remain pinned by the repository
-tool. The ``tools.relay_health`` and ``tools.render_relay_health`` modules
+tool. Each enabled pattern receives three streamed 1 MiB samples with a
+ten-second network timeout. Response-header latency and first-chunk latency
+remain separate from the speed of subsequent chunks, while the short-window
+success count represents stability. The ``tools.relay_health`` and
+``tools.render_relay_health`` modules
 consume only local JSON paths. GitHub Actions probes and renders without
 publisher credentials, then uses separate identity-checked jobs for Gist and
 Wiki publication. A final gate rejects incomplete publication or an integrity
 mismatch. No health configuration or observation is imported by
 ``jerryproxy`` or packaged in its wheel.
+
+The runtime self-check uses the same repository-pinned asset evidence only to
+probe the three built-in relay profiles. It performs one fixed 1 MiB streamed
+sample per relay with a five-second network timeout. Relay failures are
+availability warnings; local requirement and operational errors retain the
+``FAIL`` and ``ERR`` exit semantics.
 
 Every current managed-state operation uses one upstream ``filelock.FileLock``
 below the selected JerryProxy home. Catalog-only queries do not initialize or

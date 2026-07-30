@@ -10,7 +10,8 @@ Complete in the initial scaffold
 * stable-only packaged catalogs and exact offline artifact selection;
 * digest-verified downloads with GitHub API fingerprints preferred;
 * safe extraction, immutable manifests, active links, removal;
-* lightweight packaged-CLI self-check and two-stage clean-runner validation;
+* packaged-CLI local self-check, bounded built-in relay probes, and two-stage
+  clean-runner validation;
 * deterministic tests, package, docs, and CI definitions.
 
 Required before the first usable proxy alpha

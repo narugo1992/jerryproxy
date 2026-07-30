@@ -1,13 +1,26 @@
 """Lightweight black-box checks for source and packaged JerryProxy CLIs."""
 
+import hashlib
 import os
 import platform
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
+from urllib.parse import urlparse
+
+import requests
 
 from .backend import BackendCatalog, BackendManager, iter_backends
 from .backend.platform import detect_platform
+from .backend.relay import (
+    RELAY_PROBE_BYTES,
+    RELAY_PROBE_SHA256,
+    RELAY_PROBE_SIZE,
+    RELAY_PROBE_URL,
+    iter_builtin_relays,
+    render_relay_url,
+)
 from .config.meta import __VERSION__
 from .errors import BackendCatalogError, JerryProxyError, UnsupportedPlatformError
 from .lock import JerryProxyOperationLock, filelock_status
@@ -18,6 +31,9 @@ _ANSI_GREEN = "\033[1;32m"
 _ANSI_YELLOW = "\033[1;33m"
 _ANSI_RED = "\033[1;31m"
 _ANSI_RESET = "\033[0m"
+_RELAY_CHECK_TIMEOUT = 5.0
+_RELAY_CHECK_MAX_REDIRECTS = 5
+_RELAY_CHECK_CHUNK_SIZE = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -220,8 +236,101 @@ def _check_backend_inventory(paths):
     )
 
 
-def build_checks(paths):
-    return (
+def _relay_warning(reason):
+    return CheckResult.warn("bounded 1 MiB verification failed: %s" % reason)
+
+
+def _check_relay(profile, session_factory):
+    session = session_factory()
+    response = None
+    started = time.monotonic()
+    try:
+        session.max_redirects = _RELAY_CHECK_MAX_REDIRECTS
+        response = session.get(
+            render_relay_url(profile, RELAY_PROBE_URL),
+            headers={
+                "Range": "bytes=0-%d" % (RELAY_PROBE_BYTES - 1),
+                "User-Agent": "JerryProxy-self-check",
+            },
+            allow_redirects=True,
+            stream=True,
+            timeout=_RELAY_CHECK_TIMEOUT,
+        )
+        response_at = time.monotonic()
+        if len(response.history) > _RELAY_CHECK_MAX_REDIRECTS:
+            return _relay_warning("redirect limit exceeded")
+        redirect_urls = [item.url for item in response.history] + [response.url]
+        if any(urlparse(item).scheme != "https" for item in redirect_urls):
+            return _relay_warning("redirect chain did not remain HTTPS")
+        if response.status_code != 206:
+            return _relay_warning("HTTP response was not 206")
+        expected_range = "bytes 0-%d/%d" % (RELAY_PROBE_BYTES - 1, RELAY_PROBE_SIZE)
+        if response.headers.get("Content-Range") != expected_range:
+            return _relay_warning("Content-Range did not match the pinned asset")
+        body = bytearray()
+        chunk_count = 0
+        first_chunk_at = None
+        first_chunk_size = 0
+        for block in response.iter_content(chunk_size=_RELAY_CHECK_CHUNK_SIZE):
+            if not block:
+                continue
+            remaining = RELAY_PROBE_BYTES + 1 - len(body)
+            accepted = block[:remaining]
+            received_at = time.monotonic()
+            body.extend(accepted)
+            chunk_count += 1
+            if first_chunk_at is None:
+                first_chunk_at = received_at
+                first_chunk_size = len(accepted)
+            if len(body) > RELAY_PROBE_BYTES:
+                break
+        if len(body) != RELAY_PROBE_BYTES:
+            return _relay_warning("response body was not exactly 1 MiB")
+        if hashlib.sha256(bytes(body)).hexdigest() != RELAY_PROBE_SHA256:
+            return _relay_warning("pinned 1 MiB sample digest did not match")
+        completed_at = time.monotonic()
+        first_chunk_seconds = max(first_chunk_at - started, 0.0)
+        streamed_bytes = len(body) - first_chunk_size
+        stream_seconds = max(completed_at - first_chunk_at, 0.001)
+        throughput = streamed_bytes / 1024.0 / stream_seconds
+        return CheckResult.ok(
+            "verified 1 MiB; response %.1f ms; first chunk %.1f ms; stream %.1f KiB/s over %d chunks"
+            % (
+                (response_at - started) * 1000.0,
+                first_chunk_seconds * 1000.0,
+                throughput,
+                chunk_count,
+            )
+        )
+    except requests.exceptions.TooManyRedirects:
+        # Requests raises this when the configured redirect ceiling is exceeded.
+        return _relay_warning("redirect limit exceeded")
+    except requests.exceptions.ProxyError:
+        # The system-configured HTTP proxy may be unavailable or reject the request.
+        return _relay_warning("system proxy connection failed")
+    except requests.exceptions.SSLError:
+        # TLS negotiation and system CA validation failures are availability warnings.
+        return _relay_warning("TLS validation failed")
+    except requests.exceptions.Timeout:
+        # The bounded relay request may exceed the fixed self-check deadline.
+        return _relay_warning("request timed out")
+    except requests.exceptions.ConnectionError:
+        # DNS and TCP connection failures are relay availability warnings.
+        return _relay_warning("connection failed")
+    except requests.exceptions.RequestException:
+        # Other documented Requests transport failures remain sanitized warnings.
+        return _relay_warning("request failed")
+    finally:
+        if response is not None:
+            response.close()
+        session.close()
+
+
+def build_checks(paths, relay_session_factory=None):
+    session_factory = (
+        relay_session_factory if relay_session_factory is not None else requests.Session
+    )
+    checks = (
         ("Python runtime", _check_runtime),
         ("platform detection", _check_platform),
         ("home directory layout", lambda: _check_home_layout(paths)),
@@ -231,6 +340,13 @@ def build_checks(paths):
         ("packaged backend catalog", _check_backend_catalog),
         ("filelock compatibility", _check_filelock),
         ("backend inventory", lambda: _check_backend_inventory(paths)),
+    )
+    return checks + tuple(
+        (
+            "relay %s" % profile.name,
+            lambda selected=profile: _check_relay(selected, session_factory),
+        )
+        for profile in iter_builtin_relays()
     )
 
 
@@ -271,7 +387,11 @@ def run_checks(checks, output, color=False):
     return 0
 
 
-def run_self_check(paths, output=print, color=False):
+def run_self_check(paths, output=print, color=False, relay_session_factory=None):
     output(_paint("JerryProxy self-check %s" % __VERSION__, _ANSI_CYAN, color))
     output("%s: %s" % (_paint("Home", _ANSI_BOLD, color), paths.root))
-    return run_checks(build_checks(paths), output, color=color)
+    return run_checks(
+        build_checks(paths, relay_session_factory=relay_session_factory),
+        output,
+        color=color,
+    )

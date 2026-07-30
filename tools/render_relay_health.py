@@ -21,6 +21,11 @@ PROFILE_LABELS = {
     "manual_transport_verified": "Transport verified",
     "named_profile_candidate": "Built-in candidate",
 }
+PATTERN_LABELS = {
+    "full_url_path": ("🧭", "Full URL path", "https://relay/https://github.com/owner/repo/..."),
+    "host_path": ("🔗", "GitHub host + path", "https://relay/github.com/owner/repo/..."),
+    "query_q": ("🔎", "Encoded q query", "https://relay/?q=https%3A%2F%2Fgithub.com%2F..."),
+}
 
 
 class RelayHealthRenderError(RuntimeError):
@@ -47,6 +52,53 @@ def _profile_label(value):
         return PROFILE_LABELS[value]
     except (KeyError, TypeError):
         raise RelayHealthRenderError("target recommendation is invalid")
+
+
+def _pattern(value):
+    try:
+        symbol, label, _ = PATTERN_LABELS[value]
+    except (KeyError, TypeError):
+        raise RelayHealthRenderError("pattern is invalid")
+    return "%s %s" % (symbol, label)
+
+
+def _description(value):
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value
+        or any(ord(character) < 32 or ord(character) > 126 for character in value)
+        or any(character in value for character in "|<>`[]")
+    ):
+        raise RelayHealthRenderError("target description is invalid")
+    return value
+
+
+def _measurement(value, suffix):
+    if value is None:
+        return "-"
+    try:
+        return "%.1f %s" % (float(value), suffix)
+    except (TypeError, ValueError):
+        raise RelayHealthRenderError("measurement is invalid")
+
+
+def _stability(observation):
+    try:
+        attempts = int(observation["attempts"])
+        successes = int(observation["successes"])
+        rate = float(observation["success_rate_percent"])
+    except (KeyError, TypeError, ValueError):
+        raise RelayHealthRenderError("stability measurement is invalid")
+    if attempts <= 0 or successes < 0 or successes > attempts:
+        raise RelayHealthRenderError("stability measurement is invalid")
+    return "%d/%d (%.1f%%)" % (successes, attempts, rate)
+
+
+def _final_hosts(value):
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise RelayHealthRenderError("final hosts are invalid")
+    return ", ".join(value) or "-"
 
 
 def _freshness(completed_at):
@@ -85,32 +137,39 @@ def render(targets_path, results_path):
     if target_ids != result_ids:
         raise RelayHealthRenderError("result targets do not match the configured target order")
     target_map = {item["id"]: item for item in raw_targets}
-    rows = []
+    directory_rows = []
+    measurement_rows = []
     for result in raw_results:
         target = target_map[result["id"]]
-        if not result.get("patterns"):
-            rows.append(
+        relay_link = "[%s](https://%s)" % (result["hostname"], result["hostname"])
+        directory_rows.append(
+            [
+                relay_link,
+                _profile_label(target.get("recommendation")),
+                _status(result.get("status")),
+                _description(target.get("description")),
+            ]
+        )
+        patterns = result.get("patterns")
+        if not isinstance(patterns, list):
+            raise RelayHealthRenderError("result patterns are invalid")
+        for observation in patterns:
+            if not isinstance(observation, dict):
+                raise RelayHealthRenderError("pattern observation is invalid")
+            measurement_rows.append(
                 [
-                    "[%s](https://%s)" % (result["hostname"], result["hostname"]),
-                    _profile_label(target.get("recommendation")),
-                    "-",
-                    _status(result.get("status")),
-                    "not_checked",
-                    "-",
-                    "-",
-                ]
-            )
-            continue
-        for observation in result["patterns"]:
-            rows.append(
-                [
-                    "[%s](https://%s)" % (result["hostname"], result["hostname"]),
-                    _profile_label(target.get("recommendation")),
-                    observation.get("pattern", "unknown"),
+                    relay_link,
+                    _pattern(observation.get("pattern")),
                     _status(observation.get("status")),
+                    _stability(observation),
+                    _measurement(observation.get("median_response_ms"), "ms"),
+                    _measurement(observation.get("median_first_chunk_ms"), "ms"),
+                    _measurement(
+                        observation.get("median_stream_throughput_kib_per_second"),
+                        "KiB/s",
+                    ),
                     observation.get("failure_reason", "unknown"),
-                    observation.get("final_host") or "-",
-                    "%.3f s" % float(observation.get("elapsed_seconds", 0)),
+                    _final_hosts(observation.get("final_hosts")),
                 ]
             )
     summary = results.get("summary", {})
@@ -120,15 +179,43 @@ def render(targets_path, results_path):
         scope_warning = "GitHub-hosted runner observation; not a mainland-China reachability measurement."
     else:
         scope_warning = "Local observation (%s); not a nationwide or multi-carrier measurement." % vantage
-    legend = [[symbol, label, key] for key, (symbol, label) in STATUS.items()]
+    status_legend = [[symbol, label, key] for key, (symbol, label) in STATUS.items()]
+    pattern_legend = [
+        [symbol, label, key, example]
+        for key, (symbol, label, example) in PATTERN_LABELS.items()
+    ]
     summary_rows = [
         ["Checked at", completed_at],
         ["Freshness", _freshness(completed_at)],
         ["Vantage", vantage],
         ["Direct GitHub control", _status(direct_control.get("status"))],
+        ["Direct control stability", _stability(direct_control)],
+        [
+            "Direct control median response",
+            _measurement(direct_control.get("median_response_ms"), "ms"),
+        ],
+        [
+            "Direct control median first chunk",
+            _measurement(direct_control.get("median_first_chunk_ms"), "ms"),
+        ],
+        [
+            "Direct control median stream speed",
+            _measurement(
+                direct_control.get("median_stream_throughput_kib_per_second"),
+                "KiB/s",
+            ),
+        ],
         ["Direct control reason", direct_control.get("failure_reason", "unknown")],
         ["Relays", summary.get("endpoints", 0)],
-        ["Passing patterns", "%s / %s" % (summary.get("exact_pattern_passes", 0), summary.get("pattern_checks", 0))],
+        [
+            "Stable patterns",
+            "%s / %s"
+            % (summary.get("stable_pattern_passes", 0), summary.get("pattern_checks", 0)),
+        ],
+        [
+            "Successful relay samples",
+            "%s / %s" % (summary.get("sample_passes", 0), summary.get("sample_checks", 0)),
+        ],
     ]
     return "\n".join(
         [
@@ -138,18 +225,55 @@ def render(targets_path, results_path):
             "",
             "Public relay availability is best-effort and can change at any time. JerryProxy still verifies",
             "backend archive size and official SHA-256 before installation.",
+            "Stability is the success count in this run's short sample window. Response latency covers",
+            "request start through response headers; first-chunk latency continues through the first",
+            "non-empty streamed chunk. Stream speed uses only",
+            "the remaining bytes through the end of a successful 1 MiB sample, excluding startup delay.",
+            "It is not a sustained-bandwidth measurement.",
             "",
             tabulate(summary_rows, headers=["Property", "Value"], tablefmt="github"),
             "",
-            "## Legend",
-            "",
-            tabulate(legend, headers=["Symbol", "Meaning", "Machine status"], tablefmt="github"),
-            "",
-            "## Results",
+            "## Status legend",
             "",
             tabulate(
-                rows,
-                headers=["Relay", "Profile", "Pattern", "Status", "Reason", "Final host", "Time"],
+                status_legend,
+                headers=["Symbol", "Meaning", "Machine status"],
+                tablefmt="github",
+            ),
+            "",
+            "## Pattern legend",
+            "",
+            tabulate(
+                pattern_legend,
+                headers=["Symbol", "Meaning", "Machine pattern", "Example"],
+                tablefmt="github",
+                disable_numparse=True,
+            ),
+            "",
+            "## Relay directory",
+            "",
+            tabulate(
+                directory_rows,
+                headers=["Relay", "Profile", "Current status", "Description"],
+                tablefmt="github",
+                disable_numparse=True,
+            ),
+            "",
+            "## Pattern measurements",
+            "",
+            tabulate(
+                measurement_rows,
+                headers=[
+                    "Relay",
+                    "Pattern",
+                    "Status",
+                    "Stability",
+                    "Median response",
+                    "Median first chunk",
+                    "Median stream speed",
+                    "Reason",
+                    "Final hosts",
+                ],
                 tablefmt="github",
                 disable_numparse=True,
             ),

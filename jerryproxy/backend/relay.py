@@ -7,6 +7,10 @@ from urllib.parse import quote, unquote_to_bytes, urlparse, urlunparse
 from ..errors import DownloadPolicyError
 
 ALLOWED_PATTERNS = ("full_url_path", "host_path", "query_q")
+RELAY_PROBE_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
+RELAY_PROBE_SIZE = 21136402
+RELAY_PROBE_BYTES = 1024 * 1024
+RELAY_PROBE_SHA256 = "5366a9e6db1f1eb797366022ae2cc4982d97f5deefb7be6c7fe2a6004e420f2f"
 
 
 @dataclass(frozen=True)
