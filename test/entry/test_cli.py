@@ -439,11 +439,49 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
     assert known.output == "plain,known\n"
     assert not missing_home.exists()
 
+    for words, current_word, expected in (
+        ("cli backend install mi", "3", "plain,mihomo\n"),
+        ("cli backend list known mi", "4", "plain,mihomo\n"),
+        ("cli backend install unsupported 1", "4", "\n"),
+    ):
+        result = runner.invoke(
+            cli,
+            [],
+            env={
+                "_CLI_COMPLETE": "bash_complete",
+                "COMP_WORDS": words,
+                "COMP_CWORD": current_word,
+            },
+        )
+        assert result.exit_code == 0
+        assert result.output == expected
+
     home = tmp_path / "installed"
     install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=False)
+    (home / "backends" / "mihomo" / "not-a-version").mkdir()
+    cached = home / "downloads" / "mihomo" / "9.9.9"
+    cached.mkdir(parents=True)
     lock_file = home / "locks" / "jerryproxy.lock"
     if lock_file.exists():
         lock_file.unlink()
+
+    for command in ("use", "clean"):
+        backend_words = "cli --home %s backend %s mi" % (
+            shlex.quote(home.as_posix()),
+            command,
+        )
+        backend = runner.invoke(
+            cli,
+            [],
+            env={
+                "_CLI_COMPLETE": "bash_complete",
+                "COMP_WORDS": backend_words,
+                "COMP_CWORD": "5",
+            },
+        )
+        assert backend.exit_code == 0
+        assert backend.output == "plain,mihomo\n"
+
     version_words = "cli --home %s backend use mihomo 1" % shlex.quote(home.as_posix())
     version = runner.invoke(
         cli,
@@ -481,8 +519,6 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
             "plain,%s" % item for item in compatible
         ]
 
-    cached = home / "downloads" / "mihomo" / "9.9.9"
-    cached.mkdir(parents=True)
     cached_version = runner.invoke(
         cli,
         [],
