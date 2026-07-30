@@ -574,6 +574,7 @@ def test_which_rejects_missing_current_missing_version_and_malformed_version(tmp
         manager.which("mihomo", "1.0.0")
     with pytest.raises(ValueError, match="invalid backend version"):
         manager.which("mihomo", "../outside")
+    assert not manager.paths.root.exists()
 
 
 def test_install_probes_the_staged_executable_before_publication(tmp_path, monkeypatch):
@@ -843,6 +844,78 @@ def test_inventory_returns_one_installed_and_active_snapshot(tmp_path):
     assert inventory.active[0].version == installed.version
 
 
+def test_inventory_does_not_initialize_an_empty_home(tmp_path):
+    manager = manager_for(tmp_path)
+
+    inventory = manager.inventory()
+
+    assert inventory.installed == ()
+    assert inventory.active == ()
+    assert manager.list_installed() == []
+    assert manager.list_active() == []
+    assert manager.current("mihomo") is None
+    assert manager.verify() == []
+    assert manager.list_cached_versions() == {
+        "mihomo": (),
+        "sing-box": (),
+        "v2ray": (),
+        "xray": (),
+    }
+    assert not manager.paths.root.exists()
+
+
+@pytest.mark.parametrize("areas", [("backends",), ("locks",), ("locks", "backends")])
+def test_inventory_rejects_partial_managed_state_without_repair(tmp_path, areas):
+    manager = manager_for(tmp_path)
+    for area in areas:
+        getattr(manager.paths, area).mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(IntegrityError, match="home is incomplete"):
+        manager.inventory()
+
+    assert not manager.paths.lock_file.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission validation")
+@pytest.mark.parametrize("area", ["root", "locks", "backends", "lock_file"])
+def test_inventory_rejects_unsafe_existing_layout_permissions_without_repair(tmp_path, area):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    target = getattr(manager.paths, area)
+    target.chmod(0o777 if area != "lock_file" else 0o666)
+
+    with pytest.raises(IntegrityError, match="unsafe permissions"):
+        manager.inventory()
+
+    expected = 0o777 if area != "lock_file" else 0o666
+    assert target.stat().st_mode & 0o777 == expected
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX filelock retains its lock file")
+def test_inventory_rejects_a_missing_existing_lock_file_without_recreating_it(tmp_path):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    manager.paths.lock_file.unlink()
+
+    with pytest.raises(IntegrityError, match="home is incomplete"):
+        manager.inventory()
+
+    assert not manager.paths.lock_file.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows filelock removes its lock file")
+def test_inventory_accepts_a_complete_windows_layout_without_a_persistent_lock_file(tmp_path):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    if manager.paths.lock_file.exists():
+        manager.paths.lock_file.unlink()
+
+    inventory = manager.inventory()
+
+    assert inventory.installed == ()
+    assert inventory.active == ()
+
+
 def test_clean_download_cache_by_version_backend_and_all(tmp_path):
     manager = manager_for(tmp_path)
     paths = manager.paths
@@ -895,6 +968,7 @@ def test_clean_global_areas_preserves_installs_active_links_and_locks(tmp_path):
 
 def test_clean_is_idempotent_and_lists_cached_versions(tmp_path):
     manager = manager_for(tmp_path)
+    manager.paths.ensure()
     cache = manager.paths.downloads / "mihomo" / "2.0.0" / "asset.gz"
     cache.parent.mkdir(parents=True)
     cache.write_bytes(b"asset")
@@ -2165,7 +2239,9 @@ def test_crashed_removal_move_is_recovered_before_the_next_state_read(tmp_path, 
     process.join(10)
 
     assert process.exitcode == 20 + move_number
-    assert manager.current("mihomo").version == "1.0.0"
+    inventory = manager.inventory("mihomo")
+    assert [item.version for item in inventory.installed] == ["1.0.0"]
+    assert [item.version for item in inventory.active] == ["1.0.0"]
     assert installed.manifest.is_file()
     assert not list(manager.paths.runtimes.glob(".remove-*"))
 
@@ -2215,7 +2291,9 @@ def test_crash_after_commit_finishes_quarantine_disposal(tmp_path):
 
     assert process.exitcode == 28
     assert not installed.manifest.is_file()
-    assert manager.current("mihomo") is None
+    inventory = manager.inventory("mihomo")
+    assert inventory.installed == ()
+    assert inventory.active == ()
     assert not list(manager.paths.runtimes.glob(".remove-*"))
 
 
@@ -2287,7 +2365,7 @@ def test_invalid_removal_journal_fails_closed_before_a_state_read(tmp_path, case
     manager_module.atomic_write_json(transaction / "journal.json", journal)
 
     with pytest.raises(IntegrityError, match=message):
-        manager.current("mihomo")
+        manager.inventory("mihomo")
 
     assert outside.read_bytes() == b"must survive"
 
@@ -2925,6 +3003,7 @@ def test_clean_rejects_invalid_public_scopes(tmp_path, name, version, areas, mes
 
 def test_cached_version_inventory_omits_unrecognized_entries(tmp_path):
     manager = manager_for(tmp_path)
+    manager.paths.ensure()
     backend_cache = manager.paths.downloads / "mihomo"
     (backend_cache / "not-a-release").mkdir(parents=True)
     (backend_cache / "1.0.0").mkdir()

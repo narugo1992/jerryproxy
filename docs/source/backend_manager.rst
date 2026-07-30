@@ -102,6 +102,14 @@ immutable executable for the current version, while ``which NAME VERSION``
 selects an exact installed version. Add ``--paths`` to ``list`` only when the
 executable and current-link paths are needed.
 
+Neither local nor packaged-catalog list initializes or repairs a home. An
+absent or empty home produces an empty local inventory without creating
+directories. If managed state already exists, the local form acquires the
+home-wide lock and validates the complete top-level layout and lock-path
+permissions. Every acquired home lock still performs mandatory recovery of an
+already journaled interrupted uninstall before returning the inventory
+snapshot.
+
 Interactive and automated use
 -----------------------------
 

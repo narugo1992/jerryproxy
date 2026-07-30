@@ -122,6 +122,12 @@ catalog view: no target shows known backends, a backend shows compatible stable
 versions, and a backend plus version shows the exact host artifact and full
 SHA-256 evidence. Catalog queries are offline and identify the packaged
 snapshot timestamp; upgrade JerryProxy to refresh them.
+Local and catalog list queries never initialize or repair a home. An absent or
+empty home is reported as an empty local inventory without creating
+`~/.jerryproxy`; an existing managed home is locked and fully validated,
+including top-level layout and lock-path permissions. As with every acquired
+home lock, an already journaled interrupted uninstall is recovered before the
+snapshot is returned.
 
 With `--json`, the same three depths have explicit machine shapes:
 `list known --json` returns an array of backend overview records,
@@ -281,7 +287,7 @@ files are written atomically as `0600`. Windows ACL hardening is part of the
 runtime security roadmap; the current design keeps every path beneath the
 current user's profile.
 
-Every managed-state read or mutation uses one `filelock.FileLock` at
+Every read of existing managed state and every mutation uses one `filelock.FileLock` at
 `~/.jerryproxy/locks/jerryproxy.lock`. Contention fails immediately with an
 actionable busy error. The lock file may remain on disk after release; JerryProxy
 does not store owner PIDs in it, inspect its contents, delete it as stale, or

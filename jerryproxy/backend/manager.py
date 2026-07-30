@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,6 +57,20 @@ class BackendManager(object):
         if self._catalog is None:
             self._catalog = BackendCatalog.load()
         return self._catalog
+
+    @contextmanager
+    def _read_operation(self):
+        """Lock complete existing state without initializing an absent home."""
+
+        if not self.paths._validate_existing_layout():
+            yield False
+            return
+        try:
+            with JerryProxyOperationLock(self.paths, initialize=False):
+                yield True
+        except FileNotFoundError as error:
+            # A concurrent external layout change can invalidate the pre-lock snapshot.
+            raise IntegrityError("JerryProxy home changed during read: %s" % self.paths.root) from error
 
     @classmethod
     def from_home(cls, home=None):  # type: (Optional[str]) -> "BackendManager"
@@ -265,7 +280,11 @@ class BackendManager(object):
         return self._load_installed_manifest(target / "manifest.json")
 
     def list_installed(self, name=None):  # type: (Optional[str]) -> List[InstalledBackend]
-        with JerryProxyOperationLock(self.paths):
+        if name is not None:
+            get_backend(name)
+        with self._read_operation() as has_state:
+            if not has_state:
+                return []
             return self._list_installed_locked(name)
 
     def _list_installed_locked(self, name=None):
@@ -291,8 +310,14 @@ class BackendManager(object):
         return grouped
 
     def get_installed(self, name, version):  # type: (str, str) -> InstalledBackend
-        with JerryProxyOperationLock(self.paths):
-            return self._get_installed_locked(name, version)
+        spec = get_backend(name)
+        normalized_version = spec.normalize_version(version)
+        with self._read_operation() as has_state:
+            if not has_state:
+                raise BackendNotInstalledError(
+                    "%s %s is not installed" % (spec.name, normalized_version)
+                )
+            return self._get_installed_locked(spec.name, normalized_version)
 
     def _get_installed_locked(self, name, version):
         spec = get_backend(name)
@@ -317,11 +342,19 @@ class BackendManager(object):
 
         if version is not None and name is None:
             raise ValueError("a verification version requires a backend name")
-        with JerryProxyOperationLock(self.paths):
+        spec = get_backend(name) if name is not None else None
+        normalized_version = spec.normalize_version(version) if version is not None else None
+        with self._read_operation() as has_state:
+            if not has_state:
+                if normalized_version is not None:
+                    raise BackendNotInstalledError(
+                        "%s %s is not installed" % (spec.name, normalized_version)
+                    )
+                return []
             if version is None:
                 installed = self._list_installed_locked(name=name)
             else:
-                installed = [self._get_installed_locked(name, version)]
+                installed = [self._get_installed_locked(spec.name, normalized_version)]
             for item in installed:
                 self._verify_installed_executable(item)
             return installed
@@ -330,15 +363,23 @@ class BackendManager(object):
         # type: (str, Optional[str]) -> Union[ActiveBackend, InstalledBackend]
         """Return one integrity-verified executable selection without running it."""
 
-        with JerryProxyOperationLock(self.paths):
+        spec = get_backend(name)
+        normalized_version = spec.normalize_version(version) if version is not None else None
+        with self._read_operation() as has_state:
+            if not has_state:
+                if normalized_version is None:
+                    raise BackendNotInstalledError("%s has no current version" % spec.name)
+                raise BackendNotInstalledError(
+                    "%s %s is not installed" % (spec.name, normalized_version)
+                )
             if version is None:
-                current = self._current_locked(name)
+                current = self._current_locked(spec.name)
                 if current is None:
-                    raise BackendNotInstalledError("%s has no current version" % get_backend(name).name)
+                    raise BackendNotInstalledError("%s has no current version" % spec.name)
                 installed = self._get_installed_locked(current.name, current.version)
                 self._verify_installed_executable(installed)
                 return current
-            installed = self._get_installed_locked(name, version)
+            installed = self._get_installed_locked(spec.name, normalized_version)
             self._verify_installed_executable(installed)
             return installed
 
@@ -418,8 +459,11 @@ class BackendManager(object):
         return link_mode
 
     def current(self, name):  # type: (str) -> Optional[ActiveBackend]
-        with JerryProxyOperationLock(self.paths):
-            return self._current_locked(name)
+        spec = get_backend(name)
+        with self._read_operation() as has_state:
+            if not has_state:
+                return None
+            return self._current_locked(spec.name)
 
     def _current_locked(self, name):
         spec = get_backend(name)
@@ -467,7 +511,9 @@ class BackendManager(object):
         )
 
     def list_active(self):  # type: () -> List[ActiveBackend]
-        with JerryProxyOperationLock(self.paths):
+        with self._read_operation() as has_state:
+            if not has_state:
+                return []
             return self._list_active_locked()
 
     def _list_active_locked(self, name=None):
@@ -480,9 +526,17 @@ class BackendManager(object):
         return active
 
     def inventory(self, name=None):  # type: (Optional[str]) -> BackendInventory
-        """Return one lock-consistent installed and active backend snapshot."""
+        """Return a non-initializing, lock-consistent backend snapshot.
 
-        with JerryProxyOperationLock(self.paths):
+        Acquiring an existing home lock may recover a journaled interrupted
+        uninstall before the snapshot is constructed.
+        """
+
+        if name is not None:
+            get_backend(name)
+        with self._read_operation() as has_state:
+            if not has_state:
+                return BackendInventory(installed=(), active=())
             return BackendInventory(
                 installed=tuple(self._list_installed_locked(name)),
                 active=tuple(self._list_active_locked(name)),
@@ -558,7 +612,10 @@ class BackendManager(object):
     def list_cached_versions(self, name=None):  # type: (Optional[str]) -> dict
         """Return exact cached release versions grouped by backend name."""
 
-        with JerryProxyOperationLock(self.paths):
+        names = [get_backend(name).name] if name is not None else [spec.name for spec in iter_backends()]
+        with self._read_operation() as has_state:
+            if not has_state:
+                return {backend_name: () for backend_name in names}
             return self._list_cached_versions_locked(name)
 
     def _list_cached_versions_locked(self, name=None):

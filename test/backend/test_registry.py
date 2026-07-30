@@ -78,6 +78,12 @@ def test_unknown_backend_is_rejected():
         get_backend("unknown")
 
 
+def test_list_known_query_token_is_reserved_from_backend_registry():
+    assert "known" not in {spec.name for spec in iter_backends()}
+    with pytest.raises(UnsupportedBackendError):
+        get_backend("known")
+
+
 def test_unknown_asset_family_is_rejected_as_an_unsupported_platform_rule():
     spec = BackendSpec("custom", "owner/repo", "custom", "unknown", "Custom", ("version",))
 

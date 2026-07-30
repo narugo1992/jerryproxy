@@ -58,7 +58,19 @@ def test_home_override(tmp_path):
 
 def test_backend_command_surface_is_consolidated():
     result = CliRunner().invoke(cli, ["backend", "--help"])
+    backend_group = cli.commands["backend"]
+
     assert result.exit_code == 0
+    assert set(backend_group.commands) == {
+        "clean",
+        "current",
+        "install",
+        "list",
+        "uninstall",
+        "use",
+        "verify",
+        "which",
+    }
     for command in ("clean", "current", "install", "list", "uninstall", "use", "verify", "which"):
         assert "  %s " % command in result.output
     for removed in ("artifact", "available", "remove", "supported", "switch", "update", "versions"):
@@ -88,11 +100,24 @@ def test_removed_backend_options_are_rejected(arguments):
     assert "No such option" in result.output
 
 
-def test_empty_backend_list_uses_private_home(tmp_path):
+def test_empty_backend_list_does_not_initialize_home(tmp_path):
     result = CliRunner().invoke(cli, ["--home", str(tmp_path), "backend", "list"])
     assert result.exit_code == 0
     assert "No backend versions installed." in result.output
-    assert (tmp_path / "backends").is_dir()
+    assert not (tmp_path / "backends").exists()
+    assert not (tmp_path / "locks").exists()
+
+
+def test_targeted_list_rejects_an_unknown_backend_without_initializing_home(tmp_path):
+    result = CliRunner().invoke(
+        cli,
+        ["--home", str(tmp_path), "backend", "list", "unknown"],
+    )
+
+    assert result.exit_code == 1
+    assert "unsupported backend: unknown" in str(result.exception)
+    assert not (tmp_path / "backends").exists()
+    assert not (tmp_path / "locks").exists()
 
 
 def test_local_backend_list_does_not_load_the_packaged_catalog(tmp_path, monkeypatch):
@@ -461,10 +486,11 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
     home = tmp_path / "installed"
     install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=False)
     (home / "backends" / "mihomo" / "not-a-version").mkdir()
+    (home / "backends" / "mihomo" / "1.2.3").mkdir()
     cached = home / "downloads" / "mihomo" / "9.9.9"
     cached.mkdir(parents=True)
     lock_file = home / "locks" / "jerryproxy.lock"
-    if lock_file.exists():
+    if os.name == "nt" and lock_file.exists():
         lock_file.unlink()
 
     for command in ("use", "clean"):
@@ -496,7 +522,7 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
     )
 
     assert version.exit_code == 0
-    assert "plain,1.0.0" in version.output
+    assert version.output == "plain,1.0.0\n"
 
     compatible = [
         item.version
@@ -545,6 +571,107 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
         )
     assert busy.exit_code == 0
     assert busy.output.strip() == ""
+
+
+@pytest.mark.parametrize("layout", ["locks-only", "locks-and-backends", "missing-directory"])
+def test_installed_completion_rejects_partial_existing_layouts_without_repair(tmp_path, layout):
+    home = tmp_path / layout
+    paths = JerryProxyPaths(home)
+    if layout == "locks-only":
+        paths.locks.mkdir(parents=True)
+    elif layout == "locks-and-backends":
+        paths.locks.mkdir(parents=True)
+        (paths.backends / "mihomo" / "1.2.3").mkdir(parents=True)
+    else:
+        paths.ensure()
+        paths.providers.rmdir()
+
+    result = CliRunner().invoke(
+        cli,
+        [],
+        env={
+            "_CLI_COMPLETE": "bash_complete",
+            "COMP_WORDS": "cli --home %s backend use mihomo 1" % shlex.quote(home.as_posix()),
+            "COMP_CWORD": "6",
+        },
+    )
+
+    assert result.exit_code == 0
+    assert result.output.strip() == ""
+    if layout != "missing-directory":
+        assert not paths.lock_file.exists()
+    else:
+        assert not paths.providers.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink completion containment")
+def test_installed_completion_rejects_a_managed_directory_alias(tmp_path):
+    home = tmp_path / "home"
+    paths = JerryProxyPaths(home)
+    paths.ensure()
+    paths.providers.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "must-survive"
+    marker.write_bytes(b"outside")
+    paths.providers.symlink_to(outside, target_is_directory=True)
+
+    result = CliRunner().invoke(
+        cli,
+        [],
+        env={
+            "_CLI_COMPLETE": "bash_complete",
+            "COMP_WORDS": "cli --home %s backend use mihomo 1" % shlex.quote(home.as_posix()),
+            "COMP_CWORD": "6",
+        },
+    )
+
+    assert result.exit_code == 0
+    assert result.output.strip() == ""
+    assert marker.read_bytes() == b"outside"
+
+
+@pytest.mark.parametrize(
+    ("protocol", "backend_current", "relay_current", "backend_output", "relay_output"),
+    [
+        ("bash_complete", "5", "7", "plain,mihomo\n", "plain,auto\n"),
+        ("zsh_complete", "5", "7", "plain\nmihomo\n_\n", "plain\nauto\n_\n"),
+        ("fish_complete", "mi", "a", "plain,mihomo\n", "plain,auto\n"),
+    ],
+)
+def test_supported_shell_completion_protocols_include_backends_and_relay_modes(
+    tmp_path,
+    protocol,
+    backend_current,
+    relay_current,
+    backend_output,
+    relay_output,
+):
+    missing_home = tmp_path / "missing"
+    quoted_home = shlex.quote(missing_home.as_posix())
+    runner = CliRunner()
+
+    for words, current, expected in (
+        ("cli --home %s backend install mi" % quoted_home, backend_current, backend_output),
+        (
+            "cli --home %s backend install mihomo --relay a" % quoted_home,
+            relay_current,
+            relay_output,
+        ),
+    ):
+        result = runner.invoke(
+            cli,
+            [],
+            env={
+                "_CLI_COMPLETE": protocol,
+                "COMP_WORDS": words,
+                "COMP_CWORD": current,
+            },
+        )
+        assert result.exit_code == 0
+        assert result.output == expected
+
+    assert not missing_home.exists()
 
 
 def test_backend_uninstall_confirmation_rejection_preserves_installed_version(tmp_path, monkeypatch):
@@ -626,6 +753,7 @@ def test_backend_clean_explicit_areas_and_yes_are_noninteractive(tmp_path, monke
 
 def test_backend_clean_short_command_guides_scope_then_confirms(tmp_path, monkeypatch):
     home = tmp_path / "home"
+    JerryProxyPaths(home).ensure()
     cached = home / "downloads" / "mihomo" / "1.0.0" / "archive.gz"
     cached.parent.mkdir(parents=True)
     cached.write_bytes(b"cache")
@@ -971,6 +1099,7 @@ def test_current_reports_empty_backend(tmp_path):
     assert "No current backend." in result.output
     assert machine.exit_code == 0
     assert json.loads(machine.output) == []
+    assert not list(tmp_path.iterdir())
 
 
 def test_scoped_current_ignores_unrelated_corrupt_active_state(tmp_path, monkeypatch):
@@ -1262,10 +1391,12 @@ def test_backend_install_help_preserves_relay_layout(terminal_width):
     assert "auto     Try" not in result.output
 
 
-def test_backend_help_identifies_verified_install_entry_point():
-    result = CliRunner().invoke(cli, ["backend", "--help"], terminal_width=72)
+@pytest.mark.parametrize("terminal_width", [72, 80, 100, 120])
+def test_backend_help_identifies_verified_install_entry_point(terminal_width):
+    result = CliRunner().invoke(cli, ["backend", "--help"], terminal_width=terminal_width)
 
     assert result.exit_code == 0
+    assert max(len(line) for line in result.output.splitlines()) <= terminal_width
     assert "install    Install or update a verified backend version." in result.output
 
 
@@ -1302,6 +1433,7 @@ def test_verify_empty_and_uninstall_invalid_option_combinations(tmp_path):
     assert "VERSION or -A/--all" in combined.output
     assert forced_all.exit_code == 2
     assert "--deactivate only applies" in forced_all.output
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("selected", ["__all__", "1.0.0"])

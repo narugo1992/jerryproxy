@@ -8,6 +8,7 @@ from .model import PlatformInfo
 
 _VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 _SEMANTIC_VERSION_PATTERN = re.compile(r"^(\d+(?:\.\d+)*)(?:-([A-Za-z0-9.-]+))?(?:\+[A-Za-z0-9.-]+)?$")
+_RESERVED_BACKEND_NAMES = frozenset(("known",))
 _WINDOWS_RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {"COM%d" % index for index in range(1, 10)}
@@ -252,6 +253,12 @@ _BACKENDS = {
         version_arguments=("version",),
     ),
 }  # type: Dict[str, BackendSpec]
+
+_reserved_backend_names = _RESERVED_BACKEND_NAMES.intersection(_BACKENDS)
+if _reserved_backend_names:
+    raise RuntimeError(
+        "backend registry uses reserved names: %s" % ", ".join(sorted(_reserved_backend_names))
+    )
 
 
 def get_backend(name):  # type: (str) -> BackendSpec

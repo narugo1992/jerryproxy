@@ -92,6 +92,8 @@ class JerryProxyOperationLock(object):
         if self.initialize:
             self.paths._ensure_lock_bootstrap()
         else:
+            if not self.paths._validate_existing_layout():
+                raise FileNotFoundError("JerryProxy home has no existing managed state")
             self._validate_existing_lock()
         lock = FileLock(str(self.paths.lock_file), timeout=self.timeout, mode=0o600)
         stack = ExitStack()
@@ -105,11 +107,13 @@ class JerryProxyOperationLock(object):
         with stack:
             if self.initialize:
                 self.paths._ensure_layout_locked()
-                from .backend.removal import _recover_removal_transactions
-
-                _recover_removal_transactions(self.paths)
             else:
                 self._validate_existing_lock()
+                if not self.paths._validate_existing_layout():
+                    raise FileNotFoundError("JerryProxy home has no existing managed state")
+            from .backend.removal import _recover_removal_transactions
+
+            _recover_removal_transactions(self.paths)
             self._exit_stack = stack.pop_all()
         return self
 

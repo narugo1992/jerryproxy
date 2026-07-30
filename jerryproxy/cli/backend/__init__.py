@@ -21,8 +21,8 @@ option is supplied.
 
 \b
 Command map:
-  list       Inspect installed versions or the packaged release catalog.
-  install    Download, verify, install, and optionally activate a release.
+  list       Inspect installed versions or packaged releases.
+  install    Install a verified release and optionally activate it.
   current    Show the version currently selected for each backend.
   use        Select an already installed exact version.
   which      Print a validated immutable executable path.

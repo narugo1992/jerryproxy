@@ -108,8 +108,8 @@ class JerryProxyPaths(object):
                 % self.lock_file
             )
 
-    def _ensure_layout_locked(self):  # type: () -> None
-        for path in (
+    def _managed_directories(self):  # type: () -> tuple
+        return (
             self.backends,
             self.bin,
             self.downloads,
@@ -117,7 +117,56 @@ class JerryProxyPaths(object):
             self.runtimes,
             self.logs,
             self.active,
-        ):
+        )
+
+    @staticmethod
+    def _validate_private_mode(path, expected_mode):  # type: (Path, int) -> None
+        if os.name != "posix":
+            return
+        actual_mode = stat.S_IMODE(path.stat().st_mode)
+        if actual_mode != expected_mode:
+            raise IntegrityError(
+                "managed JerryProxy path has unsafe permissions %04o, expected %04o: %s"
+                % (actual_mode, expected_mode, path)
+            )
+
+    def _validate_existing_layout(self):  # type: () -> bool
+        """Validate a complete existing layout without creating or repairing it."""
+
+        if not os.path.lexists(str(self.root)):
+            return False
+        if not self.root.is_dir():
+            raise IntegrityError("JerryProxy home is not a directory: %s" % self.root)
+
+        layout = (self.locks,) + self._managed_directories()
+        present = tuple(os.path.lexists(str(path)) for path in layout)
+        if not any(present):
+            if any(self.root.iterdir()):
+                raise IntegrityError("JerryProxy home is incomplete: %s" % self.root)
+            return False
+        if not all(present):
+            raise IntegrityError("JerryProxy home is incomplete: %s" % self.root)
+
+        self._validate_private_mode(self.root, 0o700)
+        for path in layout:
+            if not path.is_dir() or is_path_alias(path):
+                raise IntegrityError(
+                    "managed JerryProxy home path is invalid or aliased: %s" % path
+                )
+            self._validate_private_mode(path, 0o700)
+
+        if os.path.lexists(str(self.lock_file)):
+            if not self.lock_file.is_file() or is_path_alias(self.lock_file):
+                raise IntegrityError(
+                    "managed JerryProxy lock file is invalid or aliased: %s" % self.lock_file
+                )
+            self._validate_private_mode(self.lock_file, 0o600)
+        elif os.name != "nt":
+            raise IntegrityError("JerryProxy home is incomplete: %s" % self.root)
+        return True
+
+    def _ensure_layout_locked(self):  # type: () -> None
+        for path in self._managed_directories():
             self._ensure_directory(path, reject_alias=True)
 
     def ensure(self):  # type: () -> None

@@ -117,6 +117,13 @@ authentication, extraction, process, or permission errors to warnings.
   recursively acquiring a second lock.
 - Read operations use the same home-wide lock. CLI list, doctor, and self-check
   must consume one `BackendInventory` snapshot for installed and active state.
+  A completely absent or empty home has no managed state to lock and must
+  produce an empty inventory without creating directories. Once any managed
+  path exists, inventory reads must acquire the existing lock, validate the
+  complete top-level layout and lock-path permissions without repairing them,
+  and fail closed on partial state. Mandatory recovery of an already journaled
+  removal transaction still runs on every acquired lock; it is not layout
+  repair.
 - Self-check must probe each built-in relay with one streamed, fixed 1 MiB Range
   from the repository-pinned public Xray asset. Use a five-second Requests
   timeout, require an HTTPS redirect chain, HTTP 206, exact `Content-Range`,
@@ -207,6 +214,14 @@ authentication, extraction, process, or permission errors to warnings.
   modules such as `_common.py` and `_completion.py`. Leaf modules own their
   command-specific behavior; do not recreate a monolithic dispatcher or expose
   private compatibility aliases from package initializers.
+- Keep shell completion non-initializing: it may read the static packaged
+  catalog and manager-validated inventory or cache snapshots from an already
+  initialized home under the operation lock, but must not access the network,
+  create or repair the layout, interpret managed directories directly, or
+  bypass path-alias checks. The normal mandatory recovery of an already
+  journaled removal transaction still applies. Cover the supported Bash, Zsh,
+  and Fish protocols, including Click choice completion for public option
+  values such as relay modes.
 - The project is unpublished. CLI redesigns must remove obsolete commands,
   options, modules, aliases, and tests cleanly instead of retaining backward-
   compatibility shims without an explicit release requirement.
