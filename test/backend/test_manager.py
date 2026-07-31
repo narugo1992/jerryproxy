@@ -2475,6 +2475,7 @@ def test_hard_exit_after_each_activation_recovery_action_keeps_direction_and_con
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX hard-exit activation recovery directions")
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize(
     ("direction", "with_previous", "operation_crash", "operation_exit", "expected_version", "remove_public"),
     (
