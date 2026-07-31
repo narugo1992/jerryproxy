@@ -35,6 +35,8 @@ class SimulatedArchiveWindowsKernel(object):
         self.opened_handles = []
         self.closed_handles = []
         self.rename_roots = []
+        self.rename_classes = []
+        self.rename_flags = []
 
     def CreateFileW(self, path, access, share, security, creation, flags, template):
         del security, template
@@ -84,21 +86,28 @@ class SimulatedArchiveWindowsKernel(object):
             information.file_id.identifier[index] = value
         return True
 
-    def SetFileInformationByHandle(self, handle, information_class, information_pointer, size):
-        assert information_class == anchored_module._WINDOWS_FILE_RENAME_INFO_CLASS
-        buffer = information_pointer._obj
-        information = anchored_module._WindowsFileRenameInformation.from_buffer(buffer)
-        replace_existing = bool(information.replace_if_exists)
+    def NtSetInformationFile(self, handle, io_status, information_pointer, size, information_class):
+        del io_status
+        assert information_class in (
+            anchored_module._WINDOWS_FILE_RENAME_INFORMATION_CLASS,
+            anchored_module._WINDOWS_FILE_RENAME_INFORMATION_EX_CLASS,
+        )
+        information = information_pointer._obj
+        replace_existing = bool(
+            information.replace_or_flags & anchored_module._WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS
+        )
         parent_handle = information.root_directory
         self.rename_roots.append(parent_handle)
+        self.rename_classes.append(information_class)
+        self.rename_flags.append(int(information.replace_or_flags))
         name_length = information.file_name_length
-        assert size >= anchored_module.ctypes.sizeof(anchored_module._WindowsFileRenameInformation) + name_length
+        assert size == anchored_module.ctypes.sizeof(information)
         payload = anchored_module.ctypes.string_at(
-            anchored_module.ctypes.addressof(buffer) + anchored_module._WindowsFileRenameInformation.file_name.offset,
+            anchored_module.ctypes.addressof(information) + information.__class__.file_name.offset,
             name_length,
         )
         source = self.handles[handle]
-        destination_parent = source.parent if parent_handle is None else self.handles[parent_handle]
+        destination_parent = self.handles[parent_handle]
         destination = destination_parent / payload.decode("utf-16-le")
         try:
             if replace_existing:
@@ -108,11 +117,15 @@ class SimulatedArchiveWindowsKernel(object):
         except OSError as error:
             if not replace_existing and error.errno in (errno.EEXIST, errno.ENOTEMPTY):
                 self.last_error = 183
-                return False
+                return anchored_module.ctypes.c_int32(0xC0000035).value
             raise
         self.handles[handle] = destination
         self.last_error = None
-        return True
+        return 0
+
+    def RtlNtStatusToDosError(self, status):
+        del status
+        return self.last_error if self.last_error is not None else 5
 
     def CloseHandle(self, handle):
         os.close(handle)
@@ -123,6 +136,7 @@ class SimulatedArchiveWindowsKernel(object):
 
 def configure_simulated_windows_archive_creation(monkeypatch, kernel):
     monkeypatch.setattr(anchored_module, "_WINDOWS_KERNEL32", kernel)
+    monkeypatch.setattr(anchored_module, "_WINDOWS_NTDLL", kernel)
     monkeypatch.setattr(anchored_module, "_WINDOWS_OPEN_OSFHANDLE", lambda handle, flags: handle)
     monkeypatch.setattr(anchored_module, "_windows_extended_path", lambda path: str(path))
 
@@ -134,6 +148,7 @@ def configure_simulated_windows_archive_creation(monkeypatch, kernel):
         return error
 
     monkeypatch.setattr(anchored_module, "_windows_error", windows_error)
+    monkeypatch.setattr(anchored_module, "_windows_status_error", lambda status: windows_error())
 
 
 def configure_simulated_windows_archive_input(monkeypatch, kernel):
@@ -2035,6 +2050,7 @@ def test_windows_archive_output_directory_guards_do_not_share_delete(tmp_path, m
     assert all(
         access & anchored_module._WINDOWS_FILE_TRAVERSE
         and access & anchored_module._WINDOWS_FILE_READ_ATTRIBUTES
+        and access & anchored_module._WINDOWS_SYNCHRONIZE
         for _, access, _, _, _ in directory_calls
     )
 
@@ -2094,6 +2110,56 @@ def test_windows_native_directory_publication_reacquires_the_final_guard(tmp_pat
     assert outcome == "unsupported"
     assert final.is_dir()
     assert not displaced.exists()
+
+
+@pytest.mark.windows_native
+@pytest.mark.skipif(os.name != "nt", reason="native Windows handle-relative replacement")
+def test_windows_native_handle_relative_replace_preserves_destination_guard(tmp_path):
+    root = tmp_path / "state"
+
+    with archive_module.AnchoredDirectory(root) as output_tree:
+        candidate_stream, candidate_identity = output_tree.create_file((".candidate",))
+        with candidate_stream:
+            candidate_stream.write(b"candidate")
+        current_stream, current_identity = output_tree.create_file(("current",))
+        with current_stream:
+            current_stream.write(b"current")
+
+        outcome = output_tree.replace(
+            (".candidate",),
+            ("current",),
+            expected_identity=candidate_identity,
+            expected_destination_identity=current_identity,
+        )
+
+    assert outcome == "unsupported"
+    assert not (root / ".candidate").exists()
+    assert (root / "current").read_bytes() == b"candidate"
+
+
+@pytest.mark.windows_native
+@pytest.mark.skipif(os.name != "nt", reason="native Windows handle-relative no-replace")
+def test_windows_native_handle_relative_no_replace_preserves_both_entries(tmp_path):
+    root = tmp_path / "state"
+
+    with archive_module.AnchoredDirectory(root) as output_tree:
+        candidate_stream, candidate_identity = output_tree.create_file((".candidate",))
+        with candidate_stream:
+            candidate_stream.write(b"candidate")
+        current_stream, _ = output_tree.create_file(("current",))
+        with current_stream:
+            current_stream.write(b"current")
+
+        with pytest.raises(ArchiveError, match="destination already exists"):
+            output_tree.replace(
+                (".candidate",),
+                ("current",),
+                expected_identity=candidate_identity,
+                replace_existing=False,
+            )
+
+    assert (root / ".candidate").read_bytes() == b"candidate"
+    assert (root / "current").read_bytes() == b"current"
 
 
 @pytest.mark.windows_native
@@ -2418,7 +2484,13 @@ def test_simulated_windows_handle_rename_replaces_only_the_pinned_destination(
         )
 
     assert outcome in ("flushed", "unsupported")
-    assert kernel.rename_roots == [None]
+    assert len(kernel.rename_roots) == 1
+    assert kernel.rename_roots[0] is not None
+    assert kernel.rename_classes == [anchored_module._WINDOWS_FILE_RENAME_INFORMATION_EX_CLASS]
+    assert kernel.rename_flags == [
+        anchored_module._WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS
+        | anchored_module._WINDOWS_FILE_RENAME_POSIX_SEMANTICS
+    ]
     assert not (root / ".candidate").exists()
     assert (root / "public").read_bytes() == b"candidate"
 
@@ -2446,6 +2518,11 @@ def test_simulated_windows_cross_directory_rename_uses_the_destination_guard(
 
     assert len(kernel.rename_roots) == 1
     assert kernel.rename_roots[0] is not None
+    assert kernel.rename_classes == [anchored_module._WINDOWS_FILE_RENAME_INFORMATION_EX_CLASS]
+    assert kernel.rename_flags == [
+        anchored_module._WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS
+        | anchored_module._WINDOWS_FILE_RENAME_POSIX_SEMANTICS
+    ]
     assert not (root / "source" / "candidate").exists()
     assert (root / "destination" / "published").read_bytes() == b"candidate"
 
@@ -2486,6 +2563,11 @@ def test_simulated_windows_handle_rename_releases_directory_guards_and_never_ove
 
     assert (root / "backend" / "1.0.0").is_dir()
     assert (root / "backend" / ".second").is_dir()
+    assert kernel.rename_classes == [
+        anchored_module._WINDOWS_FILE_RENAME_INFORMATION_CLASS,
+        anchored_module._WINDOWS_FILE_RENAME_INFORMATION_CLASS,
+    ]
+    assert kernel.rename_flags == [0, 0]
 
 
 def test_windows_archive_output_rejects_reparse_returned_handle(tmp_path, monkeypatch):

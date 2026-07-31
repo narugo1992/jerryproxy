@@ -18,6 +18,7 @@ from .identity import capture_identity, identity_matches, validate_identity
 _WINDOWS_DELETE = 0x00010000
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_GENERIC_WRITE = 0x40000000
+_WINDOWS_SYNCHRONIZE = 0x00100000
 _WINDOWS_FILE_TRAVERSE = 0x00000020
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
 _WINDOWS_FILE_SHARE_READ = 0x00000001
@@ -31,7 +32,10 @@ _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _WINDOWS_FILE_ID_INFO_CLASS = 18
-_WINDOWS_FILE_RENAME_INFO_CLASS = 3
+_WINDOWS_FILE_RENAME_INFORMATION_CLASS = 10
+_WINDOWS_FILE_RENAME_INFORMATION_EX_CLASS = 65
+_WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001
+_WINDOWS_FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 _WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 _WINDOWS_UNSUPPORTED_FILE_ID_ERRORS = (1, 50, 87)
 _WINDOWS_DESTINATION_EXISTS_ERRORS = (80, 183)
@@ -85,12 +89,10 @@ class _WindowsFileIdInformation(ctypes.Structure):
     )
 
 
-class _WindowsFileRenameInformation(ctypes.Structure):
+class _WindowsIoStatusBlock(ctypes.Structure):
     _fields_ = (
-        ("replace_if_exists", ctypes.c_uint32),
-        ("root_directory", ctypes.c_void_p),
-        ("file_name_length", ctypes.c_uint32),
-        ("file_name", ctypes.c_uint16 * 1),
+        ("status_or_pointer", ctypes.c_void_p),
+        ("information", ctypes.c_size_t),
     )
 
 
@@ -101,6 +103,7 @@ if ctypes.sizeof(_WindowsFileIdInformation) != 24:  # pragma: no cover - ctypes 
 
 
 _WINDOWS_KERNEL32 = None
+_WINDOWS_NTDLL = None
 _WINDOWS_OPEN_OSFHANDLE = None
 if os.name == "nt":  # pragma: no cover - platform-only Win32 binding declarations
     import msvcrt
@@ -128,13 +131,17 @@ if os.name == "nt":  # pragma: no cover - platform-only Win32 binding declaratio
         ctypes.c_uint32,
     )
     _WINDOWS_KERNEL32.GetFileInformationByHandleEx.restype = ctypes.c_int32
-    _WINDOWS_KERNEL32.SetFileInformationByHandle.argtypes = (
+    _WINDOWS_NTDLL = ctypes.WinDLL("ntdll")
+    _WINDOWS_NTDLL.NtSetInformationFile.argtypes = (
         ctypes.c_void_p,
-        ctypes.c_int,
+        ctypes.POINTER(_WindowsIoStatusBlock),
         ctypes.c_void_p,
         ctypes.c_uint32,
+        ctypes.c_int,
     )
-    _WINDOWS_KERNEL32.SetFileInformationByHandle.restype = ctypes.c_int32
+    _WINDOWS_NTDLL.NtSetInformationFile.restype = ctypes.c_int32
+    _WINDOWS_NTDLL.RtlNtStatusToDosError.argtypes = (ctypes.c_int32,)
+    _WINDOWS_NTDLL.RtlNtStatusToDosError.restype = ctypes.c_uint32
     _WINDOWS_KERNEL32.CloseHandle.argtypes = (ctypes.c_void_p,)
     _WINDOWS_KERNEL32.CloseHandle.restype = ctypes.c_int32
     _WINDOWS_OPEN_OSFHANDLE = msvcrt.open_osfhandle
@@ -155,6 +162,11 @@ def _windows_extended_path(path):
 
 def _windows_error():
     return ctypes.WinError(ctypes.get_last_error())
+
+
+def _windows_status_error(status):
+    error_number = int(_WINDOWS_NTDLL.RtlNtStatusToDosError(status))
+    return ctypes.WinError(error_number)
 
 
 def _windows_information(handle, path):
@@ -200,23 +212,44 @@ def _close_windows_handle(handle, path):
 
 def _rename_windows_handle(source_handle, parent_handle, destination_name, replace_existing):
     payload = destination_name.encode("utf-16-le")
-    buffer = ctypes.create_string_buffer(ctypes.sizeof(_WindowsFileRenameInformation) + len(payload))
-    information = _WindowsFileRenameInformation.from_buffer(buffer)
-    information.replace_if_exists = 1 if replace_existing else 0
-    information.root_directory = None if parent_handle is None else int(parent_handle)
+    file_name_type = ctypes.c_uint16 * (len(payload) // 2 + 2)
+
+    class WindowsFileRenameInformation(ctypes.Structure):
+        _fields_ = (
+            ("replace_or_flags", ctypes.c_uint32),
+            ("root_directory", ctypes.c_void_p),
+            ("file_name_length", ctypes.c_uint32),
+            ("file_name", file_name_type),
+        )
+
+    information = WindowsFileRenameInformation()
+    if replace_existing:
+        information.replace_or_flags = (
+            _WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS | _WINDOWS_FILE_RENAME_POSIX_SEMANTICS
+        )
+        information_class = _WINDOWS_FILE_RENAME_INFORMATION_EX_CLASS
+    else:
+        information.replace_or_flags = 0
+        information_class = _WINDOWS_FILE_RENAME_INFORMATION_CLASS
+    information.root_directory = int(parent_handle)
     information.file_name_length = len(payload)
     ctypes.memmove(
-        ctypes.addressof(buffer) + _WindowsFileRenameInformation.file_name.offset,
+        ctypes.addressof(information) + WindowsFileRenameInformation.file_name.offset,
         payload,
         len(payload),
     )
-    if not _WINDOWS_KERNEL32.SetFileInformationByHandle(
-        source_handle,
-        _WINDOWS_FILE_RENAME_INFO_CLASS,
-        ctypes.byref(buffer),
-        len(buffer),
-    ):
-        error = _windows_error()
+    io_status = _WindowsIoStatusBlock()
+    status = int(
+        _WINDOWS_NTDLL.NtSetInformationFile(
+            source_handle,
+            ctypes.byref(io_status),
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+            information_class,
+        )
+    )
+    if status != 0:
+        error = _windows_status_error(status)
         if not replace_existing and getattr(error, "winerror", None) in _WINDOWS_DESTINATION_EXISTS_ERRORS:
             exists = FileExistsError("anchored replacement destination already exists")
             raise ArchiveError("anchored replacement destination already exists") from exists
@@ -307,7 +340,7 @@ def _rename_posix_noreplace(
 def _open_windows_directory(path, expected_status):
     handle = _WINDOWS_KERNEL32.CreateFileW(
         _windows_extended_path(path),
-        _WINDOWS_FILE_TRAVERSE | _WINDOWS_FILE_READ_ATTRIBUTES,
+        _WINDOWS_FILE_TRAVERSE | _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_SYNCHRONIZE,
         _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
         None,
         _WINDOWS_OPEN_EXISTING,
@@ -449,7 +482,7 @@ def _open_windows_existing_file(path, writable=False):
 def _open_windows_entry(path, expected_identity=None):
     handle = _WINDOWS_KERNEL32.CreateFileW(
         _windows_extended_path(path),
-        _WINDOWS_DELETE | _WINDOWS_FILE_READ_ATTRIBUTES,
+        _WINDOWS_DELETE | _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_SYNCHRONIZE,
         _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE | _WINDOWS_FILE_SHARE_DELETE,
         None,
         _WINDOWS_OPEN_EXISTING,
@@ -1194,11 +1227,7 @@ class AnchoredDirectory(object):
                         destination,
                         expected_identity=expected_destination_identity,
                     )
-                parent_handle = (
-                    None
-                    if source_parent == destination_parent
-                    else self._windows_directories[destination_parent]
-                )
+                parent_handle = self._windows_directories[destination_parent]
                 _rename_windows_handle(source_handle, parent_handle, destination.name, replace_existing)
                 self._verify_root()
                 if expected_identity is not None and not identity_matches(destination, expected_identity):
