@@ -203,7 +203,7 @@ def _rename_windows_handle(source_handle, parent_handle, destination_name, repla
     buffer = ctypes.create_string_buffer(ctypes.sizeof(_WindowsFileRenameInformation) + len(payload))
     information = _WindowsFileRenameInformation.from_buffer(buffer)
     information.replace_if_exists = 1 if replace_existing else 0
-    information.root_directory = int(parent_handle)
+    information.root_directory = None if parent_handle is None else int(parent_handle)
     information.file_name_length = len(payload)
     ctypes.memmove(
         ctypes.addressof(buffer) + _WindowsFileRenameInformation.file_name.offset,
@@ -1194,7 +1194,11 @@ class AnchoredDirectory(object):
                         destination,
                         expected_identity=expected_destination_identity,
                     )
-                parent_handle = self._windows_directories[destination_parent]
+                parent_handle = (
+                    None
+                    if source_parent == destination_parent
+                    else self._windows_directories[destination_parent]
+                )
                 _rename_windows_handle(source_handle, parent_handle, destination.name, replace_existing)
                 self._verify_root()
                 if expected_identity is not None and not identity_matches(destination, expected_identity):

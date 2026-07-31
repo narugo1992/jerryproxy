@@ -34,6 +34,7 @@ class SimulatedArchiveWindowsKernel(object):
         self.handles = {}
         self.opened_handles = []
         self.closed_handles = []
+        self.rename_roots = []
 
     def CreateFileW(self, path, access, share, security, creation, flags, template):
         del security, template
@@ -89,14 +90,16 @@ class SimulatedArchiveWindowsKernel(object):
         information = anchored_module._WindowsFileRenameInformation.from_buffer(buffer)
         replace_existing = bool(information.replace_if_exists)
         parent_handle = information.root_directory
+        self.rename_roots.append(parent_handle)
         name_length = information.file_name_length
         assert size >= anchored_module.ctypes.sizeof(anchored_module._WindowsFileRenameInformation) + name_length
         payload = anchored_module.ctypes.string_at(
             anchored_module.ctypes.addressof(buffer) + anchored_module._WindowsFileRenameInformation.file_name.offset,
             name_length,
         )
-        destination = self.handles[parent_handle] / payload.decode("utf-16-le")
         source = self.handles[handle]
+        destination_parent = source.parent if parent_handle is None else self.handles[parent_handle]
+        destination = destination_parent / payload.decode("utf-16-le")
         try:
             if replace_existing:
                 os.replace(str(source), str(destination))
@@ -2415,8 +2418,36 @@ def test_simulated_windows_handle_rename_replaces_only_the_pinned_destination(
         )
 
     assert outcome in ("flushed", "unsupported")
+    assert kernel.rename_roots == [None]
     assert not (root / ".candidate").exists()
     assert (root / "public").read_bytes() == b"candidate"
+
+
+def test_simulated_windows_cross_directory_rename_uses_the_destination_guard(
+    tmp_path,
+    monkeypatch,
+):
+    kernel = SimulatedArchiveWindowsKernel()
+    configure_simulated_windows_archive_creation(monkeypatch, kernel)
+    root = tmp_path / "root"
+
+    with archive_module.AnchoredDirectory(root) as anchored:
+        anchored.ensure_directory(("source",))
+        anchored.ensure_directory(("destination",))
+        candidate_stream, candidate_identity = anchored.create_file(("source", "candidate"))
+        with candidate_stream:
+            candidate_stream.write(b"candidate")
+
+        anchored.replace(
+            ("source", "candidate"),
+            ("destination", "published"),
+            expected_identity=candidate_identity,
+        )
+
+    assert len(kernel.rename_roots) == 1
+    assert kernel.rename_roots[0] is not None
+    assert not (root / "source" / "candidate").exists()
+    assert (root / "destination" / "published").read_bytes() == b"candidate"
 
 
 def test_simulated_windows_handle_rename_releases_directory_guards_and_never_overwrites(
