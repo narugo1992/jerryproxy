@@ -4623,12 +4623,7 @@ def test_macos_symlink_identity_guard_uses_o_symlink_when_o_path_is_unavailable(
     descriptor = removal_module._open_identity_guard(link, status, CleanupScopeError)
     removal_module._close_identity_guard(descriptor)
 
-    assert opened == [
-        (
-            link,
-            o_symlink | fake_os.O_NOFOLLOW | fake_os.O_CLOEXEC | fake_os.O_NONBLOCK,
-        )
-    ]
+    assert opened == [(link, o_symlink)]
     assert closed == [91]
 
 
