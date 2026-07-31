@@ -181,7 +181,7 @@ jobs:
       - run: python -m pip install -e . -r requirements-test.txt
       - name: Run native Windows hardening tests
         run: >-
-          python -m pytest test -sv -m windows_native
+          python -m pytest test -sv -m unittest
           --junitxml=windows-hardening-junit.xml -o junit_family=legacy
           --cov=jerryproxy --cov-report=term-missing --cov-report=xml
           --cov-fail-under=90

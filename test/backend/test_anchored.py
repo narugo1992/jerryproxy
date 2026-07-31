@@ -111,6 +111,22 @@ def test_create_symlink_rejects_existing_destination(tmp_path):
             anchored.create_symlink(("link",), "target")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows path-based symlink observation")
+def test_windows_path_fallback_reads_a_bound_symlink(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "target"
+    target.write_bytes(b"target")
+    link = root / "link"
+    link.symlink_to(target.name)
+
+    with AnchoredDirectory(root) as anchored:
+        observed_target, identity = anchored.read_symlink(("link",))
+
+    assert observed_target == target.name
+    assert identity["file_type"] == "symlink"
+
+
 def test_replace_uses_tracked_creation_identity(tmp_path):
     root = tmp_path / "root"
     with AnchoredDirectory(root) as anchored:
