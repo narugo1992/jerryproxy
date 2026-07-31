@@ -2076,16 +2076,11 @@ def test_windows_archive_output_directory_guards_block_native_rename(tmp_path, s
     with archive_module.AnchoredDirectory(destination) as output_tree:
         output_tree.ensure_directory(("bin",))
         selected = destination if scope == "root" else destination / "bin"
-        if scope == "root":
-            with pytest.raises(OSError):
-                selected.rename(displaced)
-            assert selected.is_dir()
-            assert not displaced.exists()
-        else:
+        with pytest.raises(OSError):
             selected.rename(displaced)
-            with pytest.raises(ArchiveError, match="ancestor (?:changed|became unavailable)"):
-                output_tree.assert_bound()
-            displaced.rename(selected)
+        assert selected.is_dir()
+        assert not displaced.exists()
+        output_tree.assert_bound()
 
 
 @pytest.mark.windows_native

@@ -377,7 +377,7 @@ class BackendManager(object):
                     "executable_size": executable_size,
                 }
                 transaction.mark_validated(publication, staging_anchor=staging_anchor)
-                transaction.commit()
+            transaction.commit()
         except (ArchiveError, DurabilityError, IntegrityError, OSError) as error:
             # Any ordinary failure after journal publication uses the restart recovery protocol immediately.
             try:

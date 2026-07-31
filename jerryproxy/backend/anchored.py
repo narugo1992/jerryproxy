@@ -1229,6 +1229,21 @@ class AnchoredDirectory(object):
                     )
                 parent_handle = self._windows_directories[destination_parent]
                 _rename_windows_handle(source_handle, parent_handle, destination.name, replace_existing)
+                published_handles = ((destination_handle, destination), (source_handle, source))
+                destination_handle = None
+                source_handle = None
+                close_failure = None
+                for handle, path in published_handles:
+                    if handle is None:
+                        continue
+                    try:
+                        _close_windows_handle(handle, path)
+                    except ArchiveError as error:
+                        # A published entry must not retain either native rename guard.
+                        if close_failure is None:
+                            close_failure = error
+                if close_failure is not None:
+                    raise close_failure
                 self._verify_root()
                 if expected_identity is not None and not identity_matches(destination, expected_identity):
                     raise ArchiveError("anchored replacement published a different entry")
@@ -1237,7 +1252,8 @@ class AnchoredDirectory(object):
             finally:
                 if destination_handle is not None:
                     _close_windows_handle(destination_handle, destination)
-                _close_windows_handle(source_handle, source)
+                if source_handle is not None:
+                    _close_windows_handle(source_handle, source)
             source_outcome = flush_directory(source_parent)
             self._transfer_tracked_identity(source_parts, destination_parts, expected_identity)
             if destination_parent == source_parent:

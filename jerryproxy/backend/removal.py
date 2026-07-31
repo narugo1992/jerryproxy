@@ -572,9 +572,22 @@ def _secure_path_size(root, target, error_type=CleanupScopeError):
     return sum(_secure_path_size(root, child, error_type) for child in entries)
 
 
-def _remove_validated_tree(root, target, error_type, allowed, recursive=True, expected_identity=None):
+def _remove_validated_tree(
+    root,
+    target,
+    error_type,
+    allowed,
+    recursive=True,
+    expected_identity=None,
+    parent_status=None,
+    parent_descriptor=None,
+):
+    owns_parent_descriptor = parent_descriptor is None
     if target in allowed and target.is_symlink():
-        parent_status, parent_descriptor = _open_parent_guard(root, target, error_type)
+        if owns_parent_descriptor:
+            parent_status, parent_descriptor = _open_parent_guard(root, target, error_type)
+        else:
+            _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type)
         target_descriptor = None
         try:
             status = _lstat(target)
@@ -595,7 +608,7 @@ def _remove_validated_tree(root, target, error_type, allowed, recursive=True, ex
                 if target_descriptor is not None:
                     _close_identity_guard(target_descriptor)
             finally:
-                if parent_descriptor is not None:
+                if owns_parent_descriptor and parent_descriptor is not None:
                     _close_identity_guard(parent_descriptor)
     _validate_chain(root, target, error_type)
     status = _lstat(target)
@@ -603,7 +616,10 @@ def _remove_validated_tree(root, target, error_type, allowed, recursive=True, ex
         return False
     if is_path_alias(target):
         _alias_error(error_type, target)
-    parent_status, parent_descriptor = _open_parent_guard(root, target, error_type)
+    if owns_parent_descriptor:
+        parent_status, parent_descriptor = _open_parent_guard(root, target, error_type)
+    else:
+        _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type)
     descriptor = None
     try:
         descriptor = _open_identity_guard(target, status, error_type)
@@ -653,7 +669,14 @@ def _remove_validated_tree(root, target, error_type, allowed, recursive=True, ex
         if current is None or not _matches_guard(current, status, descriptor) or is_path_alias(target):
             raise error_type("managed removal directory changed before deletion: %s" % target)
         for child in entries:
-            _remove_validated_tree(root, child, error_type, allowed)
+            _remove_validated_tree(
+                root,
+                child,
+                error_type,
+                allowed,
+                parent_status=status,
+                parent_descriptor=descriptor,
+            )
         _validate_chain(root, target, error_type)
         current = _lstat(target)
         if current is None:
@@ -669,7 +692,7 @@ def _remove_validated_tree(root, target, error_type, allowed, recursive=True, ex
             if descriptor is not None:
                 _close_identity_guard(descriptor)
         finally:
-            if parent_descriptor is not None:
+            if owns_parent_descriptor and parent_descriptor is not None:
                 _close_identity_guard(parent_descriptor)
 
 

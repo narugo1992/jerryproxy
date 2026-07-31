@@ -193,6 +193,7 @@ class SimulatedWindowsKernel(object):
         self.failure = failure
         self.before_delete = before_delete
         self.handles = {}
+        self.opened_paths = []
         self.delete_calls = []
         self.next_handle = 1000
 
@@ -213,6 +214,7 @@ class SimulatedWindowsKernel(object):
         handle = self.next_handle
         self.next_handle += 1
         self.handles[handle] = native
+        self.opened_paths.append(native)
         return handle
 
     def GetFileInformationByHandle(self, handle, information_pointer):
@@ -4852,6 +4854,28 @@ def test_clean_deletes_through_a_simulated_windows_identity_handle(tmp_path, mon
     assert result.targets_removed == 1
     assert not target.exists()
     assert len(kernel.delete_calls) == 1
+    assert kernel.handles == {}
+
+
+def test_clean_simulated_windows_nested_tree_reuses_each_pinned_parent(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    target = manager.paths.logs / "runtime"
+    nested = target / "nested"
+    nested.mkdir(parents=True)
+    payload = nested / "payload.log"
+    payload.write_bytes(b"managed")
+    kernel = SimulatedWindowsKernel()
+    monkeypatch.setattr(removal_module, "_WINDOWS_KERNEL32", kernel)
+    monkeypatch.setattr(removal_module, "_windows_error", lambda: OSError("Windows API failure"))
+
+    result = manager.clean(areas=("logs",))
+
+    assert result.targets_removed == 1
+    assert not target.exists()
+    assert kernel.opened_paths.count(target) == 1
+    assert kernel.opened_paths.count(nested) == 1
+    assert kernel.opened_paths.count(payload) == 1
     assert kernel.handles == {}
 
 
