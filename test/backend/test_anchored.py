@@ -1,6 +1,7 @@
 import errno
 import os
 import stat
+from types import SimpleNamespace
 
 import pytest
 
@@ -376,13 +377,150 @@ def test_linux_atomic_rename_syscall_dispatch_supports_release_architectures(
         syscall = Syscall()
 
     monkeypatch.setattr(anchored_module.sys, "platform", "linux")
-    monkeypatch.setattr(anchored_module.os, "uname", lambda: type("Uname", (), {"machine": machine})())
+    monkeypatch.setattr(
+        anchored_module.os,
+        "uname",
+        lambda: type("Uname", (), {"machine": machine})(),
+        raising=False,
+    )
     monkeypatch.setattr(anchored_module.ctypes, "CDLL", lambda *args, **kwargs: Libc())
 
     getattr(anchored_module, rename)(11, "source", 12, "destination")
 
     assert calls
     assert calls[0][0].value == expected_syscall
+
+
+@pytest.mark.parametrize(
+    ("rename", "expected_flag"),
+    (
+        ("_rename_posix_noreplace", anchored_module._RENAME_EXCL),
+        ("_rename_posix_exchange", anchored_module._RENAME_SWAP),
+    ),
+)
+def test_macos_atomic_rename_dispatch_uses_the_required_native_flag(
+    monkeypatch,
+    rename,
+    expected_flag,
+):
+    calls = []
+
+    class NativeRename(object):
+        def __call__(self, *args):
+            calls.append(args)
+            return 0
+
+    class Libc(object):
+        renameatx_np = NativeRename()
+
+    monkeypatch.setattr(anchored_module.sys, "platform", "darwin")
+    monkeypatch.setattr(anchored_module.ctypes, "CDLL", lambda *args, **kwargs: Libc())
+
+    getattr(anchored_module, rename)(11, "source", 12, "destination")
+
+    assert calls == [(11, b"source", 12, b"destination", expected_flag)]
+
+
+def test_posix_entry_isolation_rechecks_the_moved_identity_before_returning(monkeypatch):
+    status = SimpleNamespace(
+        st_dev=17,
+        st_ino=23,
+        st_mode=stat.S_IFREG | 0o600,
+    )
+    calls = []
+
+    def rename_noreplace(source_parent, source_name, destination_parent, destination_name):
+        calls.append((source_parent, source_name, destination_parent, destination_name))
+
+    monkeypatch.setattr(anchored_module.secrets, "token_hex", lambda size: "a" * (size * 2))
+    monkeypatch.setattr(anchored_module.os, "stat", lambda *args, **kwargs: status)
+
+    quarantine, moved = anchored_module._isolate_posix_entry(
+        91,
+        "managed",
+        anchored_module._identity(status),
+        ".jerryproxy-test-",
+        rename_noreplace,
+    )
+
+    assert quarantine == ".jerryproxy-test-" + "a" * 32
+    assert moved is status
+    assert calls == [(91, "managed", 91, quarantine)]
+
+
+@pytest.mark.parametrize("restore_fails", (False, True))
+def test_posix_entry_isolation_handles_a_substituted_moved_object(monkeypatch, restore_fails):
+    expected = SimpleNamespace(
+        st_dev=17,
+        st_ino=23,
+        st_mode=stat.S_IFREG | 0o600,
+    )
+    substitute = SimpleNamespace(
+        st_dev=17,
+        st_ino=29,
+        st_mode=stat.S_IFREG | 0o600,
+    )
+    calls = []
+
+    def rename_noreplace(source_parent, source_name, destination_parent, destination_name):
+        calls.append((source_parent, source_name, destination_parent, destination_name))
+        if restore_fails and len(calls) == 2:
+            raise OSError("simulated restore failure")
+
+    monkeypatch.setattr(anchored_module.secrets, "token_hex", lambda size: "b" * (size * 2))
+    monkeypatch.setattr(anchored_module.os, "stat", lambda *args, **kwargs: substitute)
+
+    message = "substitute retained in quarantine" if restore_fails else "changed at the isolation boundary"
+    with pytest.raises(ArchiveError, match=message):
+        anchored_module._isolate_posix_entry(
+            91,
+            "managed",
+            anchored_module._identity(expected),
+            ".jerryproxy-test-",
+            rename_noreplace,
+        )
+
+    quarantine = ".jerryproxy-test-" + "b" * 32
+    assert calls == [
+        (91, "managed", 91, quarantine),
+        (91, quarantine, 91, "managed"),
+    ]
+
+
+def test_posix_entry_isolation_bounds_private_name_collisions():
+    calls = []
+
+    def collide(*args):
+        calls.append(args)
+        raise FileExistsError("simulated private-name collision")
+
+    with pytest.raises(ArchiveError, match="unable to allocate a private anchored quarantine name"):
+        anchored_module._isolate_posix_entry(
+            91,
+            "managed",
+            (17, 23, stat.S_IFREG),
+            ".jerryproxy-test-",
+            collide,
+        )
+
+    assert len(calls) == 4
+
+
+def test_posix_entry_isolation_rejects_an_uninspectable_moved_object(monkeypatch):
+    def fail_stat(*args, **kwargs):
+        del args, kwargs
+        raise OSError("simulated inspection failure")
+
+    monkeypatch.setattr(anchored_module.os, "stat", fail_stat)
+
+    with pytest.raises(ArchiveError, match="unable to inspect the isolated anchored entry"):
+        anchored_module._isolate_posix_entry(
+            91,
+            "managed",
+            (17, 23, stat.S_IFREG),
+            ".jerryproxy-test-",
+            lambda *args: None,
+        )
 
 
 @pytest.mark.parametrize("python_exposes_flag", (True, False))

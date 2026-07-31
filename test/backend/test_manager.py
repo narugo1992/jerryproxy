@@ -1395,6 +1395,8 @@ def _crash_inside_windows_activation_recovery(home, crash_point):
 
     def crash_after_native_rename(source_handle, parent_handle, destination_name, replace_existing):
         result = original_native_rename(source_handle, parent_handle, destination_name, replace_existing)
+        if ".candidate" in destination_name and crash_point == "public-deleted":
+            os._exit(194)
         if crash_point == "repair-replaced-before-parent-flush" and destination_name == "mihomo.exe":
             os._exit(185)
         if (
@@ -1411,7 +1413,7 @@ def _crash_inside_windows_activation_recovery(home, crash_point):
             os._exit(186)
         return result
 
-    def crash_after_journal_parent_flush(anchored, source_parts, destination_parts, *args, **kwargs):
+    def crash_after_anchored_replace(anchored, source_parts, destination_parts, *args, **kwargs):
         result = original_anchored_replace(
             anchored,
             source_parts,
@@ -1427,6 +1429,13 @@ def _crash_inside_windows_activation_recovery(home, crash_point):
             and ".tmp-" not in destination_name
         ):
             os._exit(192)
+        source_name = source_parts[-1]
+        if (
+            crash_point == "public-delete-parent-flushed"
+            and ".candidate" in destination_name
+            and source_name in ("mihomo.exe", "mihomo.json")
+        ):
+            os._exit(195)
         return result
 
     def crash_after_remove(root, target, *args, **kwargs):
@@ -1436,10 +1445,6 @@ def _crash_inside_windows_activation_recovery(home, crash_point):
             removed_kind["value"] = "candidate"
             if crash_point == "candidate-deleted":
                 os._exit(187)
-        elif target.parent in (paths.bin, paths.active):
-            removed_kind["value"] = "public"
-            if crash_point == "public-deleted":
-                os._exit(194)
         elif target.parent == paths.runtimes and target.name.startswith(".use-") and ".tmp-" not in target.name:
             removed_kind["value"] = "journal"
             if crash_point == "journal-deleted":
@@ -1452,8 +1457,6 @@ def _crash_inside_windows_activation_recovery(home, crash_point):
             os._exit(188)
         if crash_point == "journal-delete-parent-flushed" and removed_kind["value"] == "journal":
             os._exit(190)
-        if crash_point == "public-delete-parent-flushed" and removed_kind["value"] == "public":
-            os._exit(195)
         return result
 
     def crash_after_journal_file_flush(descriptor, kind):
@@ -1470,7 +1473,7 @@ def _crash_inside_windows_activation_recovery(home, crash_point):
     activation_module._write_activation_record = crash_after_journal
     anchored_module._rename_windows_handle = crash_after_native_rename
     activation_module.durable_replace = crash_after_repair_parent_flush
-    anchored_module.AnchoredDirectory.replace = crash_after_journal_parent_flush
+    anchored_module.AnchoredDirectory.replace = crash_after_anchored_replace
     activation_module._secure_remove_tree = crash_after_remove
     activation_module.flush_directory = crash_after_remove_parent_flush
     anchored_module.flush_descriptor = crash_after_journal_file_flush

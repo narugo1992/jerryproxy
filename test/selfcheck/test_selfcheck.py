@@ -1578,7 +1578,12 @@ def test_recovery_child_error_diagnostic_does_not_replace_the_child_exit_on_clos
     monkeypatch,
 ):
     monkeypatch.setattr(selfcheck_module.os, "open", lambda *args, **kwargs: 91)
-    monkeypatch.setattr(selfcheck_module.os, "fchmod", lambda descriptor, mode: None)
+    monkeypatch.setattr(
+        selfcheck_module.os,
+        "fchmod",
+        lambda descriptor, mode: None,
+        raising=False,
+    )
     monkeypatch.setattr(selfcheck_module.os, "write", lambda descriptor, payload: len(payload))
 
     def fail_close(descriptor):

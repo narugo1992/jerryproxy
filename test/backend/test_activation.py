@@ -448,7 +448,7 @@ def test_activation_journal_accepts_displaced_discarding_purpose_from_opposite_d
             "purpose": "recovery-target",
             "state": "discarding",
             "identity": _candidate_identity("symlink"),
-            "target": "../backends/mihomo/2.0.0/mihomo",
+            "target": os.path.relpath(value["target"]["executable"], "bin"),
         }
     )
     journal = _write_journal(paths, value)
@@ -913,6 +913,63 @@ def test_recovery_resume_advances_candidate_disposal_before_public_repair(tmp_pa
     assert third.action == "persist-candidate-absent"
     fourth = plan_activation_recovery(third.journal, missing)
     assert (fourth.action, fourth.object_name) == ("start-repair-candidate", "link")
+
+
+def test_recovery_planner_adopts_a_displaced_previous_link_from_the_target_candidate(tmp_path):
+    paths = _layout(tmp_path)
+    value = _journal(paths)
+    value["recovery"] = {"direction": "rollback-previous"}
+    displaced_identity = _candidate_identity("symlink")
+    value["candidates"]["link"].update(
+        {
+            "state": "ready",
+            "identity": _candidate_identity("symlink"),
+            "target": os.path.relpath(value["target"]["executable"], "bin"),
+            "displaced_identity": displaced_identity,
+            "displaced_purpose": "previous",
+        }
+    )
+    classification = ActivationClassification("T", "P", "displaced-public", "missing")
+
+    plan = plan_activation_recovery(value, classification)
+
+    candidate = plan.journal["candidates"]["link"]
+    assert (plan.action, plan.object_name) == ("persist-displaced-candidate", "link")
+    assert candidate["purpose"] == "recovery-previous"
+    assert candidate["state"] == "discarding"
+    assert candidate["identity"] == displaced_identity
+    assert candidate["target"] == os.path.relpath(value["previous"]["executable"], "bin")
+    assert candidate["displaced_identity"] is None
+    assert candidate["displaced_purpose"] is None
+
+
+def test_recovery_planner_adopts_a_displaced_target_link_from_the_repair_candidate(tmp_path):
+    paths = _layout(tmp_path)
+    value = _journal(paths, phase="link-ready")
+    value["recovery"] = {"direction": "rollback-previous"}
+    displaced_identity = _candidate_identity("symlink")
+    value["candidates"]["link"].update(
+        {
+            "purpose": "recovery-previous",
+            "state": "ready",
+            "identity": _candidate_identity("symlink"),
+            "target": os.path.relpath(value["previous"]["executable"], "bin"),
+            "displaced_identity": displaced_identity,
+            "displaced_purpose": "target",
+        }
+    )
+    classification = ActivationClassification("P", "P", "displaced-public", "missing")
+
+    plan = plan_activation_recovery(value, classification)
+
+    candidate = plan.journal["candidates"]["link"]
+    assert (plan.action, plan.object_name) == ("persist-displaced-candidate", "link")
+    assert candidate["purpose"] == "recovery-target"
+    assert candidate["state"] == "discarding"
+    assert candidate["identity"] == displaced_identity
+    assert candidate["target"] == os.path.relpath(value["target"]["executable"], "bin")
+    assert candidate["displaced_identity"] is None
+    assert candidate["displaced_purpose"] is None
 
 
 def test_recover_record_reclassifies_and_rejects_unknown_public_state(tmp_path):
