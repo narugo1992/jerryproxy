@@ -5161,13 +5161,21 @@ def test_clean_windows_handle_fails_closed_after_final_path_replacement(
             manager.clean(areas=("logs",))
 
         assert error.value.winerror in (5, 32)
-        assert swaps == [target]
-        if directory:
-            assert removal_module.is_path_alias(target)
-            assert outside.is_dir()
-            assert outside_marker.read_bytes() == b"outside"
+        if error.value.winerror == 32:
+            assert swaps == []
+            if directory:
+                assert target.is_dir()
+            else:
+                assert target.read_bytes() == b"managed"
         else:
-            assert target.read_bytes() == b"replacement"
+            assert swaps == [target]
+            if directory:
+                assert removal_module.is_path_alias(target)
+                assert outside.is_dir()
+                assert outside_marker.read_bytes() == b"outside"
+            else:
+                assert target.read_bytes() == b"replacement"
+        assert outside_marker.read_bytes() == b"outside"
         assert_windows_identity_guards_closed(opened, closed)
     finally:
         if directory and removal_module.is_path_alias(target):
@@ -5557,7 +5565,9 @@ def test_remove_rolls_back_a_download_junction_swapped_during_rename(tmp_path, m
             match="anchored removal staging|managed path alias",
         ):
             manager.uninstall("mihomo", "1.0.0", cache=True)
-        assert not list(manager.paths.runtimes.glob(".remove-*"))
+        transactions = list(manager.paths.runtimes.glob(".remove-*"))
+        assert len(transactions) == 1
+        assert (transactions[0] / "journal.json").is_file()
         assert marker.read_bytes() == b"outside"
         assert not cached.exists()
         assert (saved_root / "1.0.0" / "archive.gz").read_bytes() == b"managed"
@@ -7178,8 +7188,12 @@ def test_committed_recovery_windows_journal_replacement_preserves_substitute(
 
     assert isinstance(error.value.__cause__, PermissionError)
     assert error.value.__cause__.winerror in (5, 32)
-    assert swapped == [journal]
-    assert journal.read_bytes() == b"replacement"
+    if error.value.__cause__.winerror == 32:
+        assert swapped == []
+        assert read_json(journal)["phase"] == "committed"
+    else:
+        assert swapped == [journal]
+        assert journal.read_bytes() == b"replacement"
     assert_windows_identity_guards_closed(opened, closed)
 
 
@@ -7229,8 +7243,13 @@ def test_committed_recovery_windows_transaction_replacement_preserves_external_d
 
         assert isinstance(error.value.__cause__, PermissionError)
         assert error.value.__cause__.winerror in (5, 32)
-        assert swapped == [transaction]
-        assert removal_module.is_path_alias(transaction)
+        if error.value.__cause__.winerror == 32:
+            assert swapped == []
+            assert transaction.is_dir()
+            assert not removal_module.is_path_alias(transaction)
+        else:
+            assert swapped == [transaction]
+            assert removal_module.is_path_alias(transaction)
         assert outside.is_dir()
         assert outside_marker.read_bytes() == b"outside"
         assert_windows_identity_guards_closed(opened, closed)

@@ -2,6 +2,7 @@ import ctypes
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -186,6 +187,19 @@ def test_windows_identity_uses_exact_legacy_fallback(tmp_path, monkeypatch):
     configure_simulated_windows_identity(monkeypatch, kernel)
     path = tmp_path / "payload"
     path.write_bytes(b"payload")
+    status = path.lstat()
+    original_lstat = Path.lstat
+
+    def legacy_lstat(selected):
+        if selected == path:
+            return SimpleNamespace(
+                st_mode=status.st_mode,
+                st_dev=int(status.st_dev) & 0xFFFFFFFF,
+                st_ino=status.st_ino,
+            )
+        return original_lstat(selected)
+
+    monkeypatch.setattr(Path, "lstat", legacy_lstat)
 
     identity = capture_identity(path)
 
@@ -330,7 +344,13 @@ def test_identity_capture_preserves_absence_and_maps_inspection_failures(tmp_pat
 def test_identity_match_maps_inspection_failures_and_rejects_foreign_shapes(tmp_path, monkeypatch):
     path = tmp_path / "payload"
     path.write_bytes(b"payload")
-    posix_identity = capture_identity(path)
+    status = path.lstat()
+    posix_identity = {
+        "kind": "posix",
+        "device": int(status.st_dev),
+        "inode": int(status.st_ino),
+        "file_type": "regular",
+    }
     windows_identity = {
         "kind": "windows-file-id",
         "volume_serial": "0" * 16,

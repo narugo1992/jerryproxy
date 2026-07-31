@@ -27,8 +27,8 @@ POSIX_FAULT_INJECTION = pytest.mark.skipif(
     reason="requires POSIX descriptors and replaceable open filesystem objects",
 )
 SIMULATED_WINDOWS_BINDING = pytest.mark.skipif(
-    os.name == "nt",
-    reason="simulated Win32 bindings use POSIX descriptors; native behavior has a dedicated lane",
+    False,
+    reason="portable simulated Win32 binding",
 )
 
 
@@ -46,6 +46,20 @@ class SimulatedArchiveWindowsKernel(object):
         self.rename_roots = []
         self.rename_classes = []
         self.rename_flags = []
+        self.synthetic_handles = set()
+        self.next_synthetic_handle = 1 << 30
+
+    def _new_synthetic_handle(self, path):
+        handle = self.next_synthetic_handle
+        self.next_synthetic_handle += 1
+        self.handles[handle] = path
+        self.synthetic_handles.add(handle)
+        return handle
+
+    def _status(self, handle):
+        if handle in self.synthetic_handles:
+            return self.handles[handle].stat()
+        return os.fstat(handle)
 
     def CreateFileW(self, path, access, share, security, creation, flags, template):
         del security, template
@@ -54,6 +68,11 @@ class SimulatedArchiveWindowsKernel(object):
         try:
             if creation == anchored_module._WINDOWS_CREATE_NEW:
                 descriptor = os.open(str(native), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                if os.name == "nt":
+                    os.close(descriptor)
+                    descriptor = self._new_synthetic_handle(native)
+            elif os.name == "nt":
+                descriptor = self._new_synthetic_handle(native)
             else:
                 open_flags = os.O_RDWR if access & anchored_module._WINDOWS_GENERIC_WRITE else os.O_RDONLY
                 if native.is_dir():
@@ -67,7 +86,7 @@ class SimulatedArchiveWindowsKernel(object):
 
     def GetFileInformationByHandle(self, handle, information_pointer):
         path = self.handles[handle]
-        status = os.fstat(handle)
+        status = self._status(handle)
         information = information_pointer._obj
         information.file_attributes = 0
         if stat.S_ISDIR(status.st_mode):
@@ -86,7 +105,7 @@ class SimulatedArchiveWindowsKernel(object):
         del information_class, size
         if self.modern_failure in ("unsupported", "denied"):
             return False
-        status = os.fstat(handle)
+        status = self._status(handle)
         information = information_pointer._obj
         information.volume_serial_number = int(status.st_dev)
         file_id = 0 if self.modern_failure == "zero" else int(status.st_ino)
@@ -137,7 +156,10 @@ class SimulatedArchiveWindowsKernel(object):
         return self.last_error if self.last_error is not None else 5
 
     def CloseHandle(self, handle):
-        os.close(handle)
+        if handle in self.synthetic_handles:
+            self.synthetic_handles.remove(handle)
+        else:
+            os.close(handle)
         self.handles.pop(handle, None)
         self.closed_handles.append(handle)
         return True
@@ -146,7 +168,14 @@ class SimulatedArchiveWindowsKernel(object):
 def configure_simulated_windows_archive_creation(monkeypatch, kernel):
     monkeypatch.setattr(anchored_module, "_WINDOWS_KERNEL32", kernel)
     monkeypatch.setattr(anchored_module, "_WINDOWS_NTDLL", kernel)
-    monkeypatch.setattr(anchored_module, "_WINDOWS_OPEN_OSFHANDLE", lambda handle, flags: handle)
+    def transfer_handle(handle, flags):
+        if handle not in kernel.synthetic_handles:
+            return handle
+        path = kernel.handles.pop(handle)
+        kernel.synthetic_handles.remove(handle)
+        return os.open(str(path), flags)
+
+    monkeypatch.setattr(anchored_module, "_WINDOWS_OPEN_OSFHANDLE", transfer_handle)
     monkeypatch.setattr(anchored_module, "_windows_extended_path", lambda path: str(path))
 
     def windows_error():
@@ -165,9 +194,12 @@ def configure_simulated_windows_archive_input(monkeypatch, kernel):
     monkeypatch.setattr(archive_module, "_windows_extended_path", lambda path: str(path), raising=False)
 
     def transfer_handle(handle, flags):
-        del flags
-        kernel.handles.pop(handle, None)
-        return handle
+        if handle not in kernel.synthetic_handles:
+            kernel.handles.pop(handle, None)
+            return handle
+        path = kernel.handles.pop(handle)
+        kernel.synthetic_handles.remove(handle)
+        return os.open(str(path), flags)
 
     monkeypatch.setattr(archive_module, "_WINDOWS_OPEN_OSFHANDLE", transfer_handle, raising=False)
 
@@ -699,6 +731,7 @@ def test_zip_extraction_rejects_noncanonical_cross_platform_names(tmp_path, memb
     if member_name == "bin\\xray":
         raw = archive.read_bytes().replace(b"bin/xray", b"bin\\xray")
         archive.write_bytes(raw)
+        message = "backslash|ZIP member plan changed after preflight"
 
     with pytest.raises(ArchiveError, match=message):
         extract_archive(archive, tmp_path / "output", "xray")

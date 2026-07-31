@@ -389,6 +389,40 @@ def test_active_state_maps_alias_inspection_failures_to_integrity(tmp_path, monk
         manager.current("mihomo")
 
 
+def test_active_state_maps_resource_alias_api_failures_to_integrity(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    _install(manager, tmp_path, activate=True)
+    manifest = manager.paths.active / "mihomo.json"
+    original_alias_check = state_module.is_path_alias
+
+    def deny_manifest(path):
+        if Path(path) == manifest:
+            raise PermissionError("simulated active resource alias denial")
+        return original_alias_check(path)
+
+    monkeypatch.setattr(state_module, "is_path_alias", deny_manifest)
+
+    with pytest.raises(IntegrityError, match="invalid active backend manifest"):
+        manager.current("mihomo")
+
+
+def test_installed_state_maps_ancestor_alias_api_failures_to_integrity(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    installed = _install(manager, tmp_path)
+    denied = installed.manifest.parent
+    original_alias_check = state_module.is_path_alias
+
+    def deny_version_directory(path):
+        if Path(path) == denied:
+            raise PermissionError("simulated installed ancestor alias denial")
+        return original_alias_check(path)
+
+    monkeypatch.setattr(state_module, "is_path_alias", deny_version_directory)
+
+    with pytest.raises(IntegrityError, match="unable to inspect managed path"):
+        manager.get_installed("mihomo", "1.0.0")
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
