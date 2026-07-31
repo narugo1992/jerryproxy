@@ -213,6 +213,39 @@ _RUNTIME_LIMIT_ATTRIBUTES = {
     "extension_bytes": "maximum_extension_bytes",
     "total_extension_bytes": "maximum_total_extension_bytes",
 }
+_PIN_FIELDS = {
+    "backend",
+    "format",
+    "name",
+    "platform",
+    "sha256",
+    "size",
+    "url",
+    "version",
+}
+_INTEGER_METRIC_FIELDS = {
+    "aggregate_path_bytes",
+    "component_bytes",
+    "compressed_bytes",
+    "directories",
+    "explicit_directories",
+    "extension_bytes",
+    "files",
+    "gzip_members",
+    "implicit_directories",
+    "largest_file_bytes",
+    "members",
+    "path_bytes",
+    "path_depth",
+    "tar_raw_stream_bytes",
+    "total_extension_bytes",
+    "total_extracted_bytes",
+    "zip_central_directory_bytes",
+    "zip_central_directory_offset",
+}
+_INTEGER_LIST_METRIC_FIELDS = {"gzip_flags", "zip_flags", "zip_methods"}
+_STRING_LIST_METRIC_FIELDS = {"tar_extension_types"}
+_MEASUREMENT_FIELDS = _PIN_FIELDS | _INTEGER_METRIC_FIELDS | _INTEGER_LIST_METRIC_FIELDS | _STRING_LIST_METRIC_FIELDS
 
 
 def _cache_name(item):
@@ -528,16 +561,50 @@ def _write_measurements(cache, output):
     Path(output).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _validate_artifact_measurement(record, pinned):
+    if not isinstance(record, dict) or set(record) != _MEASUREMENT_FIELDS:
+        raise ValueError("invalid archive corpus artifact measurement object")
+    for field in _PIN_FIELDS:
+        if record[field] != pinned[field]:
+            raise ValueError("archive corpus artifact pin differs from the reviewed source: %s" % field)
+    for field in _INTEGER_METRIC_FIELDS:
+        value = record[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("invalid archive corpus integer metric: %s" % field)
+    for field in _INTEGER_LIST_METRIC_FIELDS:
+        value = record[field]
+        if not isinstance(value, list) or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value
+        ):
+            raise ValueError("invalid archive corpus integer-list metric: %s" % field)
+        if value != sorted(set(value)):
+            raise ValueError("archive corpus integer-list metric is not sorted and unique: %s" % field)
+    for field in _STRING_LIST_METRIC_FIELDS:
+        value = record[field]
+        if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+            raise ValueError("invalid archive corpus string-list metric: %s" % field)
+        if value != sorted(set(value)):
+            raise ValueError("archive corpus string-list metric is not sorted and unique: %s" % field)
+    if record["compressed_bytes"] != pinned["size"]:
+        raise ValueError("archive corpus compressed size differs from the pinned artifact")
+    if record["directories"] != record["explicit_directories"] + record["implicit_directories"]:
+        raise ValueError("archive corpus directory metrics are inconsistent")
+    for field, limit in LIMITS.items():
+        if record[field] > limit:
+            raise ValueError("archive corpus measurement exceeds the reviewed safety limit: %s" % field)
+
+
 def _validate_measurements(path):
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict) or set(value) != {"limits", "maxima", "artifacts"}:
         raise ValueError("invalid archive corpus measurement object")
     if value["limits"] != LIMITS:
         raise ValueError("archive corpus limits differ from the reviewed source limits")
-    expected = [(item["backend"], item["version"], item["platform"]) for item in PINNED_ARTIFACTS]
-    actual = [(item["backend"], item["version"], item["platform"]) for item in value["artifacts"]]
-    if actual != expected:
+    artifacts = value["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) != len(PINNED_ARTIFACTS):
         raise ValueError("archive corpus artifact roster differs from the pinned roster")
+    for record, pinned in zip(artifacts, PINNED_ARTIFACTS):
+        _validate_artifact_measurement(record, pinned)
     maxima = _maxima(value["artifacts"])
     if value["maxima"] != maxima:
         raise ValueError("archive corpus maxima do not match the measured artifacts")

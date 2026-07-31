@@ -286,6 +286,89 @@ Do not allow remotely downloaded Python plugins in the initial architecture.
 Backend drivers execute high-privilege lifecycle operations and must remain
 built in until a separate trust model is designed.
 
+## Self-check integration discipline
+
+`jerryproxy self-check` is the installed-product integration diagnostic for an
+unknown host. It complements deterministic unit tests; it must not duplicate
+private branch coverage or replace the normal test matrix.
+
+- Print the JerryProxy version, Python implementation and version, frozen-build
+  state, operating system, release, machine architecture, `os.name`, and the
+  selected home before check items run. Do not print hostnames, credentials, or
+  subscription material.
+- Give each major business capability its own check item. Keep resource access,
+  catalog selection, locking, isolated backend lifecycle, install recovery,
+  activation rollback, activation rollforward, removal rollback, removal
+  rollforward, inventory, and each relay probe independently identifiable.
+- Resource-file checks must call the packaged Python API that owns the resource.
+  They must not open package-data paths directly. Verify existing data
+  consistency contracts through that API, but do not invent a schema or
+  migration mechanism for data that has no such contract.
+- A key upstream dependency check must execute one small real capability, not
+  merely import the package or compare a version string. In particular,
+  `filelock` must demonstrate exclusive acquisition, contention, release, and
+  reacquisition; Requests relay checks must perform their bounded streamed
+  verification.
+- Business probes must use public managers, transactions, and packaged resource
+  APIs where practical. Run mutating probes only in private temporary homes,
+  use local synthetic backend archives, disable backend execution, perform no
+  upstream backend download, and leave the configured user home untouched.
+- Recovery diagnostics must use spawned child processes that terminate through
+  a real hard exit after durable transaction milestones. The parent must
+  reacquire the normal home-wide lock and verify rollback or rollforward,
+  active-command usability, and removal of recovery evidence. Keep every child
+  and network wait bounded by explicit per-operation and total timeouts. A
+  timed-out child must be terminated, escalated to a hard kill if necessary,
+  joined, and reported as ERR rather than left running. Prefer `spawn` on every
+  platform so bounded process startup does not fork from its supervising
+  thread; use `fork` only when `spawn` is unavailable.
+- Process startup itself belongs to the same total deadline as child execution.
+  Run the blocking start call in a daemon supervision thread. A new child must
+  wait behind a parent authorization gate and must exit on cancellation, so a
+  start call that returns after the deadline cannot enter business code or
+  remain as an unmanaged child.
+- Production relay checks must run in dedicated child processes. The parent
+  enforces one 30-second wall-clock deadline across child startup, redirects,
+  response headers, empty chunks, and streaming. Deterministic unit tests may
+  inject a session factory and run the transport probe inline. A deadline is
+  ``WARN`` only after the child is confirmed stopped; an unstoppable child is
+  ``ERR``.
+- Child result transport must be file-based or otherwise provably bounded and
+  nonblocking. The parent must stop or join the child before reading its result
+  and must never perform an unbounded pipe receive after a readiness signal.
+  Result files require strict schema, type, size, and encoding validation.
+- Redirect unexpected child stderr to a private capture before business code
+  runs, and redirect raw file descriptor 2 away from the caller terminal.
+  Buffer complete bounded lines across writes, redact them before persistence,
+  and only then apply the capture limit. Capture files must be mode ``0600``
+  where POSIX modes apply, bounded before reading, redacted again before
+  rendering, and read only after the child is stopped.
+- Child cleanup is an independent best-effort sequence: bounded join,
+  terminate, bounded join, hard kill when still alive, and final bounded join.
+  A failure in one stage must be recorded but must never suppress later cleanup
+  stages. Treat an unreadable liveness state as alive and attempt the hard kill.
+- Report `SKIP` in cyan when a system, Python runtime, packaging mode, or failed
+  prerequisite makes a check meaningless or impossible. A skip is neither a
+  success claim nor an error and never changes the exit code. Do not use SKIP to
+  hide a check that started and then failed.
+- `OK`, `WARN`, and `SKIP` output stays to one line per item. `FAIL` and `ERR`
+  must state the failed invariant or exception. `ERR` and abnormal child exits
+  should include bounded, redacted traceback or child-log lines when available.
+  Unexpected process crashes may retain a captured, bounded runtime traceback.
+  Never expose effective relay URLs, URL queries, provider contents, tokens,
+  UUIDs, keys, or backend output that has not passed the normal redaction
+  boundary.
+- Apply diagnostic redaction at both exception/child-log capture and final
+  rendering boundaries, before length limits. Redact complete URLs, named
+  passwords and tokens, UUIDs, public/private key material, and short IDs.
+- Only `FAIL` and `ERR` produce a nonzero final exit code. `WARN` and `SKIP`
+  retain zero. Keep this rule covered through the public command and renderer.
+- Unit tests for self-check must cover status rendering, colors, exit semantics,
+  prerequisite skips, diagnostic detail, bounded timeouts, isolation from the
+  configured home, and at least one real spawn-based recovery path. Standalone
+  CI must continue to execute the packaged binary's `self-check --color` so
+  frozen multiprocessing and packaged resources receive end-to-end evidence.
+
 ## Testing and commands
 
 ```shell
@@ -324,8 +407,9 @@ The product unit-test boundary is the `jerryproxy` package. Do not create a
 unit-test scripts below `tools/`. Validate maintenance tools through their
 dedicated Make targets and repository workflows instead.
 
-Self-check has exactly four levels: `OK` is green, `WARN` is yellow, and
-`FAIL`/`ERR` are red. Only `FAIL` and `ERR` contribute a nonzero exit status.
+Self-check has exactly five levels: `OK` is green, `WARN` is yellow, `SKIP` is
+cyan, and `FAIL`/`ERR` are red. Only `FAIL` and `ERR` contribute a nonzero exit
+status.
 
 Every unit-test matrix cell must produce its own `coverage.xml` and upload it to
 Codecov with the shared `python` aggregation flag and a unique environment

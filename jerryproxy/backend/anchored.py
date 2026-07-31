@@ -769,6 +769,7 @@ class AnchoredDirectory(object):
                     os.mkdir(component, 0o700, dir_fd=descriptor)
                     created = True
                 except FileExistsError:
+                    # Existing archive ancestors are opened and validated immediately below.
                     pass
                 try:
                     child = os.open(component, self._directory_flags(), dir_fd=descriptor)

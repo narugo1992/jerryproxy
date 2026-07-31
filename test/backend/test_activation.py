@@ -641,7 +641,7 @@ def test_candidate_classification_requires_stable_identity(tmp_path):
     value["candidates"]["manifest"].update({"state": "building", "identity": capture_identity(candidate)})
 
     assert classify_activation(paths, value).manifest_candidate == "recorded-owned"
-    candidate.unlink()
+    candidate.rename(tmp_path / "original-candidate")
     candidate.write_bytes(b"")
     assert classify_activation(paths, value).manifest_candidate == "unknown"
 
@@ -727,7 +727,7 @@ def test_recovery_refuses_replaced_unrecorded_candidate_after_planning(tmp_path,
     def replace_after_planning(state, classification):
         plan = original_plan(state, classification)
         if plan.action == "pin-unrecorded-candidate" and not replacement_identity:
-            candidate.unlink()
+            candidate.rename(tmp_path / "original-candidate")
             candidate.write_bytes(b"")
             replacement_identity.append(capture_identity(candidate))
         return plan
@@ -755,7 +755,7 @@ def test_recovery_refuses_replaced_public_object_before_deletion(tmp_path, monke
     def replace_after_planning(state, classification):
         plan = original_plan(state, classification)
         if plan.action == "delete-public" and not replacement_identity:
-            public.unlink()
+            public.rename(tmp_path / "original-public")
             public.write_bytes(b"target")
             replacement_identity.append(capture_identity(public))
         return plan
@@ -1160,7 +1160,7 @@ def test_discovery_preserves_journal_replaced_during_preflight(tmp_path, monkeyp
     def load_then_replace(*args, **kwargs):
         loaded = original_load(*args, **kwargs)
         payload = journal.read_bytes()
-        journal.unlink()
+        journal.rename(tmp_path / "original-journal")
         journal.write_bytes(payload)
         if os.name == "posix":
             journal.chmod(0o600)
@@ -1376,7 +1376,7 @@ def test_recovery_preserves_journal_replaced_before_disposal(tmp_path, monkeypat
         plan = original_plan(state, classification)
         if plan.action == "dispose-journal" and not replacement_identity:
             payload = journal.read_bytes()
-            journal.unlink()
+            journal.rename(tmp_path / "original-journal")
             journal.write_bytes(payload)
             if os.name == "posix":
                 journal.chmod(0o600)

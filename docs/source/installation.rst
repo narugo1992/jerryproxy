@@ -28,22 +28,26 @@ Packaged CLI self-check
 -----------------------
 
 ``jerryproxy self-check`` validates the runtime, platform mapping, private state
-tree, write access, backend registry, ``filelock`` compatibility, and one
-lock-consistent backend inventory. It also exercises install and activation
-crash recovery in an isolated temporary JerryProxy home without changing the
-configured home. It then streams a fixed 1 MiB Range from a
+tree, write access, backend registry, packaged catalog access and selection,
+``filelock`` compatibility, and one lock-consistent backend inventory. It also
+exercises a complete synthetic backend lifecycle plus install, activation, and
+removal hard-exit recovery in isolated temporary JerryProxy homes without
+changing the configured home. It then streams a fixed 1 MiB Range from a
 pinned public Xray release through each of the three built-in relays. Each relay
-request has a five-second network timeout. The check requires an HTTPS redirect
-chain, HTTP 206, the exact ``Content-Range`` and byte count, and the pinned
-slice SHA-256. It reports response-header latency, first-chunk latency, and the
-speed of the remaining chunks separately.
+request has a five-second connect/read timeout. A parent process enforces a
+30-second wall-clock deadline across process startup, redirects, response
+headers, empty chunks, and streaming. The check requires an HTTPS redirect
+chain, HTTP 206, the exact ``Content-Range`` and byte count, and the pinned slice
+SHA-256. It reports response-header latency, first-chunk latency, and the speed
+of the remaining chunks separately.
 
-Results are ``OK`` (green), ``WARN`` (yellow), ``FAIL`` (red), or ``ERR``
-(red). Relay timeout, transport, HTTP, or content failures are ``WARN`` and do
-not make the command fail. Only ``FAIL`` and ``ERR`` produce a nonzero exit
-status. A fully successful run transfers 3 MiB; it never downloads or starts a
-complete backend and does not mutate backend state. Standard Requests proxy and
-CA environment behavior remains active.
+Results are ``OK`` (green), ``WARN`` (yellow), ``SKIP`` (cyan), ``FAIL`` (red),
+or ``ERR`` (red). Relay timeout, transport, HTTP, or content failures are
+``WARN`` and do not make the command fail. An inapplicable prerequisite is
+``SKIP`` and also keeps a zero exit status. Only ``FAIL`` and ``ERR`` produce a
+nonzero exit status. A fully successful run transfers 3 MiB; it never downloads
+or starts a complete backend and does not mutate configured backend state.
+Standard Requests proxy and CA environment behavior remains active.
 
 Python 3.7 through 3.9 use the newest ``filelock`` lines that still support
 those interpreters. Those legacy lines are affected by CVE-2025-68146, so the

@@ -314,8 +314,8 @@ def _open_identity_guard(path, status, error_type):
         flags = os.O_SYMLINK
     else:
         flags = getattr(os, "O_PATH", os.O_RDONLY)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_NONBLOCK", 0)
     if stat.S_ISDIR(status.st_mode):
         flags |= getattr(os, "O_DIRECTORY", 0)

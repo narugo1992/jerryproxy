@@ -119,6 +119,7 @@ class SimulatedArchiveWindowsKernel(object):
 
     def CloseHandle(self, handle):
         os.close(handle)
+        self.handles.pop(handle, None)
         self.closed_handles.append(handle)
         return True
 
@@ -131,11 +132,7 @@ def configure_simulated_windows_archive_creation(monkeypatch, kernel):
     def windows_error():
         error = OSError("simulated Windows API failure")
         error.winerror = (
-            kernel.last_error
-            if kernel.last_error is not None
-            else 50
-            if kernel.modern_failure == "unsupported"
-            else 5
+            kernel.last_error if kernel.last_error is not None else 50 if kernel.modern_failure == "unsupported" else 5
         )
         return error
 
@@ -1415,12 +1412,86 @@ def test_windows_archive_input_uses_a_nonfollowing_native_handle(tmp_path, monke
 
     assert (tmp_path / "output" / "mihomo").read_bytes() == b"backend"
     opened = [call for call in kernel.calls if call[0] == archive]
-    assert len(opened) == 1
-    _path, access, share, creation, flags = opened[0]
-    assert access & 0x80000000
-    assert share & 0x00000004
-    assert creation == 3
-    assert flags & 0x00200000
+    assert len(opened) == 2
+    for _path, access, share, creation, flags in opened:
+        assert access & 0x80000000
+        assert share & 0x00000004
+        assert creation == 3
+        assert flags & 0x00200000
+    assert kernel.handles == {}
+
+
+@pytest.mark.parametrize("modern_failure", (None, "unsupported"))
+def test_windows_archive_input_compares_native_handles_not_crt_inode_values(
+    tmp_path,
+    monkeypatch,
+    modern_failure,
+):
+    class DifferentCrtIdentityKernel(SimulatedArchiveWindowsKernel):
+        def GetFileInformationByHandle(self, handle, information_pointer):
+            result = super(DifferentCrtIdentityKernel, self).GetFileInformationByHandle(
+                handle,
+                information_pointer,
+            )
+            information = information_pointer._obj
+            information.volume_serial_number ^= 0x1234
+            information.file_index_low ^= 0x5678
+            return result
+
+        def GetFileInformationByHandleEx(self, handle, information_class, information_pointer, size):
+            result = super(DifferentCrtIdentityKernel, self).GetFileInformationByHandleEx(
+                handle,
+                information_class,
+                information_pointer,
+                size,
+            )
+            if result:
+                information = information_pointer._obj
+                information.volume_serial_number ^= 0x12345678
+                information.file_id.identifier[15] ^= 0x5A
+            return result
+
+    archive = tmp_path / "mihomo.gz"
+    archive.write_bytes(gzip.compress(b"backend"))
+    kernel = DifferentCrtIdentityKernel(modern_failure=modern_failure)
+    configure_simulated_windows_archive_input(monkeypatch, kernel)
+
+    extract_archive(archive, tmp_path / "output", "mihomo")
+
+    assert (tmp_path / "output" / "mihomo").read_bytes() == b"backend"
+    assert kernel.handles == {}
+
+
+def test_windows_archive_input_rejects_path_replacement_between_native_opens(
+    tmp_path,
+    monkeypatch,
+):
+    archive = tmp_path / "mihomo.gz"
+    replacement = tmp_path / "replacement.gz"
+    archive.write_bytes(gzip.compress(b"backend"))
+    replacement.write_bytes(gzip.compress(b"changed"))
+
+    class ReplacingInputKernel(SimulatedArchiveWindowsKernel):
+        def CreateFileW(self, path, access, share, security, creation, flags, template):
+            if len(self.calls) == 1:
+                os.replace(str(replacement), str(archive))
+            return super(ReplacingInputKernel, self).CreateFileW(
+                path,
+                access,
+                share,
+                security,
+                creation,
+                flags,
+                template,
+            )
+
+    kernel = ReplacingInputKernel()
+    configure_simulated_windows_archive_input(monkeypatch, kernel)
+
+    with pytest.raises(ArchiveError, match="changed while being opened"):
+        extract_archive(archive, tmp_path / "output", "mihomo")
+
+    assert not (tmp_path / "output").exists()
     assert kernel.handles == {}
 
 
@@ -1513,7 +1584,7 @@ def test_windows_archive_input_rejects_a_reparse_handle(tmp_path, monkeypatch):
         ("oversized", "compressed input exceeds"),
         ("links", "no stable file identity"),
         ("legacy-zero", "no stable legacy file identity"),
-        ("visible-identity", "changed while being opened"),
+        ("visible-size", "changed while being opened"),
         ("descriptor", "simulated descriptor inspection failure"),
     ),
 )
@@ -1560,11 +1631,9 @@ def test_windows_archive_input_rejects_untrusted_handle_evidence_and_closes_it(
                 information.file_index_low = 0
             return result
 
-    kernel = FailingArchiveKernel(
-        modern_failure="unsupported" if failure == "legacy-zero" else None
-    )
+    kernel = FailingArchiveKernel(modern_failure="unsupported" if failure == "legacy-zero" else None)
     configure_simulated_windows_archive_input(monkeypatch, kernel)
-    if failure == "visible-identity":
+    if failure == "visible-size":
         original_lstat = Path.lstat
 
         def changed_lstat(path):
@@ -1572,7 +1641,7 @@ def test_windows_archive_input_rejects_untrusted_handle_evidence_and_closes_it(
             if path != archive:
                 return status
             values = list(status)
-            values[1] += 1
+            values[6] += 1
             return os.stat_result(values)
 
         monkeypatch.setattr(Path, "lstat", changed_lstat)
@@ -1969,6 +2038,17 @@ def test_windows_archive_output_directory_guards_do_not_share_delete(tmp_path, m
 
 
 @pytest.mark.windows_native
+@pytest.mark.skipif(os.name != "nt", reason="native Windows archive input identity semantics")
+def test_windows_native_archive_input_accepts_real_file_identity(tmp_path):
+    archive = tmp_path / "mihomo.gz"
+    archive.write_bytes(gzip.compress(b"backend"))
+
+    extract_archive(archive, tmp_path / "output", "mihomo")
+
+    assert (tmp_path / "output" / "mihomo").read_bytes() == b"backend"
+
+
+@pytest.mark.windows_native
 @pytest.mark.skipif(os.name != "nt", reason="native Windows directory sharing semantics")
 @pytest.mark.parametrize("scope", ("root", "nested"))
 def test_windows_archive_output_directory_guards_block_native_rename(tmp_path, scope):
@@ -2348,9 +2428,7 @@ def test_simulated_windows_handle_rename_releases_directory_guards_and_never_ove
         anchored.ensure_directory(("backend", ".staging", "nested"))
         source_root = root / "backend" / ".staging"
         source_guards = {
-            handle
-            for handle, path in kernel.handles.items()
-            if path == source_root or source_root in path.parents
+            handle for handle, path in kernel.handles.items() if path == source_root or source_root in path.parents
         }
 
         anchored.replace(
@@ -2391,7 +2469,7 @@ def test_windows_directory_identity_uses_exact_legacy_fallback(tmp_path, monkeyp
     with archive_module.AnchoredDirectory(tmp_path / "output") as output_tree:
         output_tree.ensure_directory(("bin",))
 
-    assert kernel.handles
+    assert kernel.handles == {}
     assert set(kernel.closed_handles) == {
         handle for handle, creation in kernel.opened_handles if creation == anchored_module._WINDOWS_OPEN_EXISTING
     }

@@ -4612,7 +4612,7 @@ def test_macos_symlink_identity_guard_uses_o_symlink_when_o_path_is_unavailable(
     descriptor = removal_module._open_identity_guard(link, status, CleanupScopeError)
     removal_module._close_identity_guard(descriptor)
 
-    assert opened == [(link, o_symlink | fake_os.O_CLOEXEC | fake_os.O_NOFOLLOW | fake_os.O_NONBLOCK)]
+    assert opened == [(link, o_symlink | fake_os.O_CLOEXEC | fake_os.O_NONBLOCK)]
     assert closed == [91]
 
 
@@ -7572,6 +7572,7 @@ def test_staging_recovery_rejects_source_observation_races(tmp_path, monkeypatch
     journal = transaction / "journal.json"
     atomic_write_json(journal, {"phase": "staging", "moves": [move]})
     original_lstat = Path.lstat
+    original_is_path_alias = removal_module.is_path_alias
     original_validate_chain = removal_module._validate_chain
     validated = []
 
@@ -7581,9 +7582,12 @@ def test_staging_recovery_rejects_source_observation_races(tmp_path, monkeypatch
             validated.append(source)
         return result
 
-    def failed_lstat(path):
+    def failed_alias(path):
         if path == source and failure == "alias-permission":
             raise PermissionError("simulated alias observation denial")
+        return original_is_path_alias(path)
+
+    def failed_lstat(path):
         if path == source and validated:
             if failure == "missing":
                 raise FileNotFoundError("simulated recovery source disappearance")
@@ -7591,6 +7595,7 @@ def test_staging_recovery_rejects_source_observation_races(tmp_path, monkeypatch
         return original_lstat(path)
 
     monkeypatch.setattr(removal_module, "_validate_chain", mark_validated)
+    monkeypatch.setattr(removal_module, "is_path_alias", failed_alias)
     monkeypatch.setattr(Path, "lstat", failed_lstat)
     with pytest.raises(IntegrityError, match=message):
         manager.current("mihomo")

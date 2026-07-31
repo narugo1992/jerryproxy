@@ -172,7 +172,7 @@ def _close_windows_archive_handle(handle, archive):
         raise ArchiveError("unable to close backend archive handle: %s" % archive) from _windows_error()
 
 
-def _open_windows_archive(archive, limits):
+def _create_windows_archive_handle(archive):
     handle = _WINDOWS_KERNEL32.CreateFileW(
         _windows_extended_path(archive),
         _WINDOWS_GENERIC_READ | _WINDOWS_FILE_READ_ATTRIBUTES,
@@ -184,48 +184,69 @@ def _open_windows_archive(archive, limits):
     )
     if handle == _WINDOWS_INVALID_HANDLE_VALUE:
         raise ArchiveError("unable to open backend archive: %s" % archive) from _windows_error()
+    return handle
+
+
+def _inspect_windows_archive_handle(handle, archive, limits):
+    information = _WindowsFileInformation()
+    if not _WINDOWS_KERNEL32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+        raise ArchiveError("unable to inspect backend archive handle: %s" % archive) from _windows_error()
+    attributes = int(information.file_attributes)
+    if attributes & _WINDOWS_FILE_ATTRIBUTE_DIRECTORY:
+        raise ArchiveError("backend archive is not a regular file: %s" % archive)
+    if attributes & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ArchiveError("backend archive handle is a reparse point: %s" % archive)
+    native_size = (int(information.file_size_high) << 32) | int(information.file_size_low)
+    if native_size > limits.maximum_compressed_bytes:
+        raise ArchiveError("compressed input exceeds the safety limit")
+    legacy_identity = (
+        "legacy",
+        int(information.volume_serial_number),
+        (int(information.file_index_high) << 32) | int(information.file_index_low),
+    )
+    if int(information.number_of_links) < 1:
+        raise ArchiveError("backend archive handle has no stable file identity: %s" % archive)
+
+    extended = _WindowsFileIdInformation()
+    if _WINDOWS_KERNEL32.GetFileInformationByHandleEx(
+        handle,
+        _WINDOWS_FILE_ID_INFO_CLASS,
+        ctypes.byref(extended),
+        ctypes.sizeof(extended),
+    ):
+        identity = (
+            "modern",
+            int(extended.volume_serial_number),
+            int.from_bytes(bytes(extended.file_id.identifier), "little"),
+        )
+        if not identity[1] or not identity[2]:
+            raise ArchiveError("backend archive handle has no stable modern file identity: %s" % archive)
+        return native_size, identity
+
+    error = _windows_error()
+    if getattr(error, "winerror", None) not in _WINDOWS_UNSUPPORTED_FILE_ID_ERRORS:
+        raise ArchiveError("unable to identify extended backend archive handle: %s" % archive) from error
+    if not legacy_identity[1] or not legacy_identity[2]:
+        raise ArchiveError("backend archive handle has no stable legacy file identity: %s" % archive)
+    return native_size, legacy_identity
+
+
+def _open_windows_archive(archive, limits):
+    handle = _create_windows_archive_handle(archive)
     descriptor = None
     try:
-        information = _WindowsFileInformation()
-        if not _WINDOWS_KERNEL32.GetFileInformationByHandle(handle, ctypes.byref(information)):
-            raise ArchiveError("unable to inspect backend archive handle: %s" % archive) from _windows_error()
-        attributes = int(information.file_attributes)
-        if attributes & _WINDOWS_FILE_ATTRIBUTE_DIRECTORY:
-            raise ArchiveError("backend archive is not a regular file: %s" % archive)
-        if attributes & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT:
-            raise ArchiveError("backend archive handle is a reparse point: %s" % archive)
-        native_size = (int(information.file_size_high) << 32) | int(information.file_size_low)
-        if native_size > limits.maximum_compressed_bytes:
-            raise ArchiveError("compressed input exceeds the safety limit")
-        legacy_identity = (
-            int(information.volume_serial_number),
-            (int(information.file_index_high) << 32) | int(information.file_index_low),
-        )
-        if int(information.number_of_links) < 1:
-            raise ArchiveError("backend archive handle has no stable file identity: %s" % archive)
-
-        extended = _WindowsFileIdInformation()
-        modern_identity = None
-        if _WINDOWS_KERNEL32.GetFileInformationByHandleEx(
-            handle,
-            _WINDOWS_FILE_ID_INFO_CLASS,
-            ctypes.byref(extended),
-            ctypes.sizeof(extended),
-        ):
-            modern_identity = (
-                int(extended.volume_serial_number),
-                int.from_bytes(bytes(extended.file_id.identifier), "little"),
+        native_size, trusted_identity = _inspect_windows_archive_handle(handle, archive, limits)
+        visible_handle = _create_windows_archive_handle(archive)
+        try:
+            visible_size, visible_identity = _inspect_windows_archive_handle(
+                visible_handle,
+                archive,
+                limits,
             )
-            if not modern_identity[0] or not modern_identity[1]:
-                raise ArchiveError("backend archive handle has no stable modern file identity: %s" % archive)
-        else:
-            error = _windows_error()
-            if getattr(error, "winerror", None) not in _WINDOWS_UNSUPPORTED_FILE_ID_ERRORS:
-                raise ArchiveError(
-                    "unable to identify extended backend archive handle: %s" % archive
-                ) from error
-            if not legacy_identity[0] or not legacy_identity[1]:
-                raise ArchiveError("backend archive handle has no stable legacy file identity: %s" % archive)
+        finally:
+            _close_windows_archive_handle(visible_handle, archive)
+        if visible_identity != trusted_identity or visible_size != native_size:
+            raise ArchiveError("backend archive changed while being opened: %s" % archive)
         descriptor = _WINDOWS_OPEN_OSFHANDLE(
             handle,
             os.O_RDONLY | getattr(os, "O_BINARY", 0),
@@ -233,15 +254,10 @@ def _open_windows_archive(archive, limits):
         handle = None
         status = os.fstat(descriptor)
         visible = Path(archive).lstat()
-        descriptor_identity = (int(status.st_dev), int(status.st_ino))
-        visible_identity = (int(visible.st_dev), int(visible.st_ino))
-        trusted_identity = modern_identity or legacy_identity
         if (
             is_path_alias(archive)
             or not stat.S_ISREG(status.st_mode)
             or not stat.S_ISREG(visible.st_mode)
-            or descriptor_identity != visible_identity
-            or descriptor_identity != trusted_identity
             or int(status.st_size) != native_size
             or int(visible.st_size) != native_size
         ):

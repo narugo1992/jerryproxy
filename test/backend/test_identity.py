@@ -293,7 +293,16 @@ def test_windows_identity_failures_close_handles_and_fail_closed(
 
 
 def test_identity_capture_rejects_platforms_without_stable_identity(tmp_path, monkeypatch):
-    monkeypatch.setattr(identity_module.os, "name", "unsupported")
+    host_os = identity_module.os
+
+    class UnsupportedOsProxy(object):
+        name = "unsupported"
+
+        def __getattr__(self, name):
+            return getattr(host_os, name)
+
+    monkeypatch.setattr(identity_module, "os", UnsupportedOsProxy())
+    monkeypatch.setattr(identity_module, "_WINDOWS_KERNEL32", None)
 
     with pytest.raises(IntegrityError, match="unsupported on this platform"):
         capture_identity(tmp_path)

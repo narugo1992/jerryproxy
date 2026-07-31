@@ -173,7 +173,7 @@ def test_replace_rejects_changed_destination_identity(tmp_path):
     _write_private(root / "candidate")
     _write_private(root / "published")
     identity = anchored_module.capture_identity(root / "published")
-    (root / "published").unlink()
+    (root / "published").rename(tmp_path / "original-published")
     _write_private(root / "published", b"replacement")
 
     with AnchoredDirectory(root) as anchored:
@@ -247,7 +247,7 @@ def test_open_existing_file_rejects_changed_expected_identity(tmp_path):
     target = root / "state"
     _write_private(target)
     identity = anchored_module.capture_identity(target)
-    target.unlink()
+    target.rename(tmp_path / "original-state")
     _write_private(target, b"replacement")
 
     with AnchoredDirectory(root) as anchored:
@@ -614,7 +614,7 @@ def test_fallback_replace_rejects_changed_source_identity(tmp_path):
     candidate = root / "candidate"
     _write_private(candidate)
     identity = anchored_module.capture_identity(candidate)
-    candidate.unlink()
+    candidate.rename(tmp_path / "original-candidate")
     _write_private(candidate, b"replacement")
 
     with AnchoredDirectory(root) as anchored:
@@ -762,7 +762,7 @@ def test_fallback_replace_rejects_wrong_destination_identity(tmp_path):
     destination = root / "published"
     _write_private(destination)
     identity = anchored_module.capture_identity(destination)
-    destination.unlink()
+    destination.rename(tmp_path / "original-published")
     _write_private(destination, b"replacement")
 
     with AnchoredDirectory(root) as anchored:
@@ -912,17 +912,14 @@ def test_fallback_prepare_executable_maps_disappearance_after_scan(tmp_path, mon
     root.mkdir()
     executable = root / "backend"
     _write_private(executable)
-    original_lstat = anchored_module.Path.lstat
-    calls = {"target": 0}
+    original_scan = AnchoredDirectory._scan_path
 
-    def disappear_after_scan(path):
-        if path == executable:
-            calls["target"] += 1
-            if calls["target"] == 3:
-                raise OSError("disappeared")
-        return original_lstat(path)
+    def disappear_after_scan(anchored, path, prefix, result):
+        original_scan(anchored, path, prefix, result)
+        if not prefix and executable.exists():
+            executable.unlink()
 
-    monkeypatch.setattr(anchored_module.Path, "lstat", disappear_after_scan)
+    monkeypatch.setattr(AnchoredDirectory, "_scan_path", disappear_after_scan)
     with AnchoredDirectory(root) as anchored:
         anchored._posix = False
         with pytest.raises(ArchiveError, match="unable to inspect extracted backend executable"):

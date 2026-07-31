@@ -301,16 +301,20 @@ tree cannot be mutated under unrelated locks.
 
 `jerryproxy self-check` actively validates the packaged Python runtime, host
 platform mapping, private home layout and write access, POSIX directory modes,
-backend registry, `filelock` compatibility, and one lock-consistent
-installed/active backend inventory. It also exercises install and activation
-crash recovery in an isolated temporary JerryProxy home without changing the
-configured home. It then streams one fixed 1 MiB Range from
+backend registry, packaged catalog access and selection, `filelock`
+compatibility, and one lock-consistent installed/active backend inventory. It
+also exercises a complete synthetic backend lifecycle plus install, activation,
+and removal hard-exit recovery in isolated temporary JerryProxy homes without
+changing the configured home. It then streams one fixed 1 MiB Range from
 a pinned public Xray release through each built-in relay. The probe separates
 response-header latency, first-chunk latency, and the speed of the remaining
-chunks, uses a five-second network timeout per relay, and requires HTTPS, HTTP 206, the exact
-`Content-Range`, byte count, and pinned slice SHA-256. Results use four levels:
-green `OK`, yellow `WARN`, red `FAIL`, and red `ERR`. Relay unavailability or
-invalid content is `WARN`; only `FAIL` and `ERR` make the command exit nonzero.
+chunks, uses a five-second connect/read timeout, and has a parent-enforced
+30-second wall-clock deadline covering process startup, redirects, response
+headers, empty chunks, and streaming. It requires HTTPS, HTTP 206, the exact
+`Content-Range`, byte count, and pinned slice SHA-256. Results use five levels:
+green `OK`, yellow `WARN`, cyan `SKIP`, red `FAIL`, and red `ERR`. Relay
+unavailability or invalid content is `WARN`; an inapplicable prerequisite is
+`SKIP`; only `FAIL` and `ERR` make the command exit nonzero.
 
 Python 3.7-3.9 install the newest `filelock` lines still compatible with those
 interpreters. Those legacy lines are affected by CVE-2025-68146, so self-check
@@ -323,9 +327,9 @@ Windows, and macOS compatibility, so their bundled `filelock` is also on the
 legacy warning line. Users who prioritize the upstream lock hardening over that
 binary compatibility should use the Python 3.10+ pip installation.
 
-The check never downloads a complete backend, starts a backend, or mutates
-backend state. A fully successful run transfers 3 MiB across the three relay
-checks. `requests` retains the host's standard proxy and CA behavior:
+The check never downloads a complete backend, starts a backend, or mutates the
+configured backend state. A fully successful run transfers 3 MiB across the
+three relay checks. `requests` retains the host's standard proxy and CA behavior:
 
 ```shell
 jerryproxy --home ./test_self_check self-check

@@ -676,6 +676,7 @@ def classify_candidate(paths, journal, name):
                 elif not stat.S_ISLNK(status.st_mode) or os.readlink(str(path)) != candidate["target"]:
                     return "unknown"
             except (ArchiveError, OSError, IntegrityError):
+                # Candidate evidence may become unreadable or change during concurrent inspection.
                 return "unknown"
         return "recorded-owned"
     try:
@@ -694,6 +695,7 @@ def classify_candidate(paths, journal, name):
         ):
             return "exact-unrecorded-purpose-object"
     except OSError:
+        # An unrecorded candidate may disappear or become unreadable while it is classified.
         return "unknown"
     return "unknown"
 

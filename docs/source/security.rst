@@ -18,8 +18,10 @@ Current enforced backend invariants:
   hides a policy or integrity failure;
 * self-check relay probes accept only the three built-in profiles and one
   repository-pinned public Xray release asset; each probe streams at most one
-  bounded 1 MiB Range with a five-second network timeout and verifies HTTPS,
-  HTTP 206, ``Content-Range``, byte count, and the pinned slice SHA-256;
+  bounded 1 MiB Range with a five-second connect/read timeout and a
+  parent-enforced 30-second total deadline covering process startup, redirects,
+  response headers, empty chunks, and streaming; it verifies HTTPS, HTTP 206,
+  ``Content-Range``, byte count, and the pinned slice SHA-256;
 * relay probe diagnostics use fixed sanitized messages and never display the
   effective URL, redirects, signed query values, or response body;
 * streamed ``requests`` downloads with byte-oriented ``tqdm`` status on

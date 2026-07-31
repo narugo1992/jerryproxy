@@ -1,11 +1,15 @@
 """Lightweight black-box checks for source and packaged JerryProxy CLIs."""
 
 import hashlib
+import multiprocessing
 import os
 import platform
+import re
 import sys
 import tempfile
+import threading
 import time
+import traceback
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +18,6 @@ from urllib.parse import urlparse
 import requests
 
 from .backend import BackendCatalog, BackendManager, get_backend, iter_backend_platforms, iter_backends
-from .backend.activation import ActivationTransaction
 from .backend.installation import InstallTransaction
 from .backend.platform import detect_platform
 from .backend.relay import (
@@ -26,9 +29,16 @@ from .backend.relay import (
     render_relay_url,
 )
 from .config.meta import __VERSION__
-from .errors import BackendCatalogError, IntegrityError, JerryProxyError, UnsupportedPlatformError
+from .errors import (
+    BackendCatalogError,
+    IntegrityError,
+    JerryProxyBusyError,
+    JerryProxyError,
+    UnsupportedPlatformError,
+)
 from .home import JerryProxyPaths
 from .lock import JerryProxyOperationLock, filelock_status
+from .utils.fs import atomic_write_json, read_json
 
 _ANSI_BOLD = "\033[1m"
 _ANSI_CYAN = "\033[1;36m"
@@ -37,8 +47,45 @@ _ANSI_YELLOW = "\033[1;33m"
 _ANSI_RED = "\033[1;31m"
 _ANSI_RESET = "\033[0m"
 _RELAY_CHECK_TIMEOUT = 5.0
+_RELAY_CHECK_TOTAL_TIMEOUT = 30.0
 _RELAY_CHECK_MAX_REDIRECTS = 5
 _RELAY_CHECK_CHUNK_SIZE = 64 * 1024
+_RECOVERY_PROCESS_TIMEOUT = 30.0
+_RECOVERY_CHILD_INSTALL = 71
+_RECOVERY_CHILD_ACTIVATION_ROLLBACK = 72
+_RECOVERY_CHILD_ACTIVATION_ROLLFORWARD = 73
+_RECOVERY_CHILD_REMOVAL_ROLLBACK = 74
+_RECOVERY_CHILD_REMOVAL_ROLLFORWARD = 75
+_RECOVERY_CHILD_ERROR = 90
+_CHILD_STDERR_CAPTURE_ERROR = 96
+_CHILD_START_CANCELLED = 97
+_CHILD_START_GATE_TIMEOUT = 35.0
+_MAXIMUM_DETAIL_CHARACTERS = 2048
+_MAXIMUM_DIAGNOSTIC_CHARACTERS = 64 * 1024
+_MAXIMUM_DIAGNOSTIC_INPUT_CHARACTERS = 256 * 1024
+_MAXIMUM_CHILD_RESULT_BYTES = 128 * 1024
+_PROCESS_CONTROL_EXCEPTIONS = (AssertionError, AttributeError, OSError, RuntimeError, ValueError)
+_DIAGNOSTIC_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
+_DIAGNOSTIC_UUID = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+_DIAGNOSTIC_NAMED_SECRET = re.compile(
+    r"\b(password|passwd|pwd|token|access[ _-]?token|secret|api[ _-]?key|public[ _-]?key|"
+    r"private[ _-]?key|short[ _-]?id|uuid)(\s*(?::|=)\s*|\s+)(\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
+_DIAGNOSTIC_BEARER = re.compile(
+    r"\b(?:authorization\s*:\s*)?bearer\s+[A-Za-z0-9._~+/=-]+",
+    re.IGNORECASE,
+)
+_DIAGNOSTIC_PEM = re.compile(
+    r"-----BEGIN [^-\r\n]+-----.*?-----END [^-\r\n]+-----",
+    re.DOTALL,
+)
+_DIAGNOSTIC_SSH_KEY = re.compile(
+    r"\b(?:ssh-(?:rsa|dss|ed25519)|ecdsa-sha2-[^\s]+)\s+[A-Za-z0-9+/=]+(?:\s+[^\r\n]+)?"
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +94,7 @@ class CheckResult:
 
     level: str
     detail: str
+    diagnostics: tuple = ()
 
     @classmethod
     def ok(cls, detail):
@@ -57,21 +105,54 @@ class CheckResult:
         return cls("WARN", detail)
 
     @classmethod
+    def skip(cls, detail):
+        return cls("SKIP", detail)
+
+    @classmethod
     def fail(cls, detail):
         return cls("FAIL", detail)
 
     @classmethod
-    def err(cls, detail):
-        return cls("ERR", detail)
+    def err(cls, detail, diagnostics=()):
+        return cls("ERR", detail, tuple(diagnostics))
 
 
 def _paint(text, code, color):
     return "%s%s%s" % (code, text, _ANSI_RESET) if color else text
 
 
+def _redact_diagnostic(value):
+    text = str(value)
+    text = _DIAGNOSTIC_PEM.sub("[REDACTED KEY]", text)
+    text = _DIAGNOSTIC_SSH_KEY.sub("[REDACTED KEY]", text)
+    text = _DIAGNOSTIC_URL.sub("[REDACTED URL]", text)
+    text = _DIAGNOSTIC_BEARER.sub("[REDACTED TOKEN]", text)
+    text = _DIAGNOSTIC_NAMED_SECRET.sub(
+        lambda match: "%s%s[REDACTED]" % (match.group(1), match.group(2)),
+        text,
+    )
+    return _DIAGNOSTIC_UUID.sub("[REDACTED UUID]", text)
+
+
+def _bounded_line(value):
+    text = " ".join(_redact_diagnostic(value).splitlines()).strip()
+    if not text:
+        text = _redact_diagnostic(repr(value))
+    return text[:_MAXIMUM_DETAIL_CHARACTERS]
+
+
+def _bounded_diagnostic(value):
+    return _redact_diagnostic(value).strip()[:_MAXIMUM_DIAGNOSTIC_CHARACTERS]
+
+
 def _error_result(error):
-    message = str(error).strip() or repr(error)
-    return CheckResult.err("%s: %s" % (error.__class__.__name__, message))
+    message = _bounded_line(error)
+    formatted = _bounded_diagnostic(traceback.format_exc())
+    diagnostics = () if formatted.startswith("NoneType: None") else (formatted,)
+    return CheckResult.err(
+        "%s: %s" % (error.__class__.__name__, message),
+        diagnostics=diagnostics,
+    )
 
 
 def ansi_color_enabled(stream, requested=None):
@@ -111,16 +192,18 @@ def _check_runtime():
         return CheckResult.fail("package version is empty")
     frozen = bool(getattr(sys, "frozen", False))
     return CheckResult.ok(
-        "Python %s; JerryProxy %s; frozen=%s"
-        % (platform.python_version(), __VERSION__, str(frozen).lower())
+        "Python %s; JerryProxy %s; frozen=%s" % (platform.python_version(), __VERSION__, str(frozen).lower())
     )
 
 
 def _check_platform():
     try:
         platform_info = detect_platform()
-    except (OSError, RuntimeError, UnsupportedPlatformError) as error:
-        # Host platform detection may fail on unsupported or unreadable systems.
+    except UnsupportedPlatformError as error:
+        # A recognized but unsupported host cannot run platform-dependent backend features.
+        return CheckResult.fail("%s: %s" % (error.__class__.__name__, _bounded_line(error)))
+    except (OSError, RuntimeError) as error:
+        # Host platform metadata may be temporarily unreadable.
         return _error_result(error)
     return CheckResult.ok(platform_info.key)
 
@@ -159,7 +242,7 @@ def _check_private_permissions(paths):
     try:
         with JerryProxyOperationLock(paths):
             if os.name != "posix":
-                return CheckResult.ok("POSIX mode check not applicable")
+                return CheckResult.skip("POSIX mode checks do not apply on %s" % os.name)
             unexpected = []
             for path in _directory_paths(paths):
                 mode = path.stat().st_mode & 0o777
@@ -175,9 +258,15 @@ def _check_private_permissions(paths):
 
 def _check_backend_registry():
     try:
-        platform_info = detect_platform()
         specs = list(iter_backends())
         names = [spec.name for spec in specs]
+    except (RuntimeError, ValueError) as error:
+        # Built-in registry construction rejects invalid backend metadata.
+        return _error_result(error)
+    if not names or len(names) != len(set(names)):
+        return CheckResult.fail("backend registry is empty or contains duplicate names")
+    try:
+        platform_info = detect_platform()
         compatible = []
         for spec in specs:
             try:
@@ -186,53 +275,96 @@ def _check_backend_registry():
                 # A backend may intentionally omit release assets for this platform.
                 continue
             compatible.append(spec.name)
+    except UnsupportedPlatformError as error:
+        # Asset naming has no meaning until the host platform is supported.
+        return CheckResult.skip("platform prerequisite is unsupported: %s" % _bounded_line(error))
     except (OSError, RuntimeError, ValueError) as error:
         # Registry evaluation can fail on invalid platform metadata.
         return _error_result(error)
-    if not names or len(names) != len(set(names)):
-        return CheckResult.fail("backend registry is empty or contains duplicate names")
     if not compatible:
         return CheckResult.fail("no registered backend supports %s" % platform_info.key)
-    return CheckResult.ok(
-        "%d registered; %d compatible: %s"
-        % (len(names), len(compatible), ", ".join(compatible))
-    )
+    return CheckResult.ok("%d registered; %d compatible: %s" % (len(names), len(compatible), ", ".join(compatible)))
 
 
 def _check_backend_catalog():
     try:
         catalog = BackendCatalog.load()
-        platform_info = detect_platform()
         missing = []
         total_releases = 0
         for spec in iter_backends():
             versions = catalog.versions(spec.name)
             total_releases += len(versions)
-            if not catalog.compatible_versions(spec.name, platform_info):
+            if not versions:
                 missing.append(spec.name)
-    except (BackendCatalogError, OSError, RuntimeError, ValueError) as error:
-        # Packaged catalog parsing and platform selection may fail independently.
+    except BackendCatalogError as error:
+        # Invalid packaged catalog data is a failed product resource invariant.
+        return CheckResult.fail("%s: %s" % (error.__class__.__name__, _bounded_line(error)))
+    except (OSError, RuntimeError, ValueError) as error:
+        # Packaged resource access may fail in a damaged installation.
+        return _error_result(error)
+    if missing:
+        return CheckResult.fail("catalog has no stable releases for: %s" % ", ".join(missing))
+    return CheckResult.ok("%d stable releases; snapshot %s" % (total_releases, catalog.generated_at))
+
+
+def _check_backend_catalog_selection():
+    try:
+        catalog = BackendCatalog.load()
+    except BackendCatalogError as error:
+        # Platform selection is meaningless when its packaged catalog prerequisite is invalid.
+        return CheckResult.skip("packaged catalog prerequisite failed: %s" % _bounded_line(error))
+    except (OSError, RuntimeError, ValueError) as error:
+        # Platform selection cannot run when the packaged resource is unreadable.
+        return CheckResult.skip("packaged catalog prerequisite is unavailable: %s" % _bounded_line(error))
+    try:
+        platform_info = detect_platform()
+        missing = [
+            spec.name
+            for spec in iter_backends()
+            if not catalog.compatible_versions(spec.name, platform_info)
+        ]
+    except UnsupportedPlatformError as error:
+        # Catalog selection has no applicable target on an unsupported host platform.
+        return CheckResult.skip("platform prerequisite is unsupported: %s" % _bounded_line(error))
+    except (OSError, RuntimeError, ValueError) as error:
+        # Selection may fail on unreadable or invalid platform metadata.
         return _error_result(error)
     if missing:
         return CheckResult.fail(
-            "catalog has no verified stable %s asset for: %s"
-            % (platform_info.key, ", ".join(missing))
+            "catalog has no verified stable %s asset for: %s" % (platform_info.key, ", ".join(missing))
         )
-    return CheckResult.ok(
-        "%d releases; 4/4 compatible; snapshot %s" % (total_releases, catalog.generated_at)
-    )
+    return CheckResult.ok("4/4 backends have verified stable %s assets" % platform_info.key)
 
 
 def _check_filelock():
     status = filelock_status()
+    try:
+        with tempfile.TemporaryDirectory(prefix="jerryproxy-filelock-self-check-") as temporary:
+            paths = JerryProxyPaths(Path(temporary) / ".jerryproxy")
+            with JerryProxyOperationLock(paths):
+                try:
+                    with JerryProxyOperationLock(paths):
+                        return CheckResult.fail("filelock allowed a concurrent exclusive acquisition")
+                except JerryProxyBusyError:
+                    # A second acquisition must observe the real platform lock as busy.
+                    pass
+            with JerryProxyOperationLock(paths):
+                pass
+    except (JerryProxyError, OSError, RuntimeError, ValueError) as error:
+        # Temporary-home creation and real lock operations may fail in the host environment.
+        return _error_result(error)
+    detail = "%s; exclusive acquire, contention, release, and reacquire succeeded" % status.detail
     if status.level == "WARN":
-        return CheckResult.warn(status.detail)
-    return CheckResult.ok(status.detail)
+        return CheckResult.warn(detail)
+    return CheckResult.ok(detail)
 
 
 def _check_backend_inventory(paths):
     try:
-        inventory = BackendManager(paths).inventory()
+        inventory = BackendManager(paths, platform_info=detect_platform()).inventory()
+    except UnsupportedPlatformError as error:
+        # Inventory interpretation depends on the current backend platform contract.
+        return CheckResult.skip("platform prerequisite is unsupported: %s" % _bounded_line(error))
     except IntegrityError as error:
         # Retained managed-state evidence is a failed integrity requirement.
         message = str(error).strip() or repr(error)
@@ -240,91 +372,664 @@ def _check_backend_inventory(paths):
     except (JerryProxyError, OSError, RuntimeError, ValueError) as error:
         # Operational and unexpected inventory failures are diagnostic errors.
         return _error_result(error)
-    return CheckResult.ok(
-        "%d installed; %d active" % (len(inventory.installed), len(inventory.active))
+    return CheckResult.ok("%d installed; %d active" % (len(inventory.installed), len(inventory.active)))
+
+
+def _recovery_platform():
+    platform_info = detect_platform()
+    spec = get_backend("mihomo")
+    supported = {item.asset_key for item in iter_backend_platforms(spec.name)}
+    compatible = [key for key in platform_info.compatible_asset_keys if key in supported]
+    if not compatible:
+        return platform_info, spec, None
+    return platform_info, spec, compatible[0]
+
+
+def _write_probe_archive(root, spec, platform_info, version, payload):
+    archive = Path(root) / ("%s-%s.zip" % (spec.name, version))
+    executable_name = spec.executable_filename(platform_info)
+    with zipfile.ZipFile(str(archive), "w", compression=zipfile.ZIP_STORED) as stream:
+        stream.writestr(executable_name, payload)
+    return archive, executable_name, hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
+def _install_probe_version(manager, root, spec, platform_info, asset_platform, version, payload):
+    archive, executable_name, digest = _write_probe_archive(
+        root,
+        spec,
+        platform_info,
+        version,
+        payload,
+    )
+    return manager.install_from_archive(
+        spec.name,
+        version,
+        archive,
+        expected_sha256=digest,
+        asset_name=archive.name,
+        asset_platform=asset_platform,
+        archive_executable=executable_name,
+        activate=False,
     )
 
 
-def _check_transaction_recovery():
+def _probe_manager(paths, platform_info):
+    return BackendManager(
+        paths,
+        platform_info=platform_info,
+        probe_runner=lambda installed: None,
+    )
+
+
+def _write_recovery_child_error(path):  # pragma: no cover - spawned child only
     try:
+        Path(path).write_text(_bounded_diagnostic(traceback.format_exc()), encoding="utf-8")
+    except OSError:
+        # The parent still reports the child exit code when its diagnostic file is unavailable.
+        pass
+
+
+class _BoundedChildStderr(object):
+    def __init__(self, stream):
+        self._stream = stream
+        self._remaining = _MAXIMUM_DIAGNOSTIC_CHARACTERS
+        self._pending = ""
+        self._discarding_line = False
+        self._inside_pem = False
+        self.encoding = "utf-8"
+
+    def _write_sanitized_line(self, value):
+        if "-----BEGIN " in value and " KEY-----" in value:
+            self._inside_pem = True
+            value = "[REDACTED KEY]\n"
+        elif self._inside_pem:
+            if "-----END " in value and " KEY-----" in value:
+                self._inside_pem = False
+            value = "[REDACTED KEY]\n"
+        else:
+            value = _redact_diagnostic(value)
+        payload = value.encode("utf-8", errors="replace")[: self._remaining]
+        if payload:
+            self._stream.write(payload)
+            self._remaining -= len(payload)
+
+    def write(self, value):
+        text = str(value)
+        size = len(text)
+        if self._remaining <= 0:
+            return size
+        if self._discarding_line:
+            separator = text.find("\n")
+            if separator < 0:
+                return size
+            text = text[separator + 1 :]
+            self._discarding_line = False
+        self._pending += text
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            self._write_sanitized_line(line + "\n")
+        if len(self._pending) > _MAXIMUM_DIAGNOSTIC_INPUT_CHARACTERS:
+            self._write_sanitized_line("[child stderr line exceeded capture limit]\n")
+            self._pending = ""
+            self._discarding_line = True
+        return size
+
+    def flush(self):
+        self._stream.flush()
+
+    def finish(self):
+        if self._pending and not self._discarding_line:
+            self._write_sanitized_line(self._pending)
+        self._pending = ""
+        self._stream.flush()
+
+    def isatty(self):
+        return False
+
+
+def _child_start_allowed(  # pragma: no cover - spawned child only
+    start_allowed,
+    start_cancelled,
+    start_ready,
+    start_budget,
+):
+    ready_at = time.monotonic()
+    start_ready.set()
+    gate_deadline = ready_at + _CHILD_START_GATE_TIMEOUT
+    while True:
+        if start_cancelled.is_set():
+            return False
+        if start_allowed.is_set():
+            elapsed = time.monotonic() - ready_at
+            return start_budget.value > elapsed and not start_cancelled.is_set()
+        remaining = gate_deadline - time.monotonic()
+        if remaining <= 0.0:
+            return False
+        start_allowed.wait(min(remaining, 0.05))
+
+
+def _captured_child_entry(  # pragma: no cover - spawned child only
+    target,
+    arguments,
+    stderr_log,
+    start_allowed,
+    start_cancelled,
+    start_ready,
+    start_budget,
+):
+    diagnostic_descriptor = None
+    null_descriptor = None
+    try:
+        diagnostic_descriptor = os.open(
+            str(stderr_log),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        null_descriptor = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null_descriptor, 2)
+        diagnostic_stream = os.fdopen(diagnostic_descriptor, "wb", buffering=0)
+        diagnostic_descriptor = None
+    except (OSError, ValueError):
+        # A child without a private stderr boundary must not execute or inherit the terminal.
+        if diagnostic_descriptor is not None:
+            os.close(diagnostic_descriptor)
+        if null_descriptor is not None:
+            os.close(null_descriptor)
+        os._exit(_CHILD_STDERR_CAPTURE_ERROR)
+    if null_descriptor != 2:
+        os.close(null_descriptor)
+    diagnostic_writer = _BoundedChildStderr(diagnostic_stream)
+    sys.stderr = diagnostic_writer
+    if not _child_start_allowed(start_allowed, start_cancelled, start_ready, start_budget):
+        diagnostic_writer.finish()
+        os._exit(_CHILD_START_CANCELLED)
+    try:
+        target(*arguments)
+    finally:
+        diagnostic_writer.finish()
+
+
+def _install_recovery_child(root, error_log):  # pragma: no cover - spawned hard-exit child
+    try:
+        paths = JerryProxyPaths(Path(root))
+        platform_info, spec, asset_platform = _recovery_platform()
+        artifact = {
+            "sha256": "0" * 64,
+            "size": 1,
+            "asset_name": "interrupted.zip",
+            "platform": asset_platform,
+        }
+        with JerryProxyOperationLock(paths, platform_info=platform_info):
+            transaction = InstallTransaction.prepare(paths, spec.name, "9.9.9", artifact)
+            staging = transaction.begin_staging()
+            (staging / "partial").write_bytes(b"interrupted")
+        os._exit(_RECOVERY_CHILD_INSTALL)
+    except (JerryProxyError, OSError, RuntimeError, ValueError):
+        # Child setup failures are serialized for the parent self-check result.
+        _write_recovery_child_error(error_log)
+        os._exit(_RECOVERY_CHILD_ERROR)
+
+
+def _activation_recovery_child(root, version, direction, error_log):  # pragma: no cover - spawned hard-exit child
+    try:
+        from .backend import activation as activation_module
+
+        paths = JerryProxyPaths(Path(root))
         platform_info = detect_platform()
-        spec = get_backend("mihomo")
-        supported = {item.asset_key for item in iter_backend_platforms(spec.name)}
-        compatible = [key for key in platform_info.compatible_asset_keys if key in supported]
-        if not compatible:
-            return CheckResult.fail("no compatible backend platform for recovery probe")
-        asset_platform = compatible[0]
-        with tempfile.TemporaryDirectory(prefix="jerryproxy-recovery-self-check-") as temporary:
+        manager = _probe_manager(paths, platform_info)
+        if direction == "rollback":
+            original_replace = activation_module.durable_replace
+
+            def crash_after_first_publication(source, destination, *args, **kwargs):
+                original_replace(source, destination, *args, **kwargs)
+                os._exit(_RECOVERY_CHILD_ACTIVATION_ROLLBACK)
+
+            activation_module.durable_replace = crash_after_first_publication
+        else:
+
+            def crash_after_commit(paths, platform_info):
+                del paths, platform_info
+                os._exit(_RECOVERY_CHILD_ACTIVATION_ROLLFORWARD)
+
+            activation_module.recover_use_transactions = crash_after_commit
+        manager.use("mihomo", version)
+        os._exit(_RECOVERY_CHILD_ERROR)
+    except (JerryProxyError, OSError, RuntimeError, ValueError):
+        # Child activation failures are serialized for the parent self-check result.
+        _write_recovery_child_error(error_log)
+        os._exit(_RECOVERY_CHILD_ERROR)
+
+
+def _removal_recovery_child(root, version, direction, error_log):  # pragma: no cover - spawned hard-exit child
+    try:
+        from .backend import removal as removal_module
+
+        paths = JerryProxyPaths(Path(root))
+        manager = _probe_manager(paths, detect_platform())
+        if direction == "rollback":
+            original_move = removal_module._move_no_replace
+
+            def crash_after_first_move(*args, **kwargs):
+                original_move(*args, **kwargs)
+                os._exit(_RECOVERY_CHILD_REMOVAL_ROLLBACK)
+
+            removal_module._move_no_replace = crash_after_first_move
+        else:
+            original_write = removal_module._write_removal_journal
+
+            def crash_after_commit(*args, **kwargs):
+                result = original_write(*args, **kwargs)
+                if kwargs.get("phase", "staging") == "committed":
+                    os._exit(_RECOVERY_CHILD_REMOVAL_ROLLFORWARD)
+                return result
+
+            removal_module._write_removal_journal = crash_after_commit
+        manager.uninstall("mihomo", version, deactivate=True)
+        os._exit(_RECOVERY_CHILD_ERROR)
+    except (JerryProxyError, OSError, RuntimeError, ValueError):
+        # Child removal failures are serialized for the parent self-check result.
+        _write_recovery_child_error(error_log)
+        os._exit(_RECOVERY_CHILD_ERROR)
+
+
+def _preferred_process_context():
+    methods = multiprocessing.get_all_start_methods()
+    preferred = ("spawn", "fork")
+    start_method = next((method for method in preferred if method in methods), None)
+    if start_method is None:
+        return None, None
+    return start_method, multiprocessing.get_context(start_method)
+
+
+def _process_control_error(action, error):
+    return "%s failed: %s: %s" % (action, error.__class__.__name__, _bounded_line(error))
+
+
+def _join_process(process, timeout, diagnostics):
+    try:
+        process.join(timeout)
+    except _PROCESS_CONTROL_EXCEPTIONS as error:
+        # Host process supervision may reject a bounded join operation.
+        diagnostics.append(_process_control_error("join", error))
+
+
+def _start_process(process, start_allowed, start_cancelled, start_ready, start_budget, deadline):
+    outcome = []
+
+    def start():
+        try:
+            process.start()
+        except _PROCESS_CONTROL_EXCEPTIONS as error:
+            # Process creation failures are returned to the supervising thread.
+            outcome.append(error)
+        else:
+            outcome.append(None)
+
+    thread = threading.Thread(target=start, name="jerryproxy-self-check-start", daemon=True)
+    try:
+        thread.start()
+        thread.join(max(deadline - time.monotonic(), 0.0))
+    except RuntimeError as error:
+        # A host that rejects thread startup cannot provide a bounded process launch.
+        start_cancelled.set()
+        return "unavailable", error
+    if thread.is_alive() or time.monotonic() >= deadline:
+        start_cancelled.set()
+        return "timeout", None
+    if not outcome:
+        start_cancelled.set()
+        return "error", RuntimeError("process start thread returned no outcome")
+    if outcome[0] is not None:
+        start_cancelled.set()
+        return "unavailable", outcome[0]
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            start_cancelled.set()
+            return "timeout", None
+        try:
+            if start_ready.wait(min(remaining, 0.05)):
+                break
+            if not process.is_alive():
+                start_cancelled.set()
+                return "started", None
+        except _PROCESS_CONTROL_EXCEPTIONS as error:
+            # Child readiness and liveness are required before authorization.
+            start_cancelled.set()
+            return "error", error
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.0:
+        start_cancelled.set()
+        return "timeout", None
+    try:
+        start_budget.value = remaining
+        start_allowed.set()
+    except (OSError, RuntimeError, ValueError) as error:
+        # A started child must remain gated when its budget or authorization cannot be published.
+        start_cancelled.set()
+        return "error", error
+    if time.monotonic() >= deadline:
+        start_cancelled.set()
+        return "timeout", None
+    return "started", None
+
+
+def _process_is_alive(process, diagnostics):
+    try:
+        return process.is_alive()
+    except _PROCESS_CONTROL_EXCEPTIONS as error:
+        # Unknown process state must be treated as alive so hard-kill cleanup is attempted.
+        diagnostics.append(_process_control_error("liveness check", error))
+        return True
+
+
+def _stop_process(process):
+    diagnostics = []
+    try:
+        process.terminate()
+    except _PROCESS_CONTROL_EXCEPTIONS as error:
+        # Termination failure must not prevent the later hard-kill attempt.
+        diagnostics.append(_process_control_error("terminate", error))
+    _join_process(process, 5.0, diagnostics)
+    alive = _process_is_alive(process, diagnostics)
+    if alive:
+        try:
+            process.kill()
+        except _PROCESS_CONTROL_EXCEPTIONS as error:
+            # A rejected hard kill is reported after the final liveness check.
+            diagnostics.append(_process_control_error("kill", error))
+        _join_process(process, 5.0, diagnostics)
+        alive = _process_is_alive(process, diagnostics)
+    return alive, tuple(diagnostics)
+
+
+def _run_recovery_child(target, arguments, expected_exit, error_log):
+    started_at = time.monotonic()
+    deadline = started_at + _RECOVERY_PROCESS_TIMEOUT
+    start_method, context = _preferred_process_context()
+    if start_method is None:
+        return CheckResult.skip("no supported multiprocessing start method is available")
+    stderr_log = Path("%s.stderr" % error_log)
+    try:
+        start_allowed = context.Event()
+        start_cancelled = context.Event()
+        start_ready = context.Event()
+        start_budget = context.Value("d", 0.0)
+        process = context.Process(
+            target=_captured_child_entry,
+            args=(
+                target,
+                tuple(arguments) + (str(error_log),),
+                str(stderr_log),
+                start_allowed,
+                start_cancelled,
+                start_ready,
+                start_budget,
+            ),
+            daemon=True,
+        )
+    except _PROCESS_CONTROL_EXCEPTIONS as error:
+        # Frozen-runtime or host process policy may reject process construction.
+        return CheckResult.skip(
+            "%s hard-exit probe unavailable: %s: %s"
+            % (start_method, error.__class__.__name__, _bounded_line(error))
+        )
+    start_status, start_error = _start_process(
+        process,
+        start_allowed,
+        start_cancelled,
+        start_ready,
+        start_budget,
+        deadline,
+    )
+    if start_status == "timeout":
+        return CheckResult.err(
+            "hard-exit recovery child startup exceeded the %.3g-second timeout"
+            % _RECOVERY_PROCESS_TIMEOUT
+        )
+    if start_status == "unavailable":
+        # Frozen-runtime or host process policy may reject the selected start method.
+        return CheckResult.skip(
+            "%s hard-exit probe unavailable: %s: %s"
+            % (start_method, start_error.__class__.__name__, _bounded_line(start_error))
+        )
+    if start_status == "error":
+        return CheckResult.err(
+            "hard-exit recovery child startup supervision failed: %s: %s"
+            % (start_error.__class__.__name__, _bounded_line(start_error))
+        )
+    wait_diagnostics = []
+    remaining = max(_RECOVERY_PROCESS_TIMEOUT - (time.monotonic() - started_at), 0.0)
+    _join_process(process, remaining, wait_diagnostics)
+    alive = _process_is_alive(process, wait_diagnostics)
+    if wait_diagnostics:
+        if alive:
+            alive, stop_diagnostics = _stop_process(process)
+            wait_diagnostics.extend(stop_diagnostics)
+        wait_diagnostics.extend(_child_diagnostics(error_log, stderr_log))
+        if alive:
+            return CheckResult.err(
+                "timed-out hard-exit recovery child remained alive after kill",
+                diagnostics=tuple(wait_diagnostics),
+            )
+        return CheckResult.err(
+            "hard-exit recovery child supervision failed",
+            diagnostics=tuple(wait_diagnostics),
+        )
+    if alive:
+        alive, stop_diagnostics = _stop_process(process)
+        stop_diagnostics = stop_diagnostics + _child_diagnostics(error_log, stderr_log)
+        if alive:
+            return CheckResult.err(
+                "timed-out hard-exit recovery child remained alive after kill",
+                diagnostics=stop_diagnostics,
+            )
+        return CheckResult.err(
+            "hard-exit recovery child exceeded the %.0f-second timeout" % _RECOVERY_PROCESS_TIMEOUT,
+            diagnostics=stop_diagnostics,
+        )
+    if process.exitcode == expected_exit:
+        return None
+    diagnostics = _child_diagnostics(error_log, stderr_log)
+    return CheckResult.err(
+        "hard-exit recovery child returned %s instead of %s" % (process.exitcode, expected_exit),
+        diagnostics=diagnostics,
+    )
+
+
+def _recovery_artifacts(paths):
+    return (
+        tuple(paths.runtimes.glob(".install-*"))
+        + tuple(paths.runtimes.glob(".use-*"))
+        + tuple(paths.runtimes.glob(".remove-*"))
+        + tuple(paths.bin.glob(".*.use-*.candidate"))
+        + tuple(paths.active.glob(".*.use-*.candidate.json"))
+    )
+
+
+def _recovery_failure(error):
+    if isinstance(error, IntegrityError):
+        return CheckResult.fail("%s: %s" % (error.__class__.__name__, _bounded_line(error)))
+    return _error_result(error)
+
+
+def _unsupported_recovery_platform(error):
+    return CheckResult.skip("platform prerequisite is unsupported: %s" % _bounded_line(error))
+
+
+def _check_isolated_backend_lifecycle():
+    try:
+        platform_info, spec, asset_platform = _recovery_platform()
+        if asset_platform is None:
+            return CheckResult.skip("no Mihomo fixture asset shape supports %s" % platform_info.key)
+        with tempfile.TemporaryDirectory(prefix="jerryproxy-lifecycle-self-check-") as temporary:
             root = Path(temporary)
             paths = JerryProxyPaths(root / ".jerryproxy")
-            archive = root / "backend.zip"
-            executable_name = spec.executable_filename(platform_info)
-            with zipfile.ZipFile(str(archive), "w", compression=zipfile.ZIP_STORED) as stream:
-                stream.writestr(executable_name, b"jerryproxy-recovery-self-check\n")
-            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            manager = BackendManager(
-                paths,
-                platform_info=platform_info,
-                probe_runner=lambda installed: None,
-            )
-            installed = manager.install_from_archive(
-                spec.name,
+            manager = _probe_manager(paths, platform_info)
+            installed = _install_probe_version(
+                manager,
+                root,
+                spec,
+                platform_info,
+                asset_platform,
                 "1.0.0",
-                archive,
-                expected_sha256=digest,
-                asset_name=archive.name,
-                asset_platform=asset_platform,
-                archive_executable=executable_name,
-                activate=False,
+                b"jerryproxy-lifecycle-self-check\n",
             )
-
-            artifact = {
-                "sha256": "0" * 64,
-                "size": 1,
-                "asset_name": "interrupted.zip",
-                "platform": asset_platform,
-            }
-            with JerryProxyOperationLock(paths, platform_info=platform_info):
-                install_transaction = InstallTransaction.prepare(
-                    paths,
-                    spec.name,
-                    "2.0.0",
-                    artifact,
-                )
-                staging = install_transaction.begin_staging()
-            with JerryProxyOperationLock(paths, platform_info=platform_info):
-                pass
-            if staging.exists() or list(paths.runtimes.glob(".install-*")):
-                return CheckResult.fail("interrupted install transaction did not converge")
-
-            with JerryProxyOperationLock(paths, platform_info=platform_info):
-                activation_transaction = ActivationTransaction.prepare(
-                    paths,
-                    platform_info,
-                    spec.name,
-                    installed.version,
-                )
-                activation_journal = activation_transaction.journal_path
-            with JerryProxyOperationLock(paths, platform_info=platform_info):
-                pass
-            if (
-                activation_journal.exists()
-                or list(paths.runtimes.glob(".use-*"))
-                or list(paths.bin.glob(".*.use-*.candidate"))
-                or list(paths.active.glob(".*.use-*.candidate.json"))
-                or os.path.lexists(str(paths.bin / executable_name))
-                or (paths.active / ("%s.json" % spec.name)).exists()
-                or not installed.manifest.is_file()
-            ):
-                return CheckResult.fail("interrupted activation transaction did not converge")
-    except IntegrityError as error:
-        # Retained or inconsistent isolated recovery evidence is a failed safety requirement.
-        message = str(error).strip() or repr(error)
-        return CheckResult.fail("%s: %s" % (error.__class__.__name__, message))
+            active = manager.use(spec.name, installed.version)
+            manager.verify(spec.name, installed.version)
+            manager.uninstall(spec.name, installed.version, deactivate=True)
+            inventory = manager.inventory()
+            if inventory.installed or inventory.active or _recovery_artifacts(paths):
+                return CheckResult.fail("isolated backend lifecycle left managed state behind")
+            if active.version != installed.version:
+                return CheckResult.fail("isolated backend lifecycle activated the wrong version")
+    except UnsupportedPlatformError as error:
+        # The synthetic lifecycle has no meaningful backend asset shape on this host.
+        return _unsupported_recovery_platform(error)
     except (JerryProxyError, OSError, RuntimeError, ValueError) as error:
-        # Platform, temporary-storage, archive, and operational probe failures are diagnostics.
-        return _error_result(error)
-    return CheckResult.ok("install and activation crash recovery converged")
+        # Local archive, installation, activation, verification, and removal failures are diagnostics.
+        return _recovery_failure(error)
+    return CheckResult.ok("install, use, verify, and uninstall succeeded in an isolated home")
+
+
+def _check_install_recovery():
+    try:
+        platform_info, unused_spec, asset_platform = _recovery_platform()
+        if asset_platform is None:
+            return CheckResult.skip("no recovery fixture asset shape supports %s" % platform_info.key)
+        with tempfile.TemporaryDirectory(prefix="jerryproxy-install-recovery-self-check-") as temporary:
+            paths = JerryProxyPaths(Path(temporary) / ".jerryproxy")
+            error_log = Path(temporary) / "child-error.log"
+            result = _run_recovery_child(
+                _install_recovery_child,
+                (str(paths.root),),
+                _RECOVERY_CHILD_INSTALL,
+                error_log,
+            )
+            if result is not None:
+                return result
+            inventory = _probe_manager(paths, platform_info).inventory()
+            if inventory.installed or inventory.active:
+                return CheckResult.fail("hard-exit install rollback retained public backend state")
+            if _recovery_artifacts(paths) or any(paths.backends.rglob(".*.install-*")):
+                return CheckResult.fail("hard-exit install rollback retained recovery evidence")
+    except UnsupportedPlatformError as error:
+        # Install recovery requires a supported backend platform fixture.
+        return _unsupported_recovery_platform(error)
+    except (JerryProxyError, OSError, RuntimeError, ValueError) as error:
+        # Spawn coordination and isolated install recovery may fail operationally.
+        return _recovery_failure(error)
+    return CheckResult.ok("hard-exit install staging rolled back and converged")
+
+
+def _prepare_activation_recovery(temporary):
+    root = Path(temporary)
+    platform_info, spec, asset_platform = _recovery_platform()
+    if asset_platform is None:
+        return platform_info, spec, None, None
+    paths = JerryProxyPaths(root / ".jerryproxy")
+    manager = _probe_manager(paths, platform_info)
+    _install_probe_version(
+        manager,
+        root,
+        spec,
+        platform_info,
+        asset_platform,
+        "1.0.0",
+        b"jerryproxy-recovery-previous\n",
+    )
+    target = _install_probe_version(
+        manager,
+        root,
+        spec,
+        platform_info,
+        asset_platform,
+        "2.0.0",
+        b"jerryproxy-recovery-target\n",
+    )
+    manager.use(spec.name, "1.0.0")
+    return platform_info, spec, manager, target
+
+
+def _check_activation_recovery(direction):
+    expected_exit = (
+        _RECOVERY_CHILD_ACTIVATION_ROLLBACK if direction == "rollback" else _RECOVERY_CHILD_ACTIVATION_ROLLFORWARD
+    )
+    expected_version = "1.0.0" if direction == "rollback" else "2.0.0"
+    try:
+        with tempfile.TemporaryDirectory(prefix="jerryproxy-activation-recovery-self-check-") as temporary:
+            platform_info, spec, manager, target = _prepare_activation_recovery(temporary)
+            if manager is None:
+                return CheckResult.skip("no recovery fixture asset shape supports %s" % platform_info.key)
+            error_log = Path(temporary) / "child-error.log"
+            result = _run_recovery_child(
+                _activation_recovery_child,
+                (str(manager.paths.root), target.version, direction),
+                expected_exit,
+                error_log,
+            )
+            if result is not None:
+                return result
+            active = manager.current(spec.name)
+            if active is None or active.version != expected_version:
+                return CheckResult.fail("activation %s recovery selected the wrong version" % direction)
+            if active.link.read_bytes() != active.executable.read_bytes() or _recovery_artifacts(manager.paths):
+                return CheckResult.fail("activation %s recovery did not converge cleanly" % direction)
+    except UnsupportedPlatformError as error:
+        # Activation recovery requires a supported backend platform fixture.
+        return _unsupported_recovery_platform(error)
+    except (JerryProxyError, OSError, RuntimeError, ValueError) as error:
+        # Isolated activation setup, hard exit, and lock-triggered recovery may fail operationally.
+        return _recovery_failure(error)
+    return CheckResult.ok("hard-exit activation %s converged to %s" % (direction, expected_version))
+
+
+def _check_removal_recovery(direction):
+    expected_exit = _RECOVERY_CHILD_REMOVAL_ROLLBACK if direction == "rollback" else _RECOVERY_CHILD_REMOVAL_ROLLFORWARD
+    try:
+        with tempfile.TemporaryDirectory(prefix="jerryproxy-removal-recovery-self-check-") as temporary:
+            root = Path(temporary)
+            platform_info, spec, asset_platform = _recovery_platform()
+            if asset_platform is None:
+                return CheckResult.skip("no recovery fixture asset shape supports %s" % platform_info.key)
+            paths = JerryProxyPaths(root / ".jerryproxy")
+            manager = _probe_manager(paths, platform_info)
+            installed = _install_probe_version(
+                manager,
+                root,
+                spec,
+                platform_info,
+                asset_platform,
+                "1.0.0",
+                b"jerryproxy-removal-recovery\n",
+            )
+            manager.use(spec.name, installed.version)
+            error_log = root / "child-error.log"
+            result = _run_recovery_child(
+                _removal_recovery_child,
+                (str(paths.root), installed.version, direction),
+                expected_exit,
+                error_log,
+            )
+            if result is not None:
+                return result
+            inventory = manager.inventory()
+            if direction == "rollback":
+                if len(inventory.installed) != 1 or len(inventory.active) != 1:
+                    return CheckResult.fail("removal rollback did not restore installed and active state")
+                if inventory.active[0].link.read_bytes() != inventory.active[0].executable.read_bytes():
+                    return CheckResult.fail("removal rollback restored an unusable active command")
+            elif inventory.installed or inventory.active:
+                return CheckResult.fail("committed removal recovery did not dispose public state")
+            if _recovery_artifacts(paths):
+                return CheckResult.fail("removal %s recovery retained transaction evidence" % direction)
+    except UnsupportedPlatformError as error:
+        # Removal recovery requires a supported backend platform fixture.
+        return _unsupported_recovery_platform(error)
+    except (JerryProxyError, OSError, RuntimeError, ValueError) as error:
+        # Isolated removal setup, hard exit, and lock-triggered recovery may fail operationally.
+        return _recovery_failure(error)
+    return CheckResult.ok("hard-exit removal %s converged" % direction)
 
 
 def _relay_warning(reason):
@@ -368,6 +1073,10 @@ def _check_relay(profile, session_factory):
             remaining = RELAY_PROBE_BYTES + 1 - len(body)
             accepted = block[:remaining]
             received_at = time.monotonic()
+            if received_at - started > _RELAY_CHECK_TOTAL_TIMEOUT:
+                return _relay_warning(
+                    "stream exceeded the %.0f-second total timeout" % _RELAY_CHECK_TOTAL_TIMEOUT
+                )
             body.extend(accepted)
             chunk_count += 1
             if first_chunk_at is None:
@@ -412,15 +1121,196 @@ def _check_relay(profile, session_factory):
         # Other documented Requests transport failures remain sanitized warnings.
         return _relay_warning("request failed")
     finally:
-        if response is not None:
-            response.close()
-        session.close()
+        try:
+            if response is not None:
+                response.close()
+        finally:
+            session.close()
+
+
+def _read_child_diagnostic(path):
+    try:
+        with Path(path).open("rb") as stream:
+            payload = stream.read(_MAXIMUM_DIAGNOSTIC_CHARACTERS + 1)
+    except FileNotFoundError:
+        # A child that produced no stderr or expected-error log leaves no diagnostic file.
+        return ()
+    except OSError as error:
+        # Diagnostic read failure is secondary to the child supervision failure.
+        return (
+            _bounded_diagnostic("Unable to read child diagnostic: %s: %s" % (error.__class__.__name__, error)),
+        )
+    if not payload:
+        return ()
+    truncated = len(payload) > _MAXIMUM_DIAGNOSTIC_CHARACTERS
+    if truncated:
+        marker = "\n[diagnostic truncated]"
+        text = payload[: _MAXIMUM_DIAGNOSTIC_CHARACTERS - len(marker)].decode("utf-8", errors="replace")
+        text += marker
+    else:
+        text = payload.decode("utf-8", errors="replace")
+    return (_bounded_diagnostic(text),)
+
+
+def _child_diagnostics(*paths):
+    diagnostics = ()
+    for path in paths:
+        diagnostics += _read_child_diagnostic(path)
+    return diagnostics
+
+
+def _relay_probe_child(profile, result_path):  # pragma: no cover - spawned relay child
+    try:
+        result = _check_relay(profile, requests.Session)
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        # Malformed runtime responses and local dependency failures become diagnostic results.
+        result = _error_result(error)
+    diagnostics = [_bounded_diagnostic(result.diagnostics[0])] if result.diagnostics else []
+    atomic_write_json(
+        Path(result_path),
+        {
+            "level": result.level,
+            "detail": _bounded_line(result.detail),
+            "diagnostics": diagnostics,
+        },
+    )
+
+
+def _relay_child_result(result_path):
+    try:
+        payload = read_json(Path(result_path), maximum_bytes=_MAXIMUM_CHILD_RESULT_BYTES)
+    except (OSError, ValueError) as error:
+        # A completed child with an unreadable result file is a diagnostic error.
+        return _error_result(error)
+    if (
+        set(payload) != {"level", "detail", "diagnostics"}
+        or payload["level"] not in ("OK", "WARN", "SKIP", "FAIL", "ERR")
+        or not isinstance(payload["detail"], str)
+        or not isinstance(payload["diagnostics"], list)
+        or len(payload["diagnostics"]) > 1
+        or any(not isinstance(item, str) for item in payload["diagnostics"])
+    ):
+        return CheckResult.err("relay probe child returned an invalid diagnostic result")
+    return CheckResult(
+        payload["level"],
+        _bounded_line(payload["detail"]),
+        tuple(_bounded_diagnostic(item) for item in payload["diagnostics"]),
+    )
+
+
+def _read_relay_child_result(result_path):
+    try:
+        exists = Path(result_path).is_file()
+    except OSError as error:
+        # Result-file observation failure is an internal probe error.
+        return _error_result(error)
+    return _relay_child_result(result_path) if exists else None
+
+
+def _check_relay_in_process(profile):
+    started = time.monotonic()
+    deadline = started + _RELAY_CHECK_TOTAL_TIMEOUT
+    start_method, context = _preferred_process_context()
+    if start_method is None:
+        return CheckResult.skip("no supported multiprocessing start method is available")
+    with tempfile.TemporaryDirectory(prefix="jerryproxy-relay-self-check-") as temporary:
+        result_path = Path(temporary) / "result.json"
+        stderr_log = Path(temporary) / "stderr.log"
+        try:
+            start_allowed = context.Event()
+            start_cancelled = context.Event()
+            start_ready = context.Event()
+            start_budget = context.Value("d", 0.0)
+            process = context.Process(
+                target=_captured_child_entry,
+                args=(
+                    _relay_probe_child,
+                    (profile, str(result_path)),
+                    str(stderr_log),
+                    start_allowed,
+                    start_cancelled,
+                    start_ready,
+                    start_budget,
+                ),
+                daemon=True,
+            )
+        except _PROCESS_CONTROL_EXCEPTIONS as error:
+            # Frozen-runtime or host process policy may reject process construction.
+            return CheckResult.skip(
+                "%s relay probe unavailable: %s: %s"
+                % (start_method, error.__class__.__name__, _bounded_line(error))
+            )
+        start_status, start_error = _start_process(
+            process,
+            start_allowed,
+            start_cancelled,
+            start_ready,
+            start_budget,
+            deadline,
+        )
+        if start_status == "timeout":
+            return CheckResult.err(
+                "relay probe child startup exceeded the %.3g-second total deadline"
+                % _RELAY_CHECK_TOTAL_TIMEOUT
+            )
+        if start_status == "unavailable":
+            # Frozen-runtime or host process policy may reject the selected start method.
+            return CheckResult.skip(
+                "%s relay probe unavailable: %s: %s"
+                % (start_method, start_error.__class__.__name__, _bounded_line(start_error))
+            )
+        if start_status == "error":
+            return CheckResult.err(
+                "relay probe child startup supervision failed: %s: %s"
+                % (start_error.__class__.__name__, _bounded_line(start_error))
+            )
+        wait_diagnostics = []
+        remaining = max(_RELAY_CHECK_TOTAL_TIMEOUT - (time.monotonic() - started), 0.0)
+        _join_process(process, remaining, wait_diagnostics)
+        elapsed = time.monotonic() - started
+        alive = _process_is_alive(process, wait_diagnostics)
+        if wait_diagnostics:
+            if alive:
+                alive, stop_diagnostics = _stop_process(process)
+                wait_diagnostics.extend(stop_diagnostics)
+            wait_diagnostics.extend(_child_diagnostics(stderr_log))
+            if alive:
+                return CheckResult.err(
+                    "timed-out relay probe child remained alive after kill",
+                    diagnostics=tuple(wait_diagnostics),
+                )
+            return CheckResult.err(
+                "relay probe child supervision failed",
+                diagnostics=tuple(wait_diagnostics),
+            )
+        timed_out = alive or elapsed >= _RELAY_CHECK_TOTAL_TIMEOUT
+        if alive:
+            stop_diagnostics = ()
+            alive, stop_diagnostics = _stop_process(process)
+            if alive:
+                return CheckResult.err(
+                    "timed-out relay probe child remained alive after kill",
+                    diagnostics=stop_diagnostics + _child_diagnostics(stderr_log),
+                )
+        child_result = _read_relay_child_result(result_path)
+        if timed_out:
+            if child_result is not None and child_result.level in ("FAIL", "ERR"):
+                return child_result
+            return _relay_warning("total probe deadline exceeded")
+        if process.exitcode != 0:
+            return CheckResult.err(
+                "relay probe child returned exit code %s" % process.exitcode,
+                diagnostics=_child_diagnostics(stderr_log),
+            )
+        if child_result is None:
+            return CheckResult.err(
+                "relay probe child exited without a diagnostic result",
+                diagnostics=_child_diagnostics(stderr_log),
+            )
+        return child_result
 
 
 def build_checks(paths, relay_session_factory=None):
-    session_factory = (
-        relay_session_factory if relay_session_factory is not None else requests.Session
-    )
     checks = (
         ("Python runtime", _check_runtime),
         ("platform detection", _check_platform),
@@ -429,22 +1319,38 @@ def build_checks(paths, relay_session_factory=None):
         ("private directory permissions", lambda: _check_private_permissions(paths)),
         ("backend registry", _check_backend_registry),
         ("packaged backend catalog", _check_backend_catalog),
+        ("catalog platform selection", _check_backend_catalog_selection),
         ("filelock compatibility", _check_filelock),
         ("backend inventory", lambda: _check_backend_inventory(paths)),
-        ("backend transaction recovery", _check_transaction_recovery),
+        ("isolated backend lifecycle", _check_isolated_backend_lifecycle),
+        ("recovery install rollback", _check_install_recovery),
+        ("recovery activation rollback", lambda: _check_activation_recovery("rollback")),
+        ("recovery activation rollforward", lambda: _check_activation_recovery("rollforward")),
+        ("recovery removal rollback", lambda: _check_removal_recovery("rollback")),
+        ("recovery removal rollforward", lambda: _check_removal_recovery("rollforward")),
     )
     return checks + tuple(
         (
             "relay %s" % profile.name,
-            lambda selected=profile: _check_relay(selected, session_factory),
+            (
+                (lambda selected=profile: _check_relay_in_process(selected))
+                if relay_session_factory is None
+                else (lambda selected=profile: _check_relay(selected, relay_session_factory))
+            ),
         )
         for profile in iter_builtin_relays()
     )
 
 
 def run_checks(checks, output, color=False):
-    counts = {"OK": 0, "WARN": 0, "FAIL": 0, "ERR": 0}
-    colors = {"OK": _ANSI_GREEN, "WARN": _ANSI_YELLOW, "FAIL": _ANSI_RED, "ERR": _ANSI_RED}
+    counts = {"OK": 0, "WARN": 0, "SKIP": 0, "FAIL": 0, "ERR": 0}
+    colors = {
+        "OK": _ANSI_GREEN,
+        "WARN": _ANSI_YELLOW,
+        "SKIP": _ANSI_CYAN,
+        "FAIL": _ANSI_RED,
+        "ERR": _ANSI_RED,
+    }
     total = len(checks)
     for index, (name, check) in enumerate(checks, start=1):
         label = "[%d/%d] %s" % (index, total, name)
@@ -455,16 +1361,20 @@ def run_checks(checks, output, color=False):
             % (
                 _paint(label, _ANSI_CYAN, color),
                 _paint(result.level, colors[result.level], color),
-                result.detail,
+                _bounded_line(result.detail),
             )
         )
+        for diagnostic in result.diagnostics:
+            for line in _bounded_diagnostic(diagnostic).splitlines():
+                output("    %s" % _paint(line, colors[result.level], color))
 
     output(
-        "%s: %s, %s, %s, %s"
+        "%s: %s, %s, %s, %s, %s"
         % (
             _paint("Summary", _ANSI_BOLD, color),
             _paint("%d OK" % counts["OK"], _ANSI_GREEN, color),
             _paint("%d WARN" % counts["WARN"], _ANSI_YELLOW, color),
+            _paint("%d SKIP" % counts["SKIP"], _ANSI_CYAN, color),
             _paint("%d FAIL" % counts["FAIL"], _ANSI_RED, color),
             _paint("%d ERR" % counts["ERR"], _ANSI_RED, color),
         )
@@ -475,12 +1385,35 @@ def run_checks(checks, output, color=False):
     if counts["WARN"]:
         output(_paint("Self-check PASSED with warnings", _ANSI_YELLOW, color))
         return 0
+    if counts["SKIP"]:
+        output(_paint("Self-check PASSED with skips", _ANSI_CYAN, color))
+        return 0
     output(_paint("Self-check PASSED", _ANSI_GREEN, color))
     return 0
 
 
 def run_self_check(paths, output=print, color=False, relay_session_factory=None):
     output(_paint("JerryProxy self-check %s" % __VERSION__, _ANSI_CYAN, color))
+    output(
+        "%s: Python %s %s; JerryProxy %s; frozen=%s"
+        % (
+            _paint("Runtime", _ANSI_BOLD, color),
+            platform.python_implementation(),
+            platform.python_version(),
+            __VERSION__,
+            str(bool(getattr(sys, "frozen", False))).lower(),
+        )
+    )
+    output(
+        "%s: %s %s; machine=%s; os.name=%s"
+        % (
+            _paint("System", _ANSI_BOLD, color),
+            platform.system() or "unknown",
+            platform.release() or "unknown",
+            platform.machine() or "unknown",
+            os.name,
+        )
+    )
     output("%s: %s" % (_paint("Home", _ANSI_BOLD, color), paths.root))
     return run_checks(
         build_checks(paths, relay_session_factory=relay_session_factory),

@@ -26,7 +26,11 @@ from test.selfcheck.fakes import verified_relay_session_factory
 @pytest.fixture(autouse=True)
 def _isolate_self_check_relay_network(monkeypatch):
     relay_factory = verified_relay_session_factory(monkeypatch)
-    monkeypatch.setattr(selfcheck_module.requests, "Session", relay_factory)
+
+    def inline_relay_probe(profile):
+        return selfcheck_module._check_relay(profile, relay_factory)
+
+    monkeypatch.setattr(selfcheck_module, "_check_relay_in_process", inline_relay_probe)
     return relay_factory
 
 
@@ -149,13 +153,21 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     result = CliRunner().invoke(cli, ["--home", str(tmp_path), "self-check"])
 
     assert result.exit_code == 0
-    assert "[1/13] Python runtime: OK" in result.output
-    assert "[7/13] packaged backend catalog: OK" in result.output
-    assert "[8/13] filelock compatibility:" in result.output
-    assert "[9/13] backend inventory: OK" in result.output
-    assert "[10/13] backend transaction recovery: OK" in result.output
-    assert "[13/13] relay gh.geekertao.top: OK" in result.output
-    assert "0 FAIL, 0 ERR" in result.output
+    assert "Runtime: Python" in result.output
+    assert "System:" in result.output
+    assert "[1/19] Python runtime: OK" in result.output
+    assert "[7/19] packaged backend catalog: OK" in result.output
+    assert "[8/19] catalog platform selection: OK" in result.output
+    assert "[9/19] filelock compatibility:" in result.output
+    assert "[10/19] backend inventory: OK" in result.output
+    assert "[11/19] isolated backend lifecycle: OK" in result.output
+    assert "[12/19] recovery install rollback: OK" in result.output
+    assert "[13/19] recovery activation rollback: OK" in result.output
+    assert "[14/19] recovery activation rollforward: OK" in result.output
+    assert "[15/19] recovery removal rollback: OK" in result.output
+    assert "[16/19] recovery removal rollforward: OK" in result.output
+    assert "[19/19] relay gh.geekertao.top: OK" in result.output
+    assert "0 SKIP, 0 FAIL, 0 ERR" in result.output
     assert "Self-check PASSED" in result.output
 
 
@@ -166,10 +178,12 @@ def test_self_check_help_discloses_bounded_network_behavior():
     assert result.exit_code == 0
     assert "isolated temporary home" in normalized
     assert "fixed 1 MiB Range" in normalized
-    assert "5-second network timeout" in normalized
+    assert "5-second connect/read timeouts" in normalized
     assert "Response-header latency" in normalized
     assert "latency to the first chunk" in normalized
+    assert "30-second total probe deadline" in normalized
     assert "WARN" in normalized
+    assert "SKIP" in normalized
 
 
 def test_self_check_can_force_ansi_color(tmp_path):
@@ -571,9 +585,7 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
             },
         )
         assert catalog_versions.exit_code == 0
-        assert catalog_versions.output.splitlines() == [
-            "plain,%s" % item for item in compatible
-        ]
+        assert catalog_versions.output.splitlines() == ["plain,%s" % item for item in compatible]
 
     cached_version = runner.invoke(
         cli,

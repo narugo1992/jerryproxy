@@ -10,7 +10,7 @@ CheckResult
 -----------------------------------------------------
 
 .. autoclass:: CheckResult
-   :members: level,detail,ok,warn,fail,err
+   :members: level,detail,diagnostics,ok,warn,skip,fail,err
 
 
 ansi\_color\_enabled
