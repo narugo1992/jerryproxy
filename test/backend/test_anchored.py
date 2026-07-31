@@ -1,3 +1,4 @@
+import errno
 import os
 import stat
 
@@ -191,6 +192,199 @@ def test_replace_rejects_changed_destination_identity(tmp_path):
             )
 
 
+@POSIX_FAULT_INJECTION
+def test_replace_preserves_a_destination_substituted_at_the_native_rename(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    candidate = root / "candidate"
+    published = root / "published"
+    displaced = root / "displaced"
+    replacement = root / "replacement"
+    _write_private(candidate, b"candidate")
+    _write_private(published, b"published")
+    _write_private(replacement, b"replacement")
+    source_identity = anchored_module.capture_identity(candidate)
+    destination_identity = anchored_module.capture_identity(published)
+    substituted = []
+
+    if hasattr(anchored_module, "_rename_posix_exchange"):
+        original_rename = anchored_module._rename_posix_exchange
+
+        def substitute_at_exchange(*args, **kwargs):
+            if not substituted:
+                published.rename(displaced)
+                replacement.rename(published)
+                substituted.append(True)
+            return original_rename(*args, **kwargs)
+
+        monkeypatch.setattr(anchored_module, "_rename_posix_exchange", substitute_at_exchange)
+    else:
+        original_rename = anchored_module.os.replace
+
+        def substitute_at_replace(*args, **kwargs):
+            if not substituted:
+                published.rename(displaced)
+                replacement.rename(published)
+                substituted.append(True)
+            return original_rename(*args, **kwargs)
+
+        monkeypatch.setattr(anchored_module.os, "replace", substitute_at_replace)
+
+    with AnchoredDirectory(root) as anchored:
+        with pytest.raises(ArchiveError, match="destination.*changed|publication boundary"):
+            anchored.replace(
+                (candidate.name,),
+                (published.name,),
+                expected_identity=source_identity,
+                expected_destination_identity=destination_identity,
+            )
+
+    assert substituted
+    assert candidate.read_bytes() == b"candidate"
+    assert published.read_bytes() == b"replacement"
+    assert displaced.read_bytes() == b"published"
+
+
+@POSIX_FAULT_INJECTION
+def test_replace_preserves_a_source_substituted_at_the_native_exchange(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    candidate = root / "candidate"
+    published = root / "published"
+    displaced = root / "displaced-source"
+    replacement = root / "replacement-source"
+    _write_private(candidate, b"candidate")
+    _write_private(published, b"published")
+    _write_private(replacement, b"replacement")
+    source_identity = anchored_module.capture_identity(candidate)
+    destination_identity = anchored_module.capture_identity(published)
+    original_exchange = anchored_module._rename_posix_exchange
+    substituted = []
+
+    def substitute_at_exchange(*args, **kwargs):
+        if not substituted:
+            candidate.rename(displaced)
+            replacement.rename(candidate)
+            substituted.append(True)
+        return original_exchange(*args, **kwargs)
+
+    monkeypatch.setattr(anchored_module, "_rename_posix_exchange", substitute_at_exchange)
+
+    with AnchoredDirectory(root) as anchored:
+        with pytest.raises(ArchiveError, match="publication boundary"):
+            anchored.replace(
+                (candidate.name,),
+                (published.name,),
+                expected_identity=source_identity,
+                expected_destination_identity=destination_identity,
+            )
+
+    assert displaced.read_bytes() == b"candidate"
+    assert candidate.read_bytes() == b"replacement"
+    assert published.read_bytes() == b"published"
+
+
+@POSIX_FAULT_INJECTION
+def test_replace_preserves_all_entries_when_exchange_reversal_fails(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    candidate = root / "candidate"
+    published = root / "published"
+    stolen = root / "stolen-candidate"
+    _write_private(candidate, b"candidate")
+    _write_private(published, b"published")
+    source_identity = anchored_module.capture_identity(candidate)
+    destination_identity = anchored_module.capture_identity(published)
+    original_exchange = anchored_module._rename_posix_exchange
+    calls = []
+
+    def fail_reversal(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            result = original_exchange(*args, **kwargs)
+            published.rename(stolen)
+            _write_private(published, b"replacement")
+            return result
+        raise OSError(errno.EIO, "simulated exchange reversal failure")
+
+    monkeypatch.setattr(anchored_module, "_rename_posix_exchange", fail_reversal)
+
+    with AnchoredDirectory(root) as anchored:
+        with pytest.raises(ArchiveError, match="unable to publish anchored entry"):
+            anchored.replace(
+                (candidate.name,),
+                (published.name,),
+                expected_identity=source_identity,
+                expected_destination_identity=destination_identity,
+            )
+
+    assert len(calls) == 2
+    assert candidate.read_bytes() == b"published"
+    assert published.read_bytes() == b"replacement"
+    assert stolen.read_bytes() == b"candidate"
+
+
+@pytest.mark.parametrize(
+    ("rename", "message"),
+    (
+        ("_rename_posix_noreplace", "atomic no-replace publication is unsupported"),
+        ("_rename_posix_exchange", "atomic exchange is unsupported"),
+    ),
+)
+def test_linux_atomic_rename_flags_fail_closed_when_the_filesystem_rejects_them(
+    monkeypatch,
+    rename,
+    message,
+):
+    class NativeRename(object):
+        def __call__(self, *args):
+            del args
+            return -1
+
+    class Libc(object):
+        renameat2 = NativeRename()
+
+    monkeypatch.setattr(anchored_module.sys, "platform", "linux")
+    monkeypatch.setattr(anchored_module.ctypes, "CDLL", lambda *args, **kwargs: Libc())
+    monkeypatch.setattr(anchored_module.ctypes, "get_errno", lambda: errno.ENOSYS)
+
+    with pytest.raises(ArchiveError, match=message):
+        getattr(anchored_module, rename)(11, "source", 12, "destination")
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected_syscall"),
+    (("armv5l", 382), ("loongarch64", 276), ("loong64", 276)),
+)
+@pytest.mark.parametrize("rename", ("_rename_posix_noreplace", "_rename_posix_exchange"))
+def test_linux_atomic_rename_syscall_dispatch_supports_release_architectures(
+    monkeypatch,
+    machine,
+    expected_syscall,
+    rename,
+):
+    calls = []
+
+    class Syscall(object):
+        restype = None
+
+        def __call__(self, *args):
+            calls.append(args)
+            return 0
+
+    class Libc(object):
+        syscall = Syscall()
+
+    monkeypatch.setattr(anchored_module.sys, "platform", "linux")
+    monkeypatch.setattr(anchored_module.os, "uname", lambda: type("Uname", (), {"machine": machine})())
+    monkeypatch.setattr(anchored_module.ctypes, "CDLL", lambda *args, **kwargs: Libc())
+
+    getattr(anchored_module, rename)(11, "source", 12, "destination")
+
+    assert calls
+    assert calls[0][0].value == expected_syscall
+
+
 @pytest.mark.parametrize("python_exposes_flag", (True, False))
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor flag semantics")
 def test_replace_opens_symlink_entries_without_combining_no_follow(
@@ -226,7 +420,7 @@ def test_replace_opens_symlink_entries_without_combining_no_follow(
         monkeypatch.setattr(anchored_module.os, "O_SYMLINK", o_symlink, raising=False)
     else:
         monkeypatch.delattr(anchored_module.os, "O_SYMLINK", raising=False)
-        monkeypatch.setattr(anchored_module.sys, "platform", "darwin")
+        monkeypatch.setattr(anchored_module, "_symlink_open_flag", lambda: o_symlink)
     monkeypatch.setattr(anchored_module.os, "open", simulate_darwin_symlink_open)
 
     with anchored:
@@ -251,7 +445,7 @@ def test_replace_maps_publication_oserror(tmp_path, monkeypatch):
     def fail_replace(*args, **kwargs):
         raise OSError("rename failed")
 
-    monkeypatch.setattr(anchored_module.os, "replace", fail_replace)
+    monkeypatch.setattr(anchored_module, "_rename_posix_noreplace", fail_replace)
     with AnchoredDirectory(root) as anchored:
         with pytest.raises(ArchiveError, match="unable to publish anchored entry"):
             anchored.replace(("candidate",), ("published",))
@@ -276,7 +470,7 @@ def test_replace_rejects_published_identity_race(tmp_path, monkeypatch):
 
     monkeypatch.setattr(anchored_module.os, "stat", changed_after_publish)
     with AnchoredDirectory(root) as anchored:
-        with pytest.raises(ArchiveError, match="published a different entry"):
+        with pytest.raises(ArchiveError, match="publication boundary"):
             anchored.replace(("candidate",), ("published",))
 
 

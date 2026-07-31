@@ -400,6 +400,7 @@ def _dispose_file(paths, path, expected_identity):
             path,
             IntegrityError,
             expected_identity=expected_identity,
+            private_names=True,
         )
         flush_directory(path.parent)
 
@@ -419,6 +420,7 @@ def _remove_staging(record, expected_identity):
         record.staging,
         IntegrityError,
         expected_identity=expected_identity,
+        private_names=True,
     ):
         flush_directory(record.staging.parent)
 

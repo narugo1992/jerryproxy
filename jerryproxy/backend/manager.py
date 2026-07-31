@@ -727,6 +727,7 @@ class BackendManager(object):
                 transaction,
                 IntegrityError,
                 expected_identity=transaction_identity,
+                private_names=True,
             ):
                 raise IntegrityError("removal transaction disappeared before disposal: %s" % transaction)
             flush_directory(transaction.parent)
@@ -867,10 +868,20 @@ class BackendManager(object):
         backend_root = root / name
         self._validate_cleanup_chain(root, backend_root)
         if version is None:
-            return [backend_root] if os.path.lexists(str(backend_root)) else []
-        target = backend_root / version
+            target = backend_root
+            parent = root
+        else:
+            target = backend_root / version
+            parent = backend_root
         self._validate_cleanup_chain(root, target)
-        return [target] if os.path.lexists(str(target)) else []
+        targets = [target] if os.path.lexists(str(target)) else []
+        if not parent.is_dir():
+            return targets
+        for candidate in parent.iterdir():
+            self._validate_cleanup_chain(root, candidate)
+            if removal_module._is_cleanup_tombstone_for(candidate.name, target.name):
+                targets.append(candidate)
+        return targets
 
     def _area_cleanup_targets(self, area):  # type: (str) -> List[Path]
         root = getattr(self.paths, area)
@@ -909,7 +920,12 @@ class BackendManager(object):
                 continue
             reclaimed += removal_module._secure_path_size(root, target, CleanupScopeError)
             self._validate_cleanup_chain(root, target)
-            removal_module._secure_remove_tree(root, target, CleanupScopeError)
+            removal_module._secure_remove_tree(
+                root,
+                target,
+                CleanupScopeError,
+                private_names=removal_module._is_cleanup_tombstone_name(target.name),
+            )
             flush_directory(target.parent)
             removed += 1
         return CleanupResult(selected_areas, removed, reclaimed)

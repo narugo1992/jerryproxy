@@ -1,6 +1,7 @@
 """Crash-recoverable and alias-safe backend removal primitives."""
 
 import ctypes
+import hashlib
 import os
 import re
 import secrets
@@ -18,7 +19,7 @@ from ..errors import (
 )
 from ..home import is_path_alias
 from ..utils.fs import MAXIMUM_JSON_BYTES
-from .anchored import AnchoredDirectory
+from .anchored import AnchoredDirectory, _isolate_posix_entry, _rename_posix_noreplace
 from .durable import durable_write_json, flush_directory
 from .identity import capture_identity, identity_matches, validate_identity
 from .platform import detect_platform
@@ -28,6 +29,7 @@ _TRANSACTION_PATTERN = re.compile(r"^\.remove-[0-9a-f]{32}$")
 _JOURNAL_NAME = "journal.json"
 _REMOVAL_TEMPORARY_PREFIX = ".journal.json.tmp-"
 _REMOVAL_TEMPORARY_PATTERN = re.compile(r"^\.journal\.json\.tmp-[0-9a-f]{32}$")
+_CLEANUP_TOMBSTONE_PATTERN = re.compile(r"^\.jerryproxy-remove-(?:[0-9a-f]{64}-)?[0-9a-f]{32}$")
 _MAXIMUM_REMOVAL_MOVES = 512
 _MAXIMUM_REMOVAL_PATH_BYTES = 512
 _CANONICAL_INDEX_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)$")
@@ -43,6 +45,21 @@ _MOVE_KINDS = {
     "active-link": ("bin", "active-link"),
     "active-manifest": ("active", "active-manifest"),
 }
+
+
+def _cleanup_tombstone_prefix(name):
+    digest = hashlib.sha256(os.fsencode(name)).hexdigest()
+    return ".jerryproxy-remove-%s-" % digest
+
+
+def _is_cleanup_tombstone_name(name):
+    return _CLEANUP_TOMBSTONE_PATTERN.fullmatch(name) is not None
+
+
+def _is_cleanup_tombstone_for(name, target_name):
+    prefix = _cleanup_tombstone_prefix(target_name)
+    token = name[len(prefix) :] if name.startswith(prefix) else ""
+    return len(token) == 32 and all(character in "0123456789abcdef" for character in token)
 
 _WINDOWS_DELETE = 0x00010000
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
@@ -431,24 +448,97 @@ def _delete_windows_guard(descriptor, expect_directory):
         raise _windows_error()
 
 
-def _anchored_unlink(target, parent_descriptor, target_descriptor=None):
+def _delete_isolated_posix_entry(
+    parent_descriptor,
+    name,
+    target_descriptor,
+    error_type,
+    directory,
+    private_names=False,
+):
+    if private_names:
+        current = _posix_child_status(parent_descriptor, name, error_type)
+        if current is None or _snapshot_identity(current) != _snapshot_identity(os.fstat(target_descriptor)):
+            raise error_type("private managed removal target changed before deletion: %s" % name)
+        if directory:
+            os.rmdir(name, dir_fd=parent_descriptor)
+        else:
+            os.unlink(name, dir_fd=parent_descriptor)
+        return
+    try:
+        quarantine_name, unused_status = _isolate_posix_entry(
+            parent_descriptor,
+            name,
+            _identity(os.fstat(target_descriptor)),
+            _cleanup_tombstone_prefix(name),
+            _rename_posix_noreplace,
+        )
+    except (ArchiveError, OSError) as error:
+        raise error_type("managed removal target changed at the deletion boundary: %s" % name) from error
+    try:
+        if directory:
+            os.rmdir(quarantine_name, dir_fd=parent_descriptor)
+        else:
+            os.unlink(quarantine_name, dir_fd=parent_descriptor)
+    except OSError as error:
+        try:
+            _rename_posix_noreplace(
+                parent_descriptor,
+                quarantine_name,
+                parent_descriptor,
+                name,
+            )
+        except (ArchiveError, OSError) as restore_error:
+            raise error_type(
+                "unable to delete isolated managed entry; evidence retained in quarantine: %s" % name
+            ) from restore_error
+        raise error_type("unable to delete isolated managed entry: %s" % name) from error
+
+
+def _anchored_unlink(
+    target,
+    parent_descriptor,
+    target_descriptor=None,
+    error_type=IntegrityError,
+    private_names=False,
+):
     if isinstance(target_descriptor, _WindowsIdentityGuard):
         _delete_windows_guard(target_descriptor, False)
         return
     if parent_descriptor is None:
         target.unlink()
         return
-    os.unlink(target.name, dir_fd=parent_descriptor)
+    _delete_isolated_posix_entry(
+        parent_descriptor,
+        target.name,
+        target_descriptor,
+        error_type,
+        False,
+        private_names=private_names,
+    )
 
 
-def _anchored_rmdir(target, parent_descriptor, target_descriptor=None):
+def _anchored_rmdir(
+    target,
+    parent_descriptor,
+    target_descriptor=None,
+    error_type=IntegrityError,
+    private_names=False,
+):
     if isinstance(target_descriptor, _WindowsIdentityGuard):
         _delete_windows_guard(target_descriptor, True)
         return
     if parent_descriptor is None:
         target.rmdir()
         return
-    os.rmdir(target.name, dir_fd=parent_descriptor)
+    _delete_isolated_posix_entry(
+        parent_descriptor,
+        target.name,
+        target_descriptor,
+        error_type,
+        True,
+        private_names=private_names,
+    )
 
 
 def _posix_child_status(parent_descriptor, name, error_type):
@@ -489,6 +579,7 @@ def _remove_posix_entry(
     recursive=True,
     expected_identity=None,
     expected_snapshot=None,
+    private_names=False,
 ):
     status = _posix_child_status(parent_descriptor, name, error_type)
     if status is None:
@@ -510,20 +601,39 @@ def _remove_posix_entry(
             if entries and not recursive:
                 raise error_type("managed removal directory is not empty: %s" % name)
             for child_name in entries:
-                _remove_posix_entry(descriptor, child_name, error_type)
+                _remove_posix_entry(
+                    descriptor,
+                    child_name,
+                    error_type,
+                    private_names=private_names,
+                )
             current = _posix_child_status(parent_descriptor, name, error_type)
             if current is None:
                 return True
             if _snapshot_identity(current) != _snapshot_identity(os.fstat(descriptor)):
                 raise error_type("managed removal directory changed before final deletion: %s" % name)
-            os.rmdir(name, dir_fd=parent_descriptor)
+            _delete_isolated_posix_entry(
+                parent_descriptor,
+                name,
+                descriptor,
+                error_type,
+                True,
+                private_names=private_names,
+            )
             return True
         current = _posix_child_status(parent_descriptor, name, error_type)
         if current is None:
             return False
         if _snapshot_identity(current) != _snapshot_identity(os.fstat(descriptor)):
             raise error_type("managed removal path changed before deletion: %s" % name)
-        os.unlink(name, dir_fd=parent_descriptor)
+        _delete_isolated_posix_entry(
+            parent_descriptor,
+            name,
+            descriptor,
+            error_type,
+            False,
+            private_names=private_names,
+        )
         return True
     finally:
         os.close(descriptor)
@@ -595,6 +705,7 @@ def _remove_validated_tree(
     expected_identity=None,
     parent_status=None,
     parent_descriptor=None,
+    private_names=False,
 ):
     owns_parent_descriptor = parent_descriptor is None
     if target in allowed and target.is_symlink():
@@ -614,7 +725,13 @@ def _remove_validated_tree(
             ):
                 raise error_type("managed removal target identity does not match recovery authority: %s" % target)
             _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type)
-            _anchored_unlink(target, parent_descriptor, target_descriptor)
+            _anchored_unlink(
+                target,
+                parent_descriptor,
+                target_descriptor,
+                error_type,
+                private_names=private_names,
+            )
             _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type, missing_ok=True)
             return True
         finally:
@@ -648,7 +765,13 @@ def _remove_validated_tree(
             if not _matches_guard(current, status, descriptor) or is_path_alias(target):
                 raise error_type("managed removal path changed before deletion: %s" % target)
             _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type)
-            _anchored_unlink(target, parent_descriptor, descriptor)
+            _anchored_unlink(
+                target,
+                parent_descriptor,
+                descriptor,
+                error_type,
+                private_names=private_names,
+            )
             _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type, missing_ok=True)
             return True
         if os.name == "posix" and isinstance(parent_descriptor, int):
@@ -664,6 +787,7 @@ def _remove_validated_tree(
                 recursive=recursive,
                 expected_identity=expected_identity,
                 expected_snapshot=_snapshot_identity(os.fstat(descriptor)),
+                private_names=private_names,
             )
             _validate_parent_guard(
                 root,
@@ -690,6 +814,7 @@ def _remove_validated_tree(
                 allowed,
                 parent_status=status,
                 parent_descriptor=descriptor,
+                private_names=private_names,
             )
         _validate_chain(root, target, error_type)
         current = _lstat(target)
@@ -698,7 +823,13 @@ def _remove_validated_tree(
         if not _matches_guard(current, status, descriptor) or is_path_alias(target):
             raise error_type("managed removal directory changed before final deletion: %s" % target)
         _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type)
-        _anchored_rmdir(target, parent_descriptor, descriptor)
+        _anchored_rmdir(
+            target,
+            parent_descriptor,
+            descriptor,
+            error_type,
+            private_names=private_names,
+        )
         _validate_parent_guard(root, target, parent_status, parent_descriptor, error_type, missing_ok=True)
         return True
     finally:
@@ -710,7 +841,14 @@ def _remove_validated_tree(
                 _close_identity_guard(parent_descriptor)
 
 
-def _secure_remove_tree(root, target, error_type=CleanupScopeError, allowed_symlinks=(), expected_identity=None):
+def _secure_remove_tree(
+    root,
+    target,
+    error_type=CleanupScopeError,
+    allowed_symlinks=(),
+    expected_identity=None,
+    private_names=False,
+):
     # type: (Path, Path, type, tuple, Optional[dict]) -> bool
     """Delete a validated managed tree without traversing path aliases."""
 
@@ -722,10 +860,17 @@ def _secure_remove_tree(root, target, error_type=CleanupScopeError, allowed_syml
         error_type,
         allowed,
         expected_identity=expected_identity,
+        private_names=private_names,
     )
 
 
-def _secure_remove_empty_directory(root, target, error_type, expected_identity=None):
+def _secure_remove_empty_directory(
+    root,
+    target,
+    error_type,
+    expected_identity=None,
+    private_names=False,
+):
     root = Path(root)
     target = Path(target)
     _validate_removal_tree(root, target, error_type)
@@ -736,6 +881,7 @@ def _secure_remove_empty_directory(root, target, error_type, expected_identity=N
         set(),
         recursive=False,
         expected_identity=expected_identity,
+        private_names=private_names,
     )
 
 
@@ -1369,6 +1515,7 @@ def _dispose_transaction(paths, transaction, moves, record=None):
             IntegrityError,
             allowed,
             expected_identity=expected_identity,
+            private_names=True,
         )
         if removed:
             flush_directory(destination.parent)
@@ -1391,6 +1538,7 @@ def _dispose_transaction(paths, transaction, moves, record=None):
             temporary,
             IntegrityError,
             expected_identity=expected_identity,
+            private_names=True,
         )
         if removed:
             flush_directory(temporary.parent)
@@ -1406,6 +1554,7 @@ def _dispose_transaction(paths, transaction, moves, record=None):
             journal,
             IntegrityError,
             expected_identity=expected_identity,
+            private_names=True,
         )
         if removed:
             if record is not None:
@@ -1427,6 +1576,7 @@ def _dispose_transaction(paths, transaction, moves, record=None):
         transaction,
         IntegrityError,
         expected_identity=expected_transaction_identity,
+        private_names=True,
     ):
         raise IntegrityError("removal transaction disappeared before disposal: %s" % transaction)
     flush_directory(transaction.parent)
@@ -1615,6 +1765,7 @@ def recover_removal_record(paths, record, platform_info=None):
             record.transaction,
             IntegrityError,
             expected_identity=record.transaction_identity,
+            private_names=True,
         ):
             raise IntegrityError("removal transaction disappeared before disposal: %s" % record.transaction)
         flush_directory(record.transaction.parent)
@@ -1627,6 +1778,7 @@ def recover_removal_record(paths, record, platform_info=None):
             temporary,
             IntegrityError,
             expected_identity=temporary_identity,
+            private_names=True,
         )
         if removed:
             flush_directory(temporary.parent)
@@ -1635,6 +1787,7 @@ def recover_removal_record(paths, record, platform_info=None):
             record.transaction,
             IntegrityError,
             expected_identity=record.transaction_identity,
+            private_names=True,
         ):
             raise IntegrityError("removal transaction disappeared before disposal: %s" % record.transaction)
         flush_directory(record.transaction.parent)

@@ -92,4 +92,5 @@ def recover_backend_transactions(paths, platform_info=None):
             temporary,
             IntegrityError,
             expected_identity=identity,
+            private_names=True,
         )

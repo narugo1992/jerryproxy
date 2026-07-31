@@ -30,7 +30,7 @@ Implemented now:
 - bounded HTTPS downloads and safe ZIP/TAR/GZip extraction;
 - immutable installations under
   `~/.jerryproxy/backends/<backend>/<version>/`;
-- atomic version activation at `~/.jerryproxy/bin/<backend>`;
+- crash-recoverable version activation at `~/.jerryproxy/bin/<backend>`;
 - relative symbolic links on supported systems and an atomic executable-copy
   fallback where Windows symlink privileges are unavailable;
 - an active-version manifest that records the selected version and link mode;
@@ -203,7 +203,7 @@ jerryproxy backend install mihomo
 jerryproxy backend verify
 ```
 
-Install another version without activating it, then use it atomically:
+Install another version without activating it, then select it for use:
 
 ```shell
 jerryproxy backend install mihomo 1.19.28 --no-activate
@@ -223,6 +223,12 @@ On Unix-like systems the active command is a relative symbolic link:
 On Windows the command normally ends in `.exe`. If symbolic-link creation is
 not permitted, JerryProxy atomically copies the verified executable and records
 `link_mode: copy` in `~/.jerryproxy/active/mihomo.json`.
+
+The command link/copy and active manifest are separate paths. Each publication
+is atomic, but their pair is not continuously atomic to an external observer.
+A hard exit can expose an intermediate pair until the next JerryProxy command
+acquires the home lock and rolls the activation backward or forward to the
+journal-selected state.
 
 Uninstall an inactive version:
 
@@ -329,7 +335,10 @@ binary compatibility should use the Python 3.10+ pip installation.
 
 The check never downloads a complete backend, starts a backend, or mutates the
 configured backend state. A fully successful run transfers 3 MiB across the
-three relay checks. `requests` retains the host's standard proxy and CA behavior:
+three relay checks. A final supervision item also verifies that any process
+whose startup returned after its deadline was cancelled and reaped; pending or
+surviving children are `ERR`. `requests` retains the host's standard proxy and
+CA behavior:
 
 ```shell
 jerryproxy --home ./test_self_check self-check
@@ -375,6 +384,13 @@ at runtime. The manager:
 8. holds the single home-wide `filelock` across cache validation, download,
    extraction, publication, probing, and optional activation;
 9. changes the active backend only after installation succeeds.
+
+Runtime backend state management currently supports Linux, macOS, and Windows.
+The packaged catalogs retain official FreeBSD and OpenBSD release assets for
+offline inspection, but JerryProxy does not install or activate them until
+equivalent atomic filesystem primitives and native CI exist. NFS, SMB, FUSE,
+or another filesystem that rejects the required no-replace or exchange
+primitive fails closed.
 
 The progress bar is written to stderr, so stdout remains stable for ordinary
 CLI output and machine-readable JSON. `requests` honors the host's standard

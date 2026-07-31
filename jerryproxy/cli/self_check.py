@@ -25,11 +25,13 @@ def self_check_command(context, color):  # type: (click.Context, bool) -> None
     Release asset with 5-second connect/read timeouts. A parent process enforces
     a 30-second total probe deadline across startup, redirects, response
     headers, empty chunks, and streaming. Response-header latency, latency to
-    the first chunk, and subsequent stream speed are reported separately. Relay
-    failures are WARN results. A platform or runtime without a meaningful
-    prerequisite reports a cyan SKIP. WARN and SKIP keep a zero exit code; only
-    FAIL or ERR produce a nonzero exit code. ERR results include bounded,
-    redacted traceback or child-process diagnostics when available.
+    the first chunk, and subsequent stream speed are reported separately. A
+    final item audits delayed process-start cleanup; pending or surviving child
+    processes are ERR. Relay failures are WARN results. A platform or runtime
+    without a meaningful prerequisite reports a cyan SKIP. WARN and SKIP keep
+    a zero exit code; only FAIL or ERR produce a nonzero exit code. ERR results
+    include bounded, redacted traceback or child-process diagnostics when
+    available.
     """
 
     use_color = ansi_color_enabled(click.get_text_stream("stdout"), requested=color)

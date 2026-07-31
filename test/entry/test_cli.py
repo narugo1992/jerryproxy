@@ -27,7 +27,8 @@ from test.selfcheck.fakes import verified_relay_session_factory
 def _isolate_self_check_relay_network(monkeypatch):
     relay_factory = verified_relay_session_factory(monkeypatch)
 
-    def inline_relay_probe(profile):
+    def inline_relay_probe(profile, supervision=None):
+        del supervision
         return selfcheck_module._check_relay(profile, relay_factory)
 
     monkeypatch.setattr(selfcheck_module, "_check_relay_in_process", inline_relay_probe)
@@ -155,18 +156,19 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     assert result.exit_code == 0
     assert "Runtime: Python" in result.output
     assert "System:" in result.output
-    assert "[1/19] Python runtime: OK" in result.output
-    assert "[7/19] packaged backend catalog: OK" in result.output
-    assert "[8/19] catalog platform selection: OK" in result.output
-    assert "[9/19] filelock compatibility:" in result.output
-    assert "[10/19] backend inventory: OK" in result.output
-    assert "[11/19] isolated backend lifecycle: OK" in result.output
-    assert "[12/19] recovery install rollback: OK" in result.output
-    assert "[13/19] recovery activation rollback: OK" in result.output
-    assert "[14/19] recovery activation rollforward: OK" in result.output
-    assert "[15/19] recovery removal rollback: OK" in result.output
-    assert "[16/19] recovery removal rollforward: OK" in result.output
-    assert "[19/19] relay gh.geekertao.top: OK" in result.output
+    assert "[1/20] Python runtime: OK" in result.output
+    assert "[7/20] packaged backend catalog: OK" in result.output
+    assert "[8/20] catalog platform selection: OK" in result.output
+    assert "[9/20] filelock compatibility:" in result.output
+    assert "[10/20] backend inventory: OK" in result.output
+    assert "[11/20] isolated backend lifecycle: OK" in result.output
+    assert "[12/20] recovery install rollback: OK" in result.output
+    assert "[13/20] recovery activation rollback: OK" in result.output
+    assert "[14/20] recovery activation rollforward: OK" in result.output
+    assert "[15/20] recovery removal rollback: OK" in result.output
+    assert "[16/20] recovery removal rollforward: OK" in result.output
+    assert "[19/20] relay gh.geekertao.top: OK" in result.output
+    assert "[20/20] delayed process cleanup: OK" in result.output
     assert "0 FAIL, 0 ERR" in result.output
     expected_skips = 0 if os.name == "posix" else 1
     assert "%d SKIP" % expected_skips in result.output
@@ -184,6 +186,7 @@ def test_self_check_help_discloses_bounded_network_behavior():
     assert "Response-header latency" in normalized
     assert "latency to the first chunk" in normalized
     assert "30-second total probe deadline" in normalized
+    assert "delayed process-start cleanup" in normalized
     assert "WARN" in normalized
     assert "SKIP" in normalized
 

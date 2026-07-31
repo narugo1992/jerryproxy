@@ -77,6 +77,12 @@ def manager_for(tmp_path):
     )
 
 
+def _windows_symlink_privilege_error(message="simulated Windows symlink privilege failure"):
+    error = OSError(message)
+    error.winerror = 1314
+    return error
+
+
 def removal_journal_move(
     manager,
     transaction,
@@ -375,7 +381,7 @@ def _crash_removal_committed_journal(home, crash_point):
         probe_runner=lambda installed: None,
     )
     original_flush = anchored_module.flush_descriptor
-    original_path_replace = anchored_module.os.replace
+    original_exchange = anchored_module._rename_posix_exchange
     original_replace = anchored_module.AnchoredDirectory.replace
 
     def crash_after_file_flush(descriptor, kind):
@@ -384,9 +390,9 @@ def _crash_removal_committed_journal(home, crash_point):
             os._exit(105)
         return result
 
-    def crash_after_path_replace(source, destination, *args, **kwargs):
-        result = original_path_replace(source, destination, *args, **kwargs)
-        if crash_point == "replaced-before-parent-flush" and Path(destination).name == "journal.json":
+    def crash_after_path_replace(source_parent, source_name, destination_parent, destination_name):
+        result = original_exchange(source_parent, source_name, destination_parent, destination_name)
+        if crash_point == "replaced-before-parent-flush" and destination_name == "journal.json":
             os._exit(106)
         return result
 
@@ -403,7 +409,7 @@ def _crash_removal_committed_journal(home, crash_point):
         return result
 
     anchored_module.flush_descriptor = crash_after_file_flush
-    anchored_module.os.replace = crash_after_path_replace
+    anchored_module._rename_posix_exchange = crash_after_path_replace
     anchored_module.AnchoredDirectory.replace = crash_after_parent_flush
     manager.uninstall("mihomo", "1.0.0", deactivate=True)
 
@@ -549,6 +555,21 @@ def _crash_removal_transaction_creation(home, crash_point):
     manager.uninstall("mihomo", "1.0.0")
 
 
+def _crash_empty_removal_transaction_disposal(home):
+    manager = BackendManager(
+        JerryProxyPaths(home),
+        platform_info=PlatformInfo("linux", "amd64", "glibc"),
+        probe_runner=lambda installed: None,
+    )
+
+    def crash_before_directory_disposal(name, *args, **kwargs):
+        del name, args, kwargs
+        os._exit(133)
+
+    removal_module.os.rmdir = crash_before_directory_disposal
+    manager.uninstall_all("mihomo")
+
+
 def _crash_runtime_clean_after_recovery(home, crash_point):
     manager = BackendManager(
         JerryProxyPaths(home),
@@ -556,6 +577,7 @@ def _crash_runtime_clean_after_recovery(home, crash_point):
         probe_runner=lambda installed: None,
     )
     original_remove = removal_module._secure_remove_tree
+    original_noreplace = removal_module._rename_posix_noreplace
 
     def crash_around_runtime_delete(root, target, *args, **kwargs):
         target = Path(target)
@@ -566,8 +588,37 @@ def _crash_runtime_clean_after_recovery(home, crash_point):
             os._exit(122)
         return result
 
+    def crash_after_runtime_isolation(source_parent, source_name, destination_parent, destination_name):
+        result = original_noreplace(source_parent, source_name, destination_parent, destination_name)
+        if (
+            crash_point == "after-runtime-isolation"
+            and source_name == "runtime.json"
+            and destination_name.startswith(".jerryproxy-remove-")
+        ):
+            os._exit(123)
+        return result
+
     removal_module._secure_remove_tree = crash_around_runtime_delete
+    removal_module._rename_posix_noreplace = crash_after_runtime_isolation
     manager.clean(areas=("runtimes",))
+
+
+def _crash_scoped_download_clean_after_isolation(home, name, version):
+    manager = BackendManager(
+        JerryProxyPaths(home),
+        platform_info=PlatformInfo("linux", "amd64", "glibc"),
+        probe_runner=lambda installed: None,
+    )
+    original_noreplace = removal_module._rename_posix_noreplace
+
+    def crash_after_target_isolation(source_parent, source_name, destination_parent, destination_name):
+        result = original_noreplace(source_parent, source_name, destination_parent, destination_name)
+        if source_name == (version or name) and destination_name.startswith(".jerryproxy-remove-"):
+            os._exit(124)
+        return result
+
+    removal_module._rename_posix_noreplace = crash_after_target_isolation
+    manager.clean(name, version)
 
 
 def _crash_activation(home, crash_point):
@@ -582,9 +633,12 @@ def _crash_activation(home, crash_point):
     original_open_candidate = activation_module._open_regular_candidate
     original_flush = activation_module.flush_descriptor
     original_anchored_flush = anchored_module.flush_descriptor
-    original_path_replace = anchored_module.os.replace
+    original_noreplace = anchored_module._rename_posix_noreplace
+    original_exchange = anchored_module._rename_posix_exchange
+    original_discard = anchored_module._discard_posix_entry
     original_classify = activation_module.classify_activation
     replacements = []
+    displaced_deletions = []
     manifest_bytes = {"written": 0, "expected": None}
     phase_exit_codes = {
         "prepared": 41,
@@ -678,15 +732,40 @@ def _crash_activation(home, crash_point):
             os._exit(66)
         return result
 
-    def crash_after_path_replace(source, destination, *args, **kwargs):
-        result = original_path_replace(source, destination, *args, **kwargs)
-        source_name = Path(source).name
-        destination_name = Path(destination).name
+    def crash_after_public_rename(original, source_parent, source_name, destination_parent, destination_name):
+        result = original(source_parent, source_name, destination_parent, destination_name)
         if ".candidate" in source_name:
             if crash_point == "link-replaced-before-parent-flush" and destination_name == "mihomo":
                 os._exit(80)
             if crash_point == "manifest-replaced-before-parent-flush" and destination_name == "mihomo.json":
                 os._exit(91)
+        return result
+
+    def crash_after_noreplace(source_parent, source_name, destination_parent, destination_name):
+        return crash_after_public_rename(
+            original_noreplace,
+            source_parent,
+            source_name,
+            destination_parent,
+            destination_name,
+        )
+
+    def crash_after_exchange(source_parent, source_name, destination_parent, destination_name):
+        return crash_after_public_rename(
+            original_exchange,
+            source_parent,
+            source_name,
+            destination_parent,
+            destination_name,
+        )
+
+    def crash_after_displaced_delete(parent_descriptor, name, expected_status):
+        result = original_discard(parent_descriptor, name, expected_status)
+        displaced_deletions.append(name)
+        if crash_point == "link-displaced-deleted" and len(displaced_deletions) == 1:
+            os._exit(108)
+        if crash_point == "manifest-displaced-deleted" and len(displaced_deletions) == 2:
+            os._exit(109)
         return result
 
     def crash_after_pair_validation(paths, value):
@@ -702,7 +781,9 @@ def _crash_activation(home, crash_point):
     activation_module._open_regular_candidate = crash_after_empty_candidate
     activation_module.flush_descriptor = crash_after_candidate_flush
     anchored_module.flush_descriptor = crash_after_anchored_flush
-    anchored_module.os.replace = crash_after_path_replace
+    anchored_module._rename_posix_noreplace = crash_after_noreplace
+    anchored_module._rename_posix_exchange = crash_after_exchange
+    anchored_module._discard_posix_entry = crash_after_displaced_delete
     activation_module.classify_activation = crash_after_pair_validation
     manager.use("mihomo", "2.0.0")
 
@@ -715,7 +796,7 @@ def _crash_initial_activation_journal(home, crash_point):
     )
     original_create_file = anchored_module.AnchoredDirectory.create_file
     original_flush = anchored_module.flush_descriptor
-    original_replace = anchored_module.os.replace
+    original_noreplace = anchored_module._rename_posix_noreplace
     original_write_record = activation_module._write_activation_record
 
     def crash_after_temporary_create(anchored, parts):
@@ -735,9 +816,8 @@ def _crash_initial_activation_journal(home, crash_point):
             os._exit(72)
         return result
 
-    def crash_after_authority_replace(source, destination, *args, **kwargs):
-        result = original_replace(source, destination, *args, **kwargs)
-        destination_name = Path(destination).name
+    def crash_after_authority_replace(source_parent, source_name, destination_parent, destination_name):
+        result = original_noreplace(source_parent, source_name, destination_parent, destination_name)
         if (
             crash_point == "authority-replaced-before-parent-flush"
             and destination_name.startswith(".use-")
@@ -755,7 +835,7 @@ def _crash_initial_activation_journal(home, crash_point):
 
     anchored_module.AnchoredDirectory.create_file = crash_after_temporary_create
     anchored_module.flush_descriptor = crash_after_file_flush
-    anchored_module.os.replace = crash_after_authority_replace
+    anchored_module._rename_posix_noreplace = crash_after_authority_replace
     activation_module._write_activation_record = crash_after_parent_flush
     manager.use("mihomo", "2.0.0")
 
@@ -820,7 +900,7 @@ def _crash_windows_copy_activation(home, crash_point):
 
     def unavailable_symlink(*args, **kwargs):
         del args, kwargs
-        raise OSError("forced Windows copy fallback")
+        raise _windows_symlink_privilege_error("forced Windows copy fallback")
 
     def crash_after_journal(paths_value, journal, value, write_id, *args, **kwargs):
         result = original_write(paths_value, journal, value, write_id, *args, **kwargs)
@@ -981,7 +1061,8 @@ def _crash_inside_activation_recovery(home, crash_point):
     original_write_record = activation_module._write_activation_record
     original_anchored_replace = anchored_module.AnchoredDirectory.replace
     original_flush = anchored_module.flush_descriptor
-    original_path_replace = anchored_module.os.replace
+    original_noreplace = anchored_module._rename_posix_noreplace
+    original_exchange = anchored_module._rename_posix_exchange
     original_flush_directory = activation_module.flush_directory
     expected_payload = {"value": None}
     bytes_written = {"value": 0}
@@ -1085,12 +1166,6 @@ def _crash_inside_activation_recovery(home, crash_point):
             removed.update({"kind": "candidate", "name": target.name})
             if crash_point == "candidate-deleted":
                 os._exit(83)
-        if target.parent in (manager.paths.bin, manager.paths.active) and ".candidate" not in target.name:
-            removed.update({"kind": "public", "name": target.name})
-            if crash_point == "public-deleted":
-                os._exit(88)
-            if crash_point == "manifest-public-deleted" and target.name == "mihomo.json":
-                os._exit(106)
         if target.parent == manager.paths.runtimes and target.name.startswith(".use-") and ".tmp-" not in target.name:
             removed.update({"kind": "journal", "name": target.name})
             if crash_point == "journal-deleted":
@@ -1103,14 +1178,6 @@ def _crash_inside_activation_recovery(home, crash_point):
             os._exit(104)
         if crash_point == "journal-delete-parent-flushed" and removed["kind"] == "journal":
             os._exit(105)
-        if crash_point == "public-delete-parent-flushed" and removed["kind"] == "public":
-            os._exit(90)
-        if (
-            crash_point == "manifest-public-delete-parent-flushed"
-            and removed["kind"] == "public"
-            and removed["name"] == "mihomo.json"
-        ):
-            os._exit(107)
         return result
 
     def crash_after_file_flush(descriptor, kind):
@@ -1119,10 +1186,14 @@ def _crash_inside_activation_recovery(home, crash_point):
             os._exit(85)
         return result
 
-    def crash_after_path_replace(source, destination, *args, **kwargs):
-        result = original_path_replace(source, destination, *args, **kwargs)
-        source_name = Path(source).name
-        destination_name = Path(destination).name
+    def crash_after_atomic_rename(
+        original,
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+    ):
+        result = original(source_parent, source_name, destination_parent, destination_name)
         if (
             crash_point == "journal-replaced-before-parent-flush"
             and destination_name.startswith(".use-")
@@ -1141,7 +1212,30 @@ def _crash_inside_activation_recovery(home, crash_point):
             and destination_name == "mihomo.json"
         ):
             os._exit(102)
+        if ".candidate" in destination_name and source_name in ("mihomo", "mihomo.json"):
+            if crash_point == "public-deleted":
+                os._exit(88)
+            if crash_point == "manifest-public-deleted" and source_name == "mihomo.json":
+                os._exit(106)
         return result
+
+    def crash_after_noreplace(source_parent, source_name, destination_parent, destination_name):
+        return crash_after_atomic_rename(
+            original_noreplace,
+            source_parent,
+            source_name,
+            destination_parent,
+            destination_name,
+        )
+
+    def crash_after_exchange(source_parent, source_name, destination_parent, destination_name):
+        return crash_after_atomic_rename(
+            original_exchange,
+            source_parent,
+            source_name,
+            destination_parent,
+            destination_name,
+        )
 
     def crash_after_anchored_replace(anchored, source_parts, destination_parts, *args, **kwargs):
         result = original_anchored_replace(
@@ -1157,6 +1251,13 @@ def _crash_inside_activation_recovery(home, crash_point):
             and ".tmp-" not in destination_parts[-1]
         ):
             os._exit(87)
+        source_name = source_parts[-1]
+        destination_name = destination_parts[-1]
+        if ".candidate" in destination_name and source_name in ("mihomo", "mihomo.json"):
+            if crash_point == "public-delete-parent-flushed":
+                os._exit(90)
+            if crash_point == "manifest-public-delete-parent-flushed" and source_name == "mihomo.json":
+                os._exit(107)
         return result
 
     activation_module._COPY_CHUNK_SIZE = 2
@@ -1169,7 +1270,8 @@ def _crash_inside_activation_recovery(home, crash_point):
     anchored_module.AnchoredDirectory.flush = crash_after_empty_parent_flush
     activation_module._write_activation_record = crash_after_journal
     anchored_module.flush_descriptor = crash_after_file_flush
-    anchored_module.os.replace = crash_after_path_replace
+    anchored_module._rename_posix_noreplace = crash_after_noreplace
+    anchored_module._rename_posix_exchange = crash_after_exchange
     anchored_module.AnchoredDirectory.replace = crash_after_anchored_replace
     activation_module.flush_directory = crash_after_remove_parent_flush
     manager.current("mihomo")
@@ -1388,7 +1490,7 @@ def _crash_initial_install_journal(home, archive, digest, crash_point, platform_
     )
     original_create_file = anchored_module.AnchoredDirectory.create_file
     original_flush = anchored_module.flush_descriptor
-    original_path_replace = anchored_module.os.replace
+    original_noreplace = anchored_module._rename_posix_noreplace
     original_native_rename = anchored_module._rename_windows_handle
     original_write_record = installation_module._write_record
 
@@ -1409,9 +1511,8 @@ def _crash_initial_install_journal(home, archive, digest, crash_point, platform_
             os._exit(202)
         return result
 
-    def crash_after_path_replace(source, destination, *args, **kwargs):
-        result = original_path_replace(source, destination, *args, **kwargs)
-        destination_name = Path(destination).name
+    def crash_after_path_replace(source_parent, source_name, destination_parent, destination_name):
+        result = original_noreplace(source_parent, source_name, destination_parent, destination_name)
         if (
             crash_point == "authority-replaced-before-parent-flush"
             and destination_name.startswith(".install-")
@@ -1440,7 +1541,7 @@ def _crash_initial_install_journal(home, archive, digest, crash_point, platform_
 
     anchored_module.AnchoredDirectory.create_file = crash_after_temporary_create
     anchored_module.flush_descriptor = crash_after_file_flush
-    anchored_module.os.replace = crash_after_path_replace
+    anchored_module._rename_posix_noreplace = crash_after_path_replace
     anchored_module._rename_windows_handle = crash_after_native_rename
     installation_module._write_record = crash_after_parent_flush
     manager.install_from_archive(
@@ -1479,7 +1580,6 @@ def _crash_install(home, archive, digest, crash_point, platform_name="linux"):
     original_manifest_write = anchored_module.AnchoredDirectory.write_json
     original_file_evidence = anchored_module.AnchoredDirectory.file_evidence
     original_anchored_flush = anchored_module.flush_descriptor
-    original_path_replace = anchored_module.os.replace
     original_noreplace = anchored_module._rename_posix_noreplace
     original_native_rename = anchored_module._rename_windows_handle
     original_copy = archive_module._copy_bounded
@@ -1599,17 +1699,6 @@ def _crash_install(home, archive, digest, crash_point, platform_name="linux"):
             os._exit(67)
         return result
 
-    def crash_after_path_replace(source, destination, *args, **kwargs):
-        result = original_path_replace(source, destination, *args, **kwargs)
-        if (
-            writing_manifest
-            and crash_point == "manifest-replaced-before-parent-flush"
-            and Path(source).name.startswith(".manifest.json.tmp-")
-            and Path(destination).name == "manifest.json"
-        ):
-            os._exit(207)
-        return result
-
     def crash_after_posix_noreplace(source_parent, source_name, destination_parent, destination_name):
         result = original_noreplace(source_parent, source_name, destination_parent, destination_name)
         if (
@@ -1674,7 +1763,6 @@ def _crash_install(home, archive, digest, crash_point, platform_name="linux"):
     anchored_module.AnchoredDirectory.write_json = crash_after_manifest
     anchored_module.AnchoredDirectory.file_evidence = crash_after_executable_flush
     anchored_module.flush_descriptor = crash_at_directory_flush
-    anchored_module.os.replace = crash_after_path_replace
     anchored_module._rename_posix_noreplace = crash_after_posix_noreplace
     anchored_module._rename_windows_handle = crash_after_native_rename
     manager_module.validate_staged_installed_manifest_value = crash_after_staged_validation
@@ -1718,7 +1806,7 @@ def _crash_install_recovery(home, crash_point, platform_name="linux"):
     original_dispose = installation_module._dispose_file
     original_secure_remove = installation_module._secure_remove_tree
     original_flush = anchored_module.flush_descriptor
-    original_path_replace = anchored_module.os.replace
+    original_exchange = anchored_module._rename_posix_exchange
     original_native_rename = anchored_module._rename_windows_handle
 
     def crash_during_staging_delete(record, expected_identity):
@@ -1767,9 +1855,8 @@ def _crash_install_recovery(home, crash_point, platform_name="linux"):
             os._exit(96)
         return result
 
-    def crash_after_path_replace(source, destination, *args, **kwargs):
-        result = original_path_replace(source, destination, *args, **kwargs)
-        destination_name = Path(destination).name
+    def crash_after_path_replace(source_parent, source_name, destination_parent, destination_name):
+        result = original_exchange(source_parent, source_name, destination_parent, destination_name)
         if (
             crash_point == "committed-journal-replaced-before-parent-flush"
             and destination_name.startswith(".install-")
@@ -1793,7 +1880,7 @@ def _crash_install_recovery(home, crash_point, platform_name="linux"):
     installation_module._dispose_file = crash_after_dispose
     installation_module._secure_remove_tree = crash_after_secure_remove
     anchored_module.flush_descriptor = crash_after_file_flush
-    anchored_module.os.replace = crash_after_path_replace
+    anchored_module._rename_posix_exchange = crash_after_path_replace
     anchored_module._rename_windows_handle = crash_after_native_rename
     manager.list_installed("mihomo")
 
@@ -1940,9 +2027,11 @@ def _assert_partial_manifest_candidate(paths, crash_point):
         ("manifest-written", 57, "1.0.0"),
         ("candidates-ready", 47, "1.0.0"),
         ("link-replaced-before-parent-flush", 80, "1.0.0"),
+        ("link-displaced-deleted", 108, "1.0.0"),
         ("link-replaced", 42, "1.0.0"),
         ("link-published", 48, "1.0.0"),
         ("manifest-replaced-before-parent-flush", 91, "1.0.0"),
+        ("manifest-displaced-deleted", 109, "1.0.0"),
         ("manifest-replaced", 50, "1.0.0"),
         ("manifest-published", 49, "1.0.0"),
         ("pair-validated", 79, "1.0.0"),
@@ -2087,7 +2176,7 @@ def test_windows_copy_mode_hard_exit_recovers_on_next_public_lock(
 
     def unavailable_symlink(*args, **kwargs):
         del args, kwargs
-        raise OSError("forced Windows copy fallback")
+        raise _windows_symlink_privilege_error("forced Windows copy fallback")
 
     with monkeypatch.context() as selected:
         selected.setattr(activation_module, "_create_symlink_candidate", unavailable_symlink)
@@ -2175,7 +2264,7 @@ def test_windows_equal_byte_copy_recovery_uses_manifest_and_commit_phase(
 
     def unavailable_symlink(*args, **kwargs):
         del args, kwargs
-        raise OSError("forced Windows copy fallback")
+        raise _windows_symlink_privilege_error("forced Windows copy fallback")
 
     with monkeypatch.context() as selected:
         selected.setattr(activation_module, "_create_symlink_candidate", unavailable_symlink)
@@ -2235,7 +2324,7 @@ def test_windows_hard_exit_after_each_activation_recovery_action_converges(
 
             def unavailable_symlink(*args, **kwargs):
                 del args, kwargs
-                raise OSError("forced Windows copy fallback")
+                raise _windows_symlink_privilege_error("forced Windows copy fallback")
 
             with monkeypatch.context() as selected:
                 selected.setattr(activation_module, "_create_symlink_candidate", unavailable_symlink)
@@ -2394,7 +2483,7 @@ def test_windows_hard_exit_inside_activation_recovery_action_converges(
 
     def unavailable_symlink(*args, **kwargs):
         del args, kwargs
-        raise OSError("forced Windows copy fallback")
+        raise _windows_symlink_privilege_error("forced Windows copy fallback")
 
     if with_previous:
         with monkeypatch.context() as selected:
@@ -2441,7 +2530,7 @@ def test_windows_hard_exit_inside_activation_recovery_action_converges(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX hard-exit activation recovery")
-@pytest.mark.parametrize("selected_step", range(1, 13))
+@pytest.mark.parametrize("selected_step", range(1, 12))
 def test_hard_exit_after_each_activation_recovery_action_keeps_direction_and_converges(
     tmp_path,
     selected_step,
@@ -4282,7 +4371,7 @@ def test_clean_handles_a_directory_removed_or_replaced_after_its_last_child(
 
         def remove_parent_after_last_child(path, *args, **kwargs):
             result = original_unlink(path, *args, **kwargs)
-            if Path(path).name == child.name:
+            if Path(path).name.startswith(".jerryproxy-remove-"):
                 target.rmdir()
                 if replace_parent:
                     target.mkdir()
@@ -4390,6 +4479,112 @@ def test_clean_handles_a_file_removed_or_replaced_before_unlink(
     else:
         assert manager.clean(areas=("logs",)).targets_removed == 1
         assert not target.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative deletion behavior")
+def test_clean_preserves_a_file_substituted_at_the_native_deletion_boundary(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    target = manager.paths.logs / "runtime.log"
+    displaced = manager.paths.logs / "runtime.displaced"
+    replacement = tmp_path / "runtime.replacement"
+    target.write_bytes(b"managed")
+    replacement.write_bytes(b"replacement")
+    substituted = []
+
+    def substitute():
+        target.rename(displaced)
+        replacement.rename(target)
+        substituted.append(True)
+
+    if hasattr(removal_module, "_rename_posix_noreplace"):
+        original_move = removal_module._rename_posix_noreplace
+
+        def substitute_at_move(parent, source_name, destination_parent, destination_name):
+            if source_name == target.name and not substituted:
+                substitute()
+            return original_move(parent, source_name, destination_parent, destination_name)
+
+        monkeypatch.setattr(removal_module, "_rename_posix_noreplace", substitute_at_move)
+    else:
+        original_unlink = removal_module.os.unlink
+
+        def substitute_at_unlink(path, *args, **kwargs):
+            if Path(path).name == target.name and kwargs.get("dir_fd") is not None and not substituted:
+                substitute()
+            return original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(removal_module.os, "unlink", substitute_at_unlink)
+
+    with pytest.raises(CleanupScopeError, match="changed.*deletion|deletion boundary"):
+        manager.clean(areas=("logs",))
+
+    assert substituted
+    assert target.read_bytes() == b"replacement"
+    assert displaced.read_bytes() == b"managed"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative deletion behavior")
+def test_clean_preserves_a_directory_substituted_at_the_native_deletion_boundary(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    target = manager.paths.logs / "runtime"
+    displaced = manager.paths.logs / "runtime.displaced"
+    replacement = tmp_path / "runtime.replacement"
+    target.mkdir()
+    replacement.mkdir()
+    (replacement / "marker").write_bytes(b"replacement")
+    original_move = removal_module._rename_posix_noreplace
+    substituted = []
+
+    def substitute_at_move(parent, source_name, destination_parent, destination_name):
+        if source_name == target.name and not substituted:
+            target.rename(displaced)
+            replacement.rename(target)
+            substituted.append(True)
+        return original_move(parent, source_name, destination_parent, destination_name)
+
+    monkeypatch.setattr(removal_module, "_rename_posix_noreplace", substitute_at_move)
+
+    with pytest.raises(CleanupScopeError, match="changed.*deletion|deletion boundary"):
+        manager.clean(areas=("logs",))
+
+    assert substituted
+    assert (target / "marker").read_bytes() == b"replacement"
+    assert displaced.is_dir()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative deletion behavior")
+def test_clean_retains_substitute_in_quarantine_when_isolation_restore_fails(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    manager.paths.ensure()
+    target = manager.paths.logs / "runtime.log"
+    displaced = manager.paths.logs / "runtime.displaced"
+    replacement = tmp_path / "runtime.replacement"
+    target.write_bytes(b"managed")
+    replacement.write_bytes(b"replacement")
+    original_move = removal_module._rename_posix_noreplace
+    quarantines = []
+
+    def fail_restore(parent, source_name, destination_parent, destination_name):
+        if source_name == target.name and not quarantines:
+            target.rename(displaced)
+            replacement.rename(target)
+            result = original_move(parent, source_name, destination_parent, destination_name)
+            quarantines.append(destination_name)
+            target.write_bytes(b"blocked")
+            return result
+        return original_move(parent, source_name, destination_parent, destination_name)
+
+    monkeypatch.setattr(removal_module, "_rename_posix_noreplace", fail_restore)
+
+    with pytest.raises(CleanupScopeError, match="evidence retained in quarantine|deletion boundary"):
+        manager.clean(areas=("logs",))
+
+    assert displaced.read_bytes() == b"managed"
+    assert target.read_bytes() == b"blocked"
+    assert len(quarantines) == 1
+    assert (manager.paths.logs / quarantines[0]).read_bytes() == b"replacement"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX identity guard behavior")
@@ -4543,7 +4738,11 @@ def test_clean_final_unlink_cannot_be_redirected_by_an_ancestor_swap(tmp_path, m
     swapped = []
 
     def swap_parent_at_unlink(path, *args, **kwargs):
-        if Path(path).name == target.name and kwargs.get("dir_fd") is not None and not swapped:
+        if (
+            Path(path).name.startswith(".jerryproxy-remove-")
+            and kwargs.get("dir_fd") is not None
+            and not swapped
+        ):
             manager.paths.logs.rename(saved)
             manager.paths.logs.symlink_to(outside, target_is_directory=True)
             swapped.append(path)
@@ -4573,7 +4772,11 @@ def test_clean_final_rmdir_cannot_be_redirected_by_an_ancestor_swap(tmp_path, mo
     swapped = []
 
     def swap_parent_at_rmdir(path, *args, **kwargs):
-        if Path(path).name == target.name and kwargs.get("dir_fd") is not None and not swapped:
+        if (
+            Path(path).name.startswith(".jerryproxy-remove-")
+            and kwargs.get("dir_fd") is not None
+            and not swapped
+        ):
             manager.paths.logs.rename(saved)
             manager.paths.logs.symlink_to(outside, target_is_directory=True)
             swapped.append(path)
@@ -5871,6 +6074,26 @@ def test_hard_exit_during_removal_transaction_directory_creation_recovers(
     assert not list(manager.paths.runtimes.glob(".remove-*"))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-exit empty removal disposal")
+def test_hard_exit_before_empty_removal_transaction_disposal_remains_recoverable(tmp_path):
+    manager = manager_for(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(
+        target=_crash_empty_removal_transaction_disposal,
+        args=(str(manager.paths.root),),
+    )
+
+    process.start()
+    process.join(10)
+
+    assert process.exitcode == 133
+    assert len(list(manager.paths.runtimes.glob(".remove-*"))) == 1
+    assert not list(manager.paths.runtimes.glob(".jerryproxy-remove-*"))
+    assert manager.current("mihomo") is None
+    assert not list(manager.paths.runtimes.glob(".remove-*"))
+    assert not list(manager.paths.runtimes.glob(".jerryproxy-remove-*"))
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX hard-exit removal recovery")
 @pytest.mark.parametrize(
     ("crash_point", "exit_code"),
@@ -5954,6 +6177,7 @@ def test_hard_exit_during_committed_removal_recovery_converges(
     ("crash_point", "exit_code", "runtime_survives"),
     (
         ("before-runtime-delete", 121, True),
+        ("after-runtime-isolation", 123, False),
         ("after-runtime-delete", 122, False),
     ),
 )
@@ -5988,8 +6212,36 @@ def test_hard_exit_during_runtime_cleanup_after_recovery_is_safe(
     assert manager.current("mihomo").version == "1.0.0"
     assert installed.manifest.is_file()
     assert not list(manager.paths.runtimes.glob(".remove-*"))
+    tombstones = list(manager.paths.runtimes.glob(".jerryproxy-remove-*"))
+    assert bool(tombstones) is (crash_point == "after-runtime-isolation")
     manager.clean(areas=("runtimes",))
     assert not runtime.exists()
+    assert not list(manager.paths.runtimes.glob(".jerryproxy-remove-*"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-exit scoped cleanup")
+@pytest.mark.parametrize("version", (None, "1.0.0"))
+def test_scoped_download_cleanup_reclaims_its_hard_exit_tombstone(tmp_path, version):
+    manager = manager_for(tmp_path)
+    target = manager.paths.downloads / "mihomo" / "1.0.0"
+    target.mkdir(parents=True)
+    (target / "asset.gz").write_bytes(b"cache")
+    tombstone_parent = target.parent if version is not None else manager.paths.downloads
+    context = multiprocessing.get_context("spawn")
+    cleanup = context.Process(
+        target=_crash_scoped_download_clean_after_isolation,
+        args=(str(manager.paths.root), "mihomo", version),
+    )
+
+    cleanup.start()
+    cleanup.join(10)
+
+    assert cleanup.exitcode == 124
+    assert not (target if version is not None else target.parent).exists()
+    assert len(list(tombstone_parent.glob(".jerryproxy-remove-*"))) == 1
+    result = manager.clean("mihomo", version)
+    assert result.targets_removed == 1
+    assert not list(tombstone_parent.glob(".jerryproxy-remove-*"))
 
 
 @pytest.mark.parametrize(
@@ -8093,7 +8345,7 @@ def test_windows_symlink_failure_uses_and_replaces_a_verified_copy(tmp_path, mon
 
         @staticmethod
         def symlink(source, target, target_is_directory=False, **kwargs):
-            raise OSError("simulated Windows symlink privilege failure")
+            raise _windows_symlink_privilege_error()
 
     monkeypatch.setattr(activation_module, "os", WindowsOsProxy())
     monkeypatch.setattr(anchored_module.os, "symlink", WindowsOsProxy.symlink)
@@ -8116,6 +8368,41 @@ def test_windows_symlink_failure_uses_and_replaces_a_verified_copy(tmp_path, mon
     assert manager.which("mihomo", "2.0.0") == exact
 
 
+@pytest.mark.parametrize(
+    ("error_number", "winerror"),
+    ((getattr(os, "EIO", 5), 1117), (getattr(os, "ENOSPC", 28), 112)),
+)
+def test_windows_symlink_operational_failures_do_not_downgrade_to_copy(
+    tmp_path,
+    monkeypatch,
+    error_number,
+    winerror,
+):
+    manager = manager_for(tmp_path)
+    install_fake_mihomo(manager, tmp_path, "1.0.0", b"version one", activate=False)
+
+    class WindowsOsProxy(object):
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def symlink(source, target, target_is_directory=False, **kwargs):
+            del source, target, target_is_directory, kwargs
+            error = OSError(error_number, "simulated operational symlink failure")
+            error.winerror = winerror
+            raise error
+
+    monkeypatch.setattr(activation_module, "os", WindowsOsProxy())
+    monkeypatch.setattr(anchored_module.os, "symlink", WindowsOsProxy.symlink)
+
+    with pytest.raises(OSError, match="simulated operational symlink failure"):
+        manager.use("mihomo", "1.0.0")
+
+    assert manager.current("mihomo") is None
+
+
 def test_windows_copy_activation_streams_the_immutable_executable(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     payload = b"x" * (2 * 1024 * 1024 + 3)
@@ -8135,7 +8422,7 @@ def test_windows_copy_activation_streams_the_immutable_executable(tmp_path, monk
 
         @staticmethod
         def symlink(source, target, target_is_directory=False, **kwargs):
-            raise OSError("simulated Windows symlink privilege failure")
+            raise _windows_symlink_privilege_error()
 
     original_open = anchored_module.AnchoredDirectory.open_existing_file
     reads = []
@@ -8195,7 +8482,7 @@ def test_windows_copy_activation_writes_candidates_in_bounded_chunks(tmp_path, m
 
         @staticmethod
         def symlink(source, target, target_is_directory=False, **kwargs):
-            raise OSError("simulated Windows symlink privilege failure")
+            raise _windows_symlink_privilege_error()
 
     original_open = activation_module._open_regular_candidate
     writes = {"link": [], "manifest": []}
@@ -8254,7 +8541,7 @@ def test_windows_copy_activation_retries_short_candidate_writes(tmp_path, monkey
 
         @staticmethod
         def symlink(source, target, target_is_directory=False, **kwargs):
-            raise OSError("simulated Windows symlink privilege failure")
+            raise _windows_symlink_privilege_error()
 
     original_open = activation_module._open_regular_candidate
 
@@ -8307,7 +8594,7 @@ def test_windows_copy_activation_rejects_invalid_candidate_write_progress(
 
         @staticmethod
         def symlink(source, target, target_is_directory=False, **kwargs):
-            raise OSError("simulated Windows symlink privilege failure")
+            raise _windows_symlink_privilege_error()
 
     original_open = activation_module._open_regular_candidate
 

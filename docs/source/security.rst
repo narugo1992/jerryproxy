@@ -44,11 +44,12 @@ Current enforced backend invariants:
   interrupted committed disposal, while malformed or ambiguous journals fail
   closed;
 * managed recursive deletion repeatedly checks path identity and never follows
-  symlinks or Windows junctions; POSIX deletion pins each target and uses
-  parent-relative deletion, while Windows opens the final object with
-  ``OPEN_REPARSE_POINT`` and deletes through its native handle; only the exact
-  journal-recorded active-command symlink may be unlinked as transaction
-  payload;
+  symlinks or Windows junctions; POSIX cleanup pins each target, atomically
+  isolates it under a random private name in the same pinned parent, verifies
+  the moved identity, and uses parent-relative deletion; Windows opens the final
+  object with ``OPEN_REPARSE_POINT`` and deletes through its native handle; only
+  the exact journal-recorded active-command symlink may be unlinked as
+  transaction payload;
 * managed home subdirectories are rejected when replaced by symlinks or
   Windows reparse-point aliases such as junctions, both before and immediately
   after creation, before permission repair or state mutation can affect their
@@ -84,6 +85,26 @@ that private-directory permissions repair the dependency vulnerability.
 On POSIX platforms without ``O_PATH``, some sockets and unreadable files cannot
 be pinned for identity-safe deletion. JerryProxy reports an error and preserves
 the target; it does not weaken the deletion boundary to make cleanup succeed.
+
+A hard exit after ordinary POSIX cleanup isolation can leave a
+``.jerryproxy-remove-*`` tombstone, but only inside ``downloads``, ``logs``,
+``providers``, or ``runtimes``. The next cleanup of that area inventories and
+removes the tombstone. Activation candidates and journaled install/removal
+transactions already use private operation names and never create a second
+unrecorded tombstone in ``backends``, ``bin``, or ``active``. A one-shot path
+substitution before isolation is detected and preserved. POSIX has no portable
+unlink-by-open-file-descriptor operation, so a malicious same-UID process that
+continuously guesses and replaces the transient private name after its final
+identity check is outside this threat boundary.
+
+Managed runtime state currently supports Linux, macOS, and Windows. Catalogs
+may still describe official FreeBSD and OpenBSD release assets for offline
+inspection, but BSD installation and activation are rejected until equivalent
+atomic filesystem operations and native CI are available. Required no-replace
+and exchange operations fail closed on NFS, SMB, FUSE, or any other filesystem
+that does not implement them. The command and active manifest are published as
+two separately atomic paths; crash recovery converges their pair under the next
+home lock, but an external observer can see an intermediate pair before then.
 
 Planned runtime invariants:
 

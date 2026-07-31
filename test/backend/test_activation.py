@@ -104,6 +104,8 @@ def _absent_candidate(path, purpose="target"):
         "size": None,
         "sha256": None,
         "target": None,
+        "displaced_identity": None,
+        "displaced_purpose": None,
     }
 
 
@@ -436,6 +438,24 @@ def test_activation_journal_accepts_discarding_regular_without_ready_evidence(tm
     assert load_use_journal(paths, journal, PLATFORM) == value
 
 
+def test_activation_journal_accepts_displaced_discarding_purpose_from_opposite_direction(tmp_path):
+    paths = _layout(tmp_path)
+    value = _complete_journal(paths, phase="manifest-published")
+    value["recovery"] = {"direction": "rollback-previous"}
+    link = value["candidates"]["link"]
+    link.update(
+        {
+            "purpose": "recovery-target",
+            "state": "discarding",
+            "identity": _candidate_identity("symlink"),
+            "target": "../backends/mihomo/2.0.0/mihomo",
+        }
+    )
+    journal = _write_journal(paths, value)
+
+    assert load_use_journal(paths, journal, PLATFORM) == value
+
+
 @pytest.mark.parametrize(
     ("case", "message"),
     [
@@ -699,6 +719,20 @@ def test_unrecorded_exact_symlink_is_pinned_before_recovery_disposal(tmp_path):
     assert (plan.action, plan.object_name) == ("pin-unrecorded-candidate", "link")
 
 
+def test_unrecorded_exact_regular_target_is_pinned_before_recovery_disposal(tmp_path):
+    paths = _layout(tmp_path)
+    value = _journal(paths, previous=False)
+    value["recovery"] = {"direction": "rollback-absent"}
+    candidate = paths.root / value["candidates"]["link"]["path"]
+    candidate.write_bytes(b"target")
+
+    classification = classify_activation(paths, value)
+
+    assert classification.link_candidate == "exact-unrecorded-purpose-object"
+    plan = plan_activation_recovery(value, classification)
+    assert (plan.action, plan.object_name) == ("pin-unrecorded-candidate", "link")
+
+
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlink recovery")
 def test_unrecorded_target_symlink_recovery_converges_to_previous_pair(tmp_path):
     paths = _layout(tmp_path)
@@ -729,6 +763,7 @@ def test_rollback_absent_deletes_an_exposed_public_link_and_disposes_authority(t
 
     assert not public.exists()
     assert not journal.exists()
+    assert not list(paths.bin.glob(".*.use-*.candidate"))
 
 
 def test_recovery_refuses_replaced_unrecorded_candidate_after_planning(tmp_path, monkeypatch):
@@ -877,7 +912,7 @@ def test_recovery_resume_advances_candidate_disposal_before_public_repair(tmp_pa
     third = plan_activation_recovery(second.journal, missing)
     assert third.action == "persist-candidate-absent"
     fourth = plan_activation_recovery(third.journal, missing)
-    assert (fourth.action, fourth.object_name) == ("build-repair-candidate", "link")
+    assert (fourth.action, fourth.object_name) == ("start-repair-candidate", "link")
 
 
 def test_recover_record_reclassifies_and_rejects_unknown_public_state(tmp_path):
@@ -2310,6 +2345,25 @@ def test_recovery_planner_deletes_recorded_discarding_repair_candidate(tmp_path)
         }
     )
     classification = ActivationClassification("M", "M", "recorded-owned", "missing")
+
+    plan = plan_activation_recovery(value, classification)
+
+    assert (plan.action, plan.object_name) == ("delete-candidate", "link")
+
+
+def test_recovery_planner_deletes_displaced_candidate_from_opposite_direction(tmp_path):
+    paths = _layout(tmp_path)
+    value = _journal(paths)
+    value["recovery"] = {"direction": "rollback-previous"}
+    value["candidates"]["link"].update(
+        {
+            "purpose": "recovery-target",
+            "state": "discarding",
+            "identity": _candidate_identity("symlink"),
+            "target": "../backends/mihomo/2.0.0/mihomo",
+        }
+    )
+    classification = ActivationClassification("P", "P", "recorded-owned", "missing")
 
     plan = plan_activation_recovery(value, classification)
 

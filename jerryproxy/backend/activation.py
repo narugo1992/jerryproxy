@@ -1,5 +1,6 @@
 """Strict activation journals and deterministic crash-recovery planning."""
 
+import errno
 import hashlib
 import json
 import os
@@ -55,7 +56,17 @@ _LOGICAL_KEYS = {
     "manifest_payload",
 }
 _MANIFEST_KEYS = {"name", "version", "executable", "link", "activated_at", "link_mode"}
-_CANDIDATE_KEYS = {"path", "purpose", "state", "identity", "size", "sha256", "target"}
+_CANDIDATE_KEYS = {
+    "path",
+    "purpose",
+    "state",
+    "identity",
+    "size",
+    "sha256",
+    "target",
+    "displaced_identity",
+    "displaced_purpose",
+}
 _TOP_LEVEL_KEYS = {
     "kind",
     "operation",
@@ -68,6 +79,26 @@ _TOP_LEVEL_KEYS = {
     "candidates",
     "recovery",
 }
+_WINDOWS_SYMLINK_FALLBACK_WINERRORS = frozenset((1, 50, 1314))
+_WINDOWS_SYMLINK_FALLBACK_ERRNOS = frozenset(
+    (
+        errno.EPERM,
+        getattr(errno, "ENOSYS", -1),
+        getattr(errno, "ENOTSUP", -1),
+        getattr(errno, "EOPNOTSUPP", -1),
+    )
+)
+
+
+def _windows_symlink_fallback_allowed(error):
+    if os.name != "nt":
+        return False
+    if isinstance(error, NotImplementedError):
+        return True
+    winerror = getattr(error, "winerror", None)
+    if winerror is not None:
+        return winerror in _WINDOWS_SYMLINK_FALLBACK_WINERRORS
+    return getattr(error, "errno", None) in _WINDOWS_SYMLINK_FALLBACK_ERRNOS
 
 
 @dataclass(frozen=True)
@@ -227,11 +258,22 @@ def _candidate(value, expected_path, recovery, phase, name, desired):
     size = value["size"]
     digest = value["sha256"]
     target = value["target"]
+    displaced_identity = value["displaced_identity"]
+    displaced_purpose = value["displaced_purpose"]
+    if (displaced_identity is None) != (displaced_purpose is None):
+        _fail("incomplete %s displaced candidate evidence" % name)
+    if displaced_identity is not None:
+        if state != "ready" or displaced_purpose not in ("previous", "target"):
+            _fail("invalid %s displaced candidate evidence" % name)
+        validate_identity(displaced_identity)
     if state == "absent":
-        if any(item is not None for item in (identity, size, digest, target)):
+        if any(
+            item is not None
+            for item in (identity, size, digest, target, displaced_identity, displaced_purpose)
+        ):
             _fail("absent %s candidate retains evidence" % name)
     elif state == "building":
-        if any(item is not None for item in (size, digest, target)):
+        if any(item is not None for item in (size, digest, target, displaced_identity, displaced_purpose)):
             _fail("building %s candidate has ready evidence" % name)
         if identity is not None:
             validate_identity(identity, expected_file_type="regular")
@@ -284,7 +326,7 @@ def _candidate(value, expected_path, recovery, phase, name, desired):
             "rollback-previous": "recovery-previous",
             "rollforward-target": "recovery-target",
         }.get(recovery["direction"])
-        if purpose != "target" and purpose != expected_purpose:
+        if state != "discarding" and purpose != "target" and purpose != expected_purpose:
             _fail("candidate purpose disagrees with recovery direction")
 
 
@@ -409,6 +451,17 @@ def _load_use_journal(paths, journal, platform_info, expected_identity=None):
         if candidate.get("purpose") == "recovery-previous":
             desired = value["previous"]
         _candidate(candidate, expected, recovery, phase, name, desired)
+        if candidate["displaced_purpose"] == "previous" and value["previous"] is None:
+            _fail("%s displaced candidate has no previous logical state" % name)
+        displaced_logical = (
+            value["previous"] if candidate["displaced_purpose"] == "previous" else value["target"]
+        )
+        if candidate["displaced_identity"] is not None:
+            expected_type = "regular"
+            if name == "link" and displaced_logical["link_mode"] == "symlink":
+                expected_type = "symlink"
+            if candidate["displaced_identity"]["file_type"] != expected_type:
+                _fail("%s displaced candidate type disagrees with its logical state" % name)
     if recovery is None:
         _validate_normal_phase(value)
     elif recovery["direction"] != recovery_direction(value):
@@ -658,7 +711,23 @@ def classify_candidate(paths, journal, name):
         return "missing"
     identity = candidate["identity"]
     if identity is not None:
-        if not identity_matches(path, identity) or candidate["state"] == "published":
+        if not identity_matches(path, identity):
+            displaced_identity = candidate["displaced_identity"]
+            public = paths.root / journal[name if name == "link" else "manifest"]
+            physical = (
+                classify_public_link(paths, journal) if name == "link" else classify_public_manifest(paths, journal)
+            )
+            desired_physical = "P" if candidate["purpose"] == "recovery-previous" else "T"
+            if (
+                candidate["state"] == "ready"
+                and displaced_identity is not None
+                and identity_matches(path, displaced_identity)
+                and identity_matches(public, identity)
+                and (physical == desired_physical or (name == "link" and physical == "B"))
+            ):
+                return "displaced-public"
+            return "unknown"
+        if candidate["state"] == "published":
             return "unknown"
         if candidate["state"] in ("ready", "discarding"):
             try:
@@ -686,6 +755,16 @@ def classify_candidate(paths, journal, name):
         desired = journal["target"]
         if candidate["purpose"] == "recovery-previous":
             desired = journal["previous"]
+        if stat.S_ISREG(status.st_mode) and desired is not None:
+            with AnchoredDirectory(_candidate_area(paths, name)) as parent:
+                size, digest, unused_identity = parent.file_evidence((path.name,))
+            if name == "link" and desired["link_mode"] != "symlink":
+                if size == desired["executable_size"] and digest == desired["executable_sha256"]:
+                    return "exact-unrecorded-purpose-object"
+            elif name == "manifest":
+                payload = _canonical_bytes(desired["manifest_payload"])
+                if size == len(payload) and digest == hashlib.sha256(payload).hexdigest():
+                    return "exact-unrecorded-purpose-object"
         if (
             name == "link"
             and candidate["state"] in ("absent", "building")
@@ -694,7 +773,7 @@ def classify_candidate(paths, journal, name):
             and os.readlink(str(path)) == os.path.relpath(str(paths.root / desired["executable"]), str(path.parent))
         ):
             return "exact-unrecorded-purpose-object"
-    except OSError:
+    except (ArchiveError, OSError, IntegrityError):
         # An unrecorded candidate may disappear or become unreadable while it is classified.
         return "unknown"
     return "unknown"
@@ -767,6 +846,22 @@ def _copy_journal(journal):
     return json.loads(json.dumps(journal, allow_nan=False))
 
 
+def _adopt_displaced_candidate(journal, name):
+    candidate = journal["candidates"][name]
+    displaced_purpose = candidate["displaced_purpose"]
+    logical = journal[displaced_purpose]
+    candidate["purpose"] = "recovery-previous" if displaced_purpose == "previous" else "recovery-target"
+    candidate["state"] = "discarding"
+    candidate["identity"] = candidate["displaced_identity"]
+    candidate["size"] = None
+    candidate["sha256"] = None
+    candidate["target"] = None
+    if name == "link" and logical["link_mode"] == "symlink":
+        candidate["target"] = os.path.relpath(logical["executable"], "bin")
+    candidate["displaced_identity"] = None
+    candidate["displaced_purpose"] = None
+
+
 def plan_activation_recovery(journal, classification):
     # type: (dict, ActivationClassification) -> ActivationRecoveryPlan
     """Plan one restart-safe transition; callers durably publish returned journals."""
@@ -784,19 +879,33 @@ def plan_activation_recovery(journal, classification):
     if updated["recovery"] != {"direction": direction}:
         raise IntegrityError("activation recovery direction changed after publication")
 
-    desired_link = "M" if direction == "rollback-absent" else ("P" if direction == "rollback-previous" else "T")
-    desired_manifest = desired_link
     expected_purpose = {
         "rollback-previous": "recovery-previous",
         "rollforward-target": "recovery-target",
     }.get(direction)
-    for name, candidate_classification in (
+    candidate_classifications = (
         ("link", classification.link_candidate),
         ("manifest", classification.manifest_candidate),
-    ):
+    )
+    for name, candidate_classification in candidate_classifications:
+        candidate = updated["candidates"][name]
+        if candidate["state"] != "discarding":
+            continue
+        if candidate_classification != "missing":
+            return ActivationRecoveryPlan(updated, direction, "delete-candidate", name)
+        _clear_candidate(candidate)
+        candidate["purpose"] = expected_purpose or "target"
+        return ActivationRecoveryPlan(updated, direction, "persist-candidate-absent", name)
+
+    desired_link = "M" if direction == "rollback-absent" else ("P" if direction == "rollback-previous" else "T")
+    desired_manifest = desired_link
+    for name, candidate_classification in candidate_classifications:
         candidate = updated["candidates"][name]
         if candidate["purpose"] != "target":
             continue
+        if candidate_classification == "displaced-public":
+            _adopt_displaced_candidate(updated, name)
+            return ActivationRecoveryPlan(updated, direction, "persist-displaced-candidate", name)
         if candidate_classification in (
             "exact-unrecorded-purpose-object",
             "exact-unrecorded-empty-regular",
@@ -824,22 +933,10 @@ def plan_activation_recovery(journal, classification):
                     "persist-candidate-absent",
                     name,
                 )
-            if candidate["state"] != "discarding":
-                candidate["state"] = "discarding"
-                return ActivationRecoveryPlan(updated, direction, "persist-discarding", name)
-            if candidate_classification != "missing":
-                return ActivationRecoveryPlan(updated, direction, "delete-candidate", name)
-            candidate.update(
-                {
-                    "purpose": candidate["purpose"],
-                    "state": "absent",
-                    "identity": None,
-                    "size": None,
-                    "sha256": None,
-                    "target": None,
-                }
-            )
-            return ActivationRecoveryPlan(updated, direction, "persist-candidate-absent", name)
+            candidate["state"] = "discarding"
+            candidate["displaced_identity"] = None
+            candidate["displaced_purpose"] = None
+            return ActivationRecoveryPlan(updated, direction, "persist-discarding", name)
 
     for name, candidate_classification, physical in (
         ("link", classification.link_candidate, classification.link),
@@ -867,6 +964,9 @@ def plan_activation_recovery(journal, classification):
                 raise IntegrityError("activation recovery building candidate is unknown")
             return ActivationRecoveryPlan(updated, direction, "resume-building-candidate", name)
         if state == "ready":
+            if candidate_classification == "displaced-public":
+                _adopt_displaced_candidate(updated, name)
+                return ActivationRecoveryPlan(updated, direction, "persist-displaced-candidate", name)
             if candidate_classification != "recorded-owned":
                 raise IntegrityError("activation recovery ready candidate is unknown")
             if physical == desired_physical or (name == "link" and physical == "B" and desired_physical in ("P", "T")):
@@ -882,19 +982,6 @@ def plan_activation_recovery(journal, classification):
         if state == "published":
             candidate["state"] = "discarding"
             return ActivationRecoveryPlan(updated, direction, "persist-discarding", name)
-        if state == "discarding":
-            if candidate_classification != "missing":
-                return ActivationRecoveryPlan(updated, direction, "delete-candidate", name)
-            candidate.update(
-                {
-                    "state": "absent",
-                    "identity": None,
-                    "size": None,
-                    "sha256": None,
-                    "target": None,
-                }
-            )
-            return ActivationRecoveryPlan(updated, direction, "persist-candidate-absent", name)
 
     for name, physical, desired in (
         ("link", classification.link, desired_link),
@@ -1046,6 +1133,8 @@ def _clear_candidate(candidate):
             "size": None,
             "sha256": None,
             "target": None,
+            "displaced_identity": None,
+            "displaced_purpose": None,
         }
     )
 
@@ -1075,7 +1164,12 @@ def _create_symlink_candidate(paths, value, target):
         raise IntegrityError("activation candidate ancestor changed") from error
 
 
-def durable_replace(source, destination, expected_identity=None):
+def durable_replace(
+    source,
+    destination,
+    expected_identity=None,
+    expected_destination_identity=None,
+):
     source = Path(source)
     destination = Path(destination)
     if source.parent != destination.parent:
@@ -1086,6 +1180,8 @@ def durable_replace(source, destination, expected_identity=None):
                 (source.name,),
                 (destination.name,),
                 expected_identity=expected_identity,
+                replace_existing=expected_destination_identity is not None,
+                expected_destination_identity=expected_destination_identity,
             )
         return (outcome,)
     except ArchiveError as error:
@@ -1125,6 +1221,7 @@ def _remove_candidate(paths, value, name):
         IntegrityError,
         allowed_symlinks=allowed,
         expected_identity=candidate["identity"],
+        private_names=True,
     )
     if removed:
         flush_directory(path.parent)
@@ -1134,16 +1231,17 @@ def _remove_public(paths, value, name, expected_identity):
     path = _public_path(paths, value, name)
     if not os.path.lexists(str(path)):
         return
-    allowed = (path,) if expected_identity["file_type"] == "symlink" else ()
-    removed = _secure_remove_tree(
-        _candidate_area(paths, name),
-        path,
-        IntegrityError,
-        allowed_symlinks=allowed,
-        expected_identity=expected_identity,
-    )
-    if removed:
-        flush_directory(path.parent)
+    candidate = _candidate_path(paths, value, name)
+    try:
+        with AnchoredDirectory(_candidate_area(paths, name)) as parent:
+            parent.replace(
+                (path.name,),
+                (candidate.name,),
+                expected_identity=expected_identity,
+                replace_existing=False,
+            )
+    except ArchiveError as error:
+        raise IntegrityError("unable to isolate public activation state for recovery") from error
 
 
 def _open_regular_candidate(path):
@@ -1460,6 +1558,8 @@ def _publish_candidate(
     value,
     name,
     write_id,
+    expected_public_identity,
+    displaced_purpose,
     published_phase=None,
     authority=None,
 ):
@@ -1487,16 +1587,23 @@ def _publish_candidate(
             except (ArchiveError, OSError) as error:
                 # Ready regular candidates must remain readable through publication.
                 raise IntegrityError("activation candidate content changed before publication") from error
+        candidate["displaced_identity"] = expected_public_identity
+        candidate["displaced_purpose"] = displaced_purpose
+        if authority is not None:
+            authority.publish(value)
         durable_replace(
             candidate_path,
             public_path,
             candidate["identity"],
+            expected_destination_identity=expected_public_identity,
         )
     else:
         if not identity_matches(public_path, value["candidates"][name]["identity"]):
             raise IntegrityError("activation candidate disappeared before publication")
         flush_directory(public_path.parent)
     value["candidates"][name]["state"] = "published"
+    value["candidates"][name]["displaced_identity"] = None
+    value["candidates"][name]["displaced_purpose"] = None
     if published_phase is not None:
         value["phase"] = published_phase
     _publish_activation_value(paths, journal_path, value, write_id, authority)
@@ -1576,6 +1683,8 @@ class ActivationTransaction(object):
                     "size": None,
                     "sha256": None,
                     "target": None,
+                    "displaced_identity": None,
+                    "displaced_purpose": None,
                 },
                 "manifest": {
                     "path": "active/.%s.use-%s.candidate.json" % (spec.name, operation),
@@ -1585,6 +1694,8 @@ class ActivationTransaction(object):
                     "size": None,
                     "sha256": None,
                     "target": None,
+                    "displaced_identity": None,
+                    "displaced_purpose": None,
                 },
             },
             "recovery": None,
@@ -1607,6 +1718,20 @@ class ActivationTransaction(object):
         """Build, publish, validate, and commit the target active pair."""
 
         self._authority.require()
+        initial = classify_activation(self.paths, self.value)
+        expected_link_states = ("M",) if self.value["previous"] is None else ("P", "B")
+        expected_manifest_state = "M" if self.value["previous"] is None else "P"
+        if initial.link_candidate != "missing" or initial.manifest_candidate != "missing":
+            raise IntegrityError("unrecorded activation candidate is not empty")
+        if initial.link not in expected_link_states or initial.manifest != expected_manifest_state:
+            raise IntegrityError("active state changed before activation candidate construction")
+        expected_public_identities = {
+            "link": initial.link_evidence["identity"] if initial.link_evidence is not None else None,
+            "manifest": (
+                initial.manifest_evidence["identity"] if initial.manifest_evidence is not None else None
+            ),
+        }
+        displaced_purpose = "previous" if self.value["previous"] is not None else None
         target = self.value["target"]
         link_candidate = self.value["candidates"]["link"]
         link_path = _candidate_path(self.paths, self.value, "link")
@@ -1616,8 +1741,8 @@ class ActivationTransaction(object):
         )
         try:
             created_identity = _create_symlink_candidate(self.paths, self.value, target_path)
-        except (OSError, NotImplementedError):
-            if os.name != "nt":
+        except (OSError, NotImplementedError) as error:
+            if not _windows_symlink_fallback_allowed(error):
                 raise
             target["link_mode"] = "copy"
             target["manifest_payload"] = _manifest_payload(
@@ -1671,6 +1796,8 @@ class ActivationTransaction(object):
             self.value,
             "link",
             self._write_id,
+            expected_public_identities["link"],
+            displaced_purpose,
             published_phase="link-published",
             authority=self._authority,
         )
@@ -1680,6 +1807,8 @@ class ActivationTransaction(object):
             self.value,
             "manifest",
             self._write_id,
+            expected_public_identities["manifest"],
+            displaced_purpose,
             published_phase="manifest-published",
             authority=self._authority,
         )
@@ -1755,17 +1884,30 @@ def _execute_recovery_plan(paths, record, plan, platform_info, write_id):
         return
     if plan.action == "publish-repair-candidate":
         _verify_recovery_precondition(paths, value, name, plan.precondition)
+        displaced_classification = plan.precondition["classification"]
+        displaced_purpose = None
+        if displaced_classification in ("P", "B"):
+            displaced_purpose = "previous"
+        elif displaced_classification == "T":
+            displaced_purpose = "target"
         _publish_candidate(
             paths,
             journal,
             value,
             name,
             write_id,
+            plan.precondition["identity"],
+            displaced_purpose,
             authority=authority,
         )
         return
+    if plan.action == "persist-displaced-candidate":
+        authority.publish(value)
+        return
     if plan.action == "persist-published":
         value["candidates"][name]["state"] = "published"
+        value["candidates"][name]["displaced_identity"] = None
+        value["candidates"][name]["displaced_purpose"] = None
         authority.publish(value)
         return
     if plan.action == "dispose-journal":
@@ -1778,6 +1920,7 @@ def _execute_recovery_plan(paths, record, plan, platform_info, write_id):
                         temporary,
                         IntegrityError,
                         expected_identity=identity,
+                        private_names=True,
                     )
                     or removed
                 )
@@ -1788,6 +1931,7 @@ def _execute_recovery_plan(paths, record, plan, platform_info, write_id):
                     journal,
                     IntegrityError,
                     expected_identity=record.journal_identity,
+                    private_names=True,
                 )
                 or removed
             )

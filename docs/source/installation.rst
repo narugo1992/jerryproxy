@@ -36,7 +36,10 @@ changing the configured home. It then streams a fixed 1 MiB Range from a
 pinned public Xray release through each of the three built-in relays. Each relay
 request has a five-second connect/read timeout. A parent process enforces a
 30-second wall-clock deadline across process startup, redirects, response
-headers, empty chunks, and streaming. The check requires an HTTPS redirect
+headers, empty chunks, and streaming. A final check item waits a bounded time
+for any process start that returned after its deadline and reports ``ERR`` if
+cleanup remains pending or a child survives termination and hard kill. The
+check requires an HTTPS redirect
 chain, HTTP 206, the exact ``Content-Range`` and byte count, and the pinned slice
 SHA-256. It reports response-header latency, first-chunk latency, and the speed
 of the remaining chunks separately.

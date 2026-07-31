@@ -1,6 +1,7 @@
 import hashlib
 import io
 import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -112,7 +113,7 @@ def test_self_check_validates_an_empty_private_home(tmp_path, monkeypatch):
     permission_skip = int(os.name != "posix")
     lock_warning = int(status.level == "WARN")
     expected = "Summary: %d OK, %d WARN, %d SKIP, 0 FAIL, 0 ERR" % (
-        19 - permission_skip - lock_warning,
+        20 - permission_skip - lock_warning,
         lock_warning,
         permission_skip,
     )
@@ -539,12 +540,31 @@ def test_recovery_child_runner_skips_when_process_start_is_rejected(tmp_path, mo
 def test_recovery_child_runner_bounds_a_stalled_process_start(tmp_path, monkeypatch):
     release = threading.Event()
     finished = threading.Event()
+    terminated = threading.Event()
+    reaped = threading.Event()
     captured = {}
 
     class StalledProcess(object):
+        alive = False
+
         def start(self):
             release.wait(5.0)
+            self.alive = True
             finished.set()
+
+        def join(self, timeout):
+            del timeout
+            reaped.set()
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.alive = False
+            terminated.set()
+
+        def kill(self):
+            self.alive = False
 
     class Context(_FakeProcessContextBase):
         def Process(self, **kwargs):
@@ -554,18 +574,157 @@ def test_recovery_child_runner_bounds_a_stalled_process_start(tmp_path, monkeypa
     monkeypatch.setattr(selfcheck_module, "_RECOVERY_PROCESS_TIMEOUT", 0.1)
     monkeypatch.setattr(selfcheck_module.multiprocessing, "get_all_start_methods", lambda: ("spawn",))
     monkeypatch.setattr(selfcheck_module.multiprocessing, "get_context", lambda method: Context())
+    supervision = selfcheck_module._ProcessSupervision()
     started = time.monotonic()
     try:
-        result = selfcheck_module._run_recovery_child(lambda: None, (), 71, tmp_path / "error.log")
+        result = selfcheck_module._run_recovery_child(
+            lambda: None,
+            (),
+            71,
+            tmp_path / "error.log",
+            supervision=supervision,
+        )
+        elapsed = time.monotonic() - started
     finally:
         release.set()
         finished.wait(1.0)
+        reaped.wait(1.0)
 
-    assert time.monotonic() - started < 1.0
-    assert result == CheckResult.err("hard-exit recovery child startup exceeded the 0.1-second timeout")
+    assert elapsed < 1.0
+    assert result == CheckResult.err(
+        "hard-exit recovery child startup exceeded the 0.1-second timeout",
+        diagnostics=("delayed process-start cleanup will be verified by the final supervision check",),
+    )
     assert captured["daemon"] is True
     assert captured["args"][3].is_set() is False
     assert captured["args"][4].is_set() is True
+    assert terminated.is_set()
+    assert reaped.is_set()
+    assert supervision.wait(1.0)
+    assert supervision.result() == CheckResult.ok("1 delayed child start was cancelled and reaped")
+
+
+def test_start_supervision_reports_a_late_child_that_survives_termination_and_kill(tmp_path, monkeypatch):
+    release = threading.Event()
+    finished = threading.Event()
+
+    class UnstoppableProcess(object):
+        def start(self):
+            release.wait(5.0)
+            finished.set()
+
+        def join(self, timeout):
+            del timeout
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            raise OSError("termination denied")
+
+        def kill(self):
+            raise OSError("kill denied")
+
+    class Context(_FakeProcessContextBase):
+        def Process(self, **kwargs):
+            del kwargs
+            return UnstoppableProcess()
+
+    monkeypatch.setattr(selfcheck_module, "_RECOVERY_PROCESS_TIMEOUT", 0.1)
+    monkeypatch.setattr(selfcheck_module.multiprocessing, "get_all_start_methods", lambda: ("spawn",))
+    monkeypatch.setattr(selfcheck_module.multiprocessing, "get_context", lambda method: Context())
+    supervision = selfcheck_module._ProcessSupervision()
+
+    result = selfcheck_module._run_recovery_child(
+        lambda: None,
+        (),
+        71,
+        tmp_path / "error.log",
+        supervision=supervision,
+    )
+    release.set()
+    assert finished.wait(1.0)
+    assert supervision.wait(1.0)
+
+    assert result.level == "ERR"
+    audit = supervision.result()
+    assert audit.level == "ERR"
+    assert audit.detail == "1 delayed child remained alive after kill"
+    assert any("terminate failed" in item for item in audit.diagnostics)
+    assert any("kill failed" in item for item in audit.diagnostics)
+
+
+def test_start_supervision_reaps_a_late_child_when_cancellation_publication_fails(
+    tmp_path,
+    monkeypatch,
+):
+    release = threading.Event()
+    finished = threading.Event()
+    terminated = threading.Event()
+    reaped = threading.Event()
+    events = []
+
+    class RejectedCancellation(threading.Event):
+        def set(self):
+            raise OSError("cancellation publication denied")
+
+    class DelayedProcess(object):
+        alive = False
+
+        def start(self):
+            release.wait(5.0)
+            self.alive = True
+            finished.set()
+
+        def join(self, timeout):
+            del timeout
+            reaped.set()
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.alive = False
+            terminated.set()
+
+        def kill(self):
+            self.alive = False
+
+    class Context(_FakeProcessContextBase):
+        def Event(self):
+            event = RejectedCancellation() if len(events) == 1 else threading.Event()
+            events.append(event)
+            return event
+
+        def Process(self, **kwargs):
+            del kwargs
+            return DelayedProcess()
+
+    monkeypatch.setattr(selfcheck_module, "_RECOVERY_PROCESS_TIMEOUT", 0.1)
+    monkeypatch.setattr(selfcheck_module.multiprocessing, "get_all_start_methods", lambda: ("spawn",))
+    monkeypatch.setattr(selfcheck_module.multiprocessing, "get_context", lambda method: Context())
+    supervision = selfcheck_module._ProcessSupervision()
+
+    try:
+        result = selfcheck_module._run_recovery_child(
+            lambda: None,
+            (),
+            71,
+            tmp_path / "error.log",
+            supervision=supervision,
+        )
+    finally:
+        release.set()
+        finished.wait(1.0)
+        reaped.wait(1.0)
+
+    assert result == CheckResult.err(
+        "hard-exit recovery child startup supervision failed: OSError: "
+        "cancellation publication denied"
+    )
+    assert terminated.is_set()
+    assert supervision.wait(1.0)
+    assert supervision.result() == CheckResult.ok("1 delayed child start was cancelled and reaped")
 
 
 def test_recovery_child_runner_reports_missing_start_supervisor_outcome(tmp_path, monkeypatch):
@@ -764,11 +923,51 @@ def test_cancelled_spawn_child_never_enters_business_code(tmp_path):
         ),
     )
 
-    process.start()
-    process.join(10.0)
+    previous_umask = os.umask(0) if os.name == "posix" else None
+    try:
+        process.start()
+        process.join(10.0)
+    finally:
+        if previous_umask is not None:
+            os.umask(previous_umask)
 
     assert process.exitcode == selfcheck_module._CHILD_START_CANCELLED
     assert not sentinel.exists()
+    if os.name == "posix":
+        assert stat.S_IMODE((tmp_path / "child.stderr").stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX no-follow diagnostic creation")
+def test_spawn_child_refuses_a_preexisting_stderr_alias(tmp_path):
+    if "spawn" not in selfcheck_module.multiprocessing.get_all_start_methods():
+        pytest.skip("spawn start method is unavailable")
+    context = selfcheck_module.multiprocessing.get_context("spawn")
+    start_allowed = context.Event()
+    start_cancelled = context.Event()
+    start_ready = context.Event()
+    start_budget = context.Value("d", 10.0)
+    outside = tmp_path / "outside.log"
+    outside.write_bytes(b"must survive")
+    stderr_log = tmp_path / "child.stderr"
+    stderr_log.symlink_to(outside)
+    process = context.Process(
+        target=selfcheck_module._captured_child_entry,
+        args=(
+            _write_start_gate_sentinel,
+            (str(tmp_path / "business-ran"),),
+            str(stderr_log),
+            start_allowed,
+            start_cancelled,
+            start_ready,
+            start_budget,
+        ),
+    )
+
+    process.start()
+    process.join(10.0)
+
+    assert process.exitcode == selfcheck_module._CHILD_STDERR_CAPTURE_ERROR
+    assert outside.read_bytes() == b"must survive"
 
 
 def test_spawn_child_rejects_authorization_after_its_relative_budget_expires(tmp_path):
@@ -844,37 +1043,47 @@ def test_start_supervisor_cancels_a_process_that_completes_at_the_deadline(monke
 
 @pytest.mark.parametrize("ready_after_wait", [False, True])
 def test_start_supervisor_cancels_when_deadline_expires_around_child_ready(monkeypatch, ready_after_wait):
-    class SynchronousThread(object):
-        def __init__(self, target, name, daemon):
-            del name, daemon
-            self.target = target
+    class Clock(object):
+        value = 0.0
 
-        def start(self):
-            pass
+        def monotonic(self):
+            return self.value
 
-        def join(self, timeout):
-            assert timeout == 5.0
-            self.target()
-
-        def is_alive(self):
-            return False
+    clock = Clock()
 
     class ReadyEvent(threading.Event):
         def wait(self, timeout=None):
             del timeout
+            clock.value = 5.0
             if ready_after_wait:
                 self.set()
                 return True
             return False
 
-    clock_values = iter((0.0, 0.0, 0.0, 5.0))
+    class Process(object):
+        alive = False
+
+        def start(self):
+            self.alive = True
+
+        def join(self, timeout):
+            del timeout
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.alive = False
+
+        def kill(self):
+            self.alive = False
+
     start_allowed = threading.Event()
     start_cancelled = threading.Event()
     start_ready = ReadyEvent()
     start_budget = SimpleNamespace(value=0.0)
-    process = SimpleNamespace(start=lambda: None, is_alive=lambda: True)
-    monkeypatch.setattr(selfcheck_module.threading, "Thread", SynchronousThread)
-    monkeypatch.setattr(selfcheck_module.time, "monotonic", lambda: next(clock_values))
+    process = Process()
+    monkeypatch.setattr(selfcheck_module.time, "monotonic", clock.monotonic)
 
     status, error = selfcheck_module._start_process(
         process,
@@ -892,30 +1101,44 @@ def test_start_supervisor_cancels_when_deadline_expires_around_child_ready(monke
 
 
 def test_start_supervisor_cancels_if_deadline_expires_immediately_after_authorization(monkeypatch):
-    class SynchronousThread(object):
-        def __init__(self, target, name, daemon):
-            del name, daemon
-            self.target = target
+    class Clock(object):
+        value = 0.0
+
+        def monotonic(self):
+            return self.value
+
+    clock = Clock()
+
+    class AuthorizationEvent(threading.Event):
+        def set(self):
+            super(AuthorizationEvent, self).set()
+            clock.value = 5.0
+
+    class Process(object):
+        alive = False
 
         def start(self):
-            pass
+            self.alive = True
 
         def join(self, timeout):
-            assert timeout == 5.0
-            self.target()
+            del timeout
 
         def is_alive(self):
-            return False
+            return self.alive
 
-    clock_values = iter((0.0, 0.0, 0.0, 0.0, 5.0))
-    start_allowed = threading.Event()
+        def terminate(self):
+            self.alive = False
+
+        def kill(self):
+            self.alive = False
+
+    start_allowed = AuthorizationEvent()
     start_cancelled = threading.Event()
     start_ready = threading.Event()
     start_ready.set()
     start_budget = SimpleNamespace(value=0.0)
-    process = SimpleNamespace(start=lambda: None)
-    monkeypatch.setattr(selfcheck_module.threading, "Thread", SynchronousThread)
-    monkeypatch.setattr(selfcheck_module.time, "monotonic", lambda: next(clock_values))
+    process = Process()
+    monkeypatch.setattr(selfcheck_module.time, "monotonic", clock.monotonic)
 
     status, error = selfcheck_module._start_process(
         process,
@@ -1328,6 +1551,42 @@ def test_recovery_child_runner_captures_bounds_and_redacts_unexpected_crashes(tm
     assert "ghp_SUPERSECRET" not in rendered
     assert "123e4567-e89b-12d3-a456-426614174000" not in rendered
     assert "cHJpdmF0ZQ==" not in rendered
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX diagnostic mode semantics")
+def test_recovery_child_error_diagnostic_is_created_with_mode_0600(tmp_path):
+    invalid_root = tmp_path / "not-a-directory"
+    invalid_root.write_bytes(b"occupied")
+    error_log = tmp_path / "child-error.log"
+    previous_umask = os.umask(0)
+    try:
+        result = selfcheck_module._run_recovery_child(
+            selfcheck_module._install_recovery_child,
+            (str(invalid_root),),
+            selfcheck_module._RECOVERY_CHILD_ERROR,
+            error_log,
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert result is None
+    assert stat.S_IMODE(error_log.stat().st_mode) == 0o600
+
+
+def test_recovery_child_error_diagnostic_does_not_replace_the_child_exit_on_close_failure(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(selfcheck_module.os, "open", lambda *args, **kwargs: 91)
+    monkeypatch.setattr(selfcheck_module.os, "fchmod", lambda descriptor, mode: None)
+    monkeypatch.setattr(selfcheck_module.os, "write", lambda descriptor, payload: len(payload))
+
+    def fail_close(descriptor):
+        raise OSError("diagnostic close failed")
+
+    monkeypatch.setattr(selfcheck_module.os, "close", fail_close)
+
+    selfcheck_module._write_recovery_child_error(tmp_path / "child-error.log")
 
 
 def test_recovery_checks_propagate_spawn_prerequisite_skips(tmp_path, monkeypatch):
@@ -2051,12 +2310,31 @@ def test_production_relay_probe_skips_without_a_process_start_method(monkeypatch
 def test_production_relay_probe_bounds_a_stalled_process_start(monkeypatch):
     release = threading.Event()
     finished = threading.Event()
+    terminated = threading.Event()
+    reaped = threading.Event()
     captured = {}
 
     class StalledProcess(object):
+        alive = False
+
         def start(self):
             release.wait(5.0)
+            self.alive = True
             finished.set()
+
+        def join(self, timeout):
+            del timeout
+            reaped.set()
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.alive = False
+            terminated.set()
+
+        def kill(self):
+            self.alive = False
 
     class Context(_FakeProcessContextBase):
         def Process(self, **kwargs):
@@ -2066,18 +2344,31 @@ def test_production_relay_probe_bounds_a_stalled_process_start(monkeypatch):
     monkeypatch.setattr(selfcheck_module, "_RELAY_CHECK_TOTAL_TIMEOUT", 0.1)
     monkeypatch.setattr(selfcheck_module.multiprocessing, "get_all_start_methods", lambda: ("spawn",))
     monkeypatch.setattr(selfcheck_module.multiprocessing, "get_context", lambda method: Context())
+    supervision = selfcheck_module._ProcessSupervision()
     started = time.monotonic()
     try:
-        result = selfcheck_module._check_relay_in_process(next(iter(selfcheck_module.iter_builtin_relays())))
+        result = selfcheck_module._check_relay_in_process(
+            next(iter(selfcheck_module.iter_builtin_relays())),
+            supervision=supervision,
+        )
+        elapsed = time.monotonic() - started
     finally:
         release.set()
         finished.wait(1.0)
+        reaped.wait(1.0)
 
-    assert time.monotonic() - started < 1.0
-    assert result == CheckResult.err("relay probe child startup exceeded the 0.1-second total deadline")
+    assert elapsed < 1.0
+    assert result == CheckResult.err(
+        "relay probe child startup exceeded the 0.1-second total deadline",
+        diagnostics=("delayed process-start cleanup will be verified by the final supervision check",),
+    )
     assert captured["daemon"] is True
     assert captured["args"][3].is_set() is False
     assert captured["args"][4].is_set() is True
+    assert terminated.is_set()
+    assert reaped.is_set()
+    assert supervision.wait(1.0)
+    assert supervision.result() == CheckResult.ok("1 delayed child start was cancelled and reaped")
 
 
 def test_production_relay_probe_cancels_when_start_authorization_cannot_be_published(monkeypatch):
@@ -2322,7 +2613,7 @@ def test_relay_warnings_keep_the_full_self_check_exit_code_zero(tmp_path):
     permission_skip = int(os.name != "posix")
     lock_warning = int(status.level == "WARN")
     expected = "Summary: %d OK, %d WARN, %d SKIP, 0 FAIL, 0 ERR" % (
-        16 - permission_skip - lock_warning,
+        17 - permission_skip - lock_warning,
         3 + lock_warning,
         permission_skip,
     )

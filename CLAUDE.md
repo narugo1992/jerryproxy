@@ -85,6 +85,12 @@ authentication, extraction, process, or permission errors to warnings.
   allowed only when the active manifest records `link_mode: copy`.
 - Exact upstream tags and exact platform assets are required. Do not select an
   asset through fuzzy substring matching.
+- Runtime backend state management supports Linux, macOS, and Windows. Catalogs
+  may retain official BSD assets for offline inspection, but BSD install/use
+  must fail closed until equivalent atomic primitives and native CI exist.
+  Filesystems that reject required no-replace or exchange operations must also
+  fail closed; do not emulate them with pathname existence checks or multi-step
+  swaps.
 - Automatic upstream installation requires a valid SHA-256 digest in release
   metadata. HTTPS alone is not integrity evidence.
 - Keep download and extraction size bounds. Reject path traversal, archive
@@ -162,12 +168,20 @@ authentication, extraction, process, or permission errors to warnings.
   never escape the configured JerryProxy home. Revalidate each cleanup target's
   complete managed ancestor chain and removal tree before deletion. Recursive
   removal must use alias-aware JerryProxy code rather than `shutil.rmtree`, and
-  must recheck object identity throughout traversal. POSIX removal must retain
-  an open identity handle and use parent-relative deletion; Windows removal
-  must retain a non-following native handle and delete through that handle.
-  Pathname replacement must not redirect the final deletion system call. A
-  transaction may safely unlink only its journal-recorded active-command
-  symlink; arbitrary aliases within a quarantine remain integrity failures.
+  must recheck object identity throughout traversal. POSIX cleanup must retain
+  an open identity handle, atomically move ordinary targets to a random private
+  name below the same pinned parent, verify the moved identity, and delete
+  parent-relative. A hard exit may retain that private tombstone only inside a
+  disposable cleanup area; the next cleanup of that area must inventory and
+  remove it. Journaled transaction and activation candidate namespaces must not
+  create a second unrecorded tombstone. Windows removal must retain a
+  non-following native handle and delete through that handle. One-shot
+  substitution before the POSIX isolation check must be detected and preserved.
+  Continuous malicious same-UID replacement of a transient private name after
+  its final identity check is outside the supported threat boundary and must be
+  disclosed. A transaction may safely unlink only its journal-recorded
+  active-command symlink; arbitrary aliases within a quarantine remain
+  integrity failures.
 - Home initialization must reject symlinked or Windows reparse-point managed
   subdirectories before and immediately after creation, before applying
   permissions or mutating through them. It must also reject an aliased lock file
@@ -326,7 +340,9 @@ private branch coverage or replace the normal test matrix.
   Run the blocking start call in a daemon supervision thread. A new child must
   wait behind a parent authorization gate and must exit on cancellation, so a
   start call that returns after the deadline cannot enter business code or
-  remain as an unmanaged child.
+  remain as an unmanaged child. Aggregate every delayed-start cleanup in one
+  per-run supervisor and report a final independent check item; pending cleanup
+  or a child still alive after kill is ``ERR``.
 - Production relay checks must run in dedicated child processes. The parent
   enforces one 30-second wall-clock deadline across child startup, redirects,
   response headers, empty chunks, and streaming. Deterministic unit tests may
@@ -341,8 +357,9 @@ private branch coverage or replace the normal test matrix.
   runs, and redirect raw file descriptor 2 away from the caller terminal.
   Buffer complete bounded lines across writes, redact them before persistence,
   and only then apply the capture limit. Capture files must be mode ``0600``
-  where POSIX modes apply, bounded before reading, redacted again before
-  rendering, and read only after the child is stopped.
+  where POSIX modes apply, created exclusively without following an existing
+  alias, bounded before reading, redacted again before rendering, and read only
+  after the child is stopped.
 - Child cleanup is an independent best-effort sequence: bounded join,
   terminate, bounded join, hard kill when still alive, and final bounded join.
   A failure in one stage must be recorded but must never suppress later cleanup

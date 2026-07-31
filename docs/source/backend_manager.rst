@@ -184,13 +184,22 @@ operation lock as installation and removal. Cleanup revalidates each target's
 complete managed ancestor chain immediately before deletion and rejects aliases
 inside removal trees so a path swap after target collection fails closed.
 Recursive disposal repeatedly checks path identity and never delegates managed
-trees to an implementation that can traverse a Windows junction. POSIX targets
-remain pinned by an open descriptor through their final unlink or directory
-removal, preventing a removed inode from being recycled between identity
-checks. Windows targets remain pinned with ``OPEN_REPARSE_POINT`` and are
-deleted with ``SetFileInformationByHandle``, so replacing a parent with a
-junction cannot redirect the final operation. The one journal-recorded
-active-command symlink is unlinked directly without following its target.
+trees to an implementation that can traverse a Windows junction. POSIX cleanup
+targets remain pinned, move atomically to a random private name below the same
+pinned parent, and are rechecked before parent-relative unlink or directory
+removal. A hard exit can leave that tombstone only in the selected disposable
+area; repeating cleanup inventories and removes it. Journaled install/removal
+transactions and activation candidates already have private operation names,
+so their disposal does not create a second unrecorded tombstone in protected
+state. Windows targets remain pinned with ``OPEN_REPARSE_POINT`` and are deleted
+with ``SetFileInformationByHandle``, so replacing a parent with a junction
+cannot redirect the final operation. The one journal-recorded active-command
+symlink is unlinked directly without following its target.
+
+One-shot POSIX substitution before isolation is detected and preserved. POSIX
+does not provide a portable unlink-by-open-file-descriptor primitive; a
+malicious same-UID process that continuously replaces the transient private
+name after its final identity check is outside the supported threat boundary.
 
 On POSIX systems without ``O_PATH`` (including supported macOS releases), an
 unreadable file or a socket may be impossible to pin safely. Cleanup fails
@@ -204,10 +213,13 @@ file may remain after release; JerryProxy does not inspect owner metadata or
 attempt stale-lock recovery. Installation holds this lock from cache validation
 and download through extraction, publication, probing, and optional activation.
 
-Activation uses an atomic relative symbolic link on Unix-like systems. Windows
-without symlink privilege receives an atomic verified executable copy; the
-active manifest records the selected version and ``link_mode`` so this
-fallback is not mistaken for a real link.
+Activation publishes a relative symbolic link atomically on supported POSIX
+systems. Windows without symlink privilege receives an atomic verified
+executable copy; the active manifest records the selected version and
+``link_mode`` so this fallback is not mistaken for a real link. The command
+and manifest are separate paths, so the pair is not continuously atomic to an
+external observer. A hard exit may expose an intermediate pair until the next
+home-lock acquisition rolls the journal backward or forward and converges.
 
 Automatic installation accepts only an exact catalog asset with verified
 upstream SHA-256 evidence. The catalog prefers the digest returned directly by
@@ -238,3 +250,9 @@ only, while architectures for which upstream publishes only an unqualified
 build retain a portable platform key. A musl host is never silently mapped to
 an old glibc build. Unsupported platform pairs fail closed instead of selecting
 an asset by fuzzy filename matching.
+
+Runtime state management is supported on Linux, macOS, and Windows. The
+packaged catalogs retain official FreeBSD and OpenBSD assets for offline
+inspection, but installation and activation on BSD fail closed until equivalent
+atomic primitives and native CI exist. NFS, SMB, FUSE, or another filesystem
+that rejects the required no-replace or exchange operation also fails closed.

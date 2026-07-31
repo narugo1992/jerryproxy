@@ -13,8 +13,6 @@ _OS_NAMES = {
     "win32": "windows",
     "cygwin": "windows",
     "darwin": "darwin",
-    "freebsd": "freebsd",
-    "openbsd": "openbsd",
 }
 
 _ARCHITECTURES = {

@@ -5,6 +5,7 @@ import errno
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 from pathlib import Path
@@ -42,10 +43,13 @@ _WINDOWS_DESTINATION_EXISTS_ERRORS = (80, 183)
 _LINUX_RENAMEAT2_SYSCALLS = {
     "aarch64": 276,
     "arm64": 276,
+    "armv5l": 382,
     "armv6l": 382,
     "armv7l": 382,
     "i386": 353,
     "i686": 353,
+    "loong64": 276,
+    "loongarch64": 276,
     "ppc64": 357,
     "ppc64le": 357,
     "riscv64": 276,
@@ -53,7 +57,9 @@ _LINUX_RENAMEAT2_SYSCALLS = {
     "x86_64": 316,
 }
 _RENAME_NOREPLACE = 1
+_RENAME_EXCHANGE = 2
 _RENAME_EXCL = 0x00000004
+_RENAME_SWAP = 0x00000002
 _DARWIN_O_SYMLINK = 0x00200000
 
 
@@ -235,9 +241,7 @@ def _rename_windows_handle(source_handle, parent_handle, destination_name, repla
 
     information = WindowsFileRenameInformation()
     if replace_existing:
-        information.replace_or_flags = (
-            _WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS | _WINDOWS_FILE_RENAME_POSIX_SEMANTICS
-        )
+        information.replace_or_flags = _WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS | _WINDOWS_FILE_RENAME_POSIX_SEMANTICS
         information_class = _WINDOWS_FILE_RENAME_INFORMATION_EX_CLASS
     else:
         information.replace_or_flags = 0
@@ -346,6 +350,122 @@ def _rename_posix_noreplace(
             error_number, os.strerror(error_number)
         )
     raise OSError(error_number, os.strerror(error_number), destination_name)
+
+
+def _rename_posix_exchange(
+    source_parent_descriptor,
+    source_name,
+    destination_parent_descriptor,
+    destination_name,
+):
+    source = os.fsencode(source_name)
+    destination = os.fsencode(destination_name)
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = None
+    if sys.platform.startswith("linux"):
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is not None:
+            renameat2.argtypes = (
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            )
+            renameat2.restype = ctypes.c_int
+            result = renameat2(
+                source_parent_descriptor,
+                source,
+                destination_parent_descriptor,
+                destination,
+                _RENAME_EXCHANGE,
+            )
+        else:
+            syscall_number = _LINUX_RENAMEAT2_SYSCALLS.get(os.uname().machine.lower())
+            syscall = getattr(libc, "syscall", None)
+            if syscall_number is None or syscall is None:
+                raise ArchiveError("atomic exchange is unsupported on this Linux architecture")
+            syscall.restype = ctypes.c_long
+            result = syscall(
+                ctypes.c_long(syscall_number),
+                ctypes.c_int(source_parent_descriptor),
+                ctypes.c_char_p(source),
+                ctypes.c_int(destination_parent_descriptor),
+                ctypes.c_char_p(destination),
+                ctypes.c_uint(_RENAME_EXCHANGE),
+            )
+    elif sys.platform == "darwin":
+        renameatx_np = getattr(libc, "renameatx_np", None)
+        if renameatx_np is None:
+            raise ArchiveError("atomic exchange is unsupported on this macOS runtime")
+        renameatx_np.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            source_parent_descriptor,
+            source,
+            destination_parent_descriptor,
+            destination,
+            _RENAME_SWAP,
+        )
+    else:
+        raise ArchiveError("atomic exchange is unsupported on this POSIX platform")
+
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in (
+        errno.EINVAL,
+        getattr(errno, "ENOSYS", -1),
+        getattr(errno, "ENOTSUP", -1),
+        getattr(errno, "EOPNOTSUPP", -1),
+    ):
+        raise ArchiveError("atomic exchange is unsupported by this filesystem") from OSError(
+            error_number, os.strerror(error_number)
+        )
+    raise OSError(error_number, os.strerror(error_number), destination_name)
+
+
+def _isolate_posix_entry(parent_descriptor, name, expected_identity, prefix, rename_noreplace):
+    quarantine_name = None
+    for unused_attempt in range(4):
+        candidate = "%s%s" % (prefix, secrets.token_hex(16))
+        try:
+            rename_noreplace(parent_descriptor, name, parent_descriptor, candidate)
+        except FileExistsError:
+            continue
+        quarantine_name = candidate
+        break
+    if quarantine_name is None:
+        raise ArchiveError("unable to allocate a private anchored quarantine name")
+    try:
+        moved = os.stat(quarantine_name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError as error:
+        raise ArchiveError("unable to inspect the isolated anchored entry") from error
+    if _identity(moved) == expected_identity:
+        return quarantine_name, moved
+    try:
+        rename_noreplace(parent_descriptor, quarantine_name, parent_descriptor, name)
+    except (ArchiveError, OSError) as error:
+        raise ArchiveError(
+            "anchored entry changed at the isolation boundary; substitute retained in quarantine"
+        ) from error
+    raise ArchiveError("anchored entry changed at the isolation boundary")
+
+
+def _discard_posix_entry(parent_descriptor, name, expected_status):
+    current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    if _identity(current) != _identity(expected_status):
+        raise ArchiveError("anchored displaced entry changed before disposal")
+    if stat.S_ISDIR(current.st_mode):
+        os.rmdir(name, dir_fd=parent_descriptor)
+    else:
+        os.unlink(name, dir_fd=parent_descriptor)
 
 
 def _open_windows_directory(path, expected_status):
@@ -1105,6 +1225,7 @@ class AnchoredDirectory(object):
             destination_parent = None
             descriptor = None
             destination_descriptor = None
+            destination_opened = None
             try:
                 if source_parts[:-1] == destination_parts[:-1]:
                     destination_parent = source_parent
@@ -1135,47 +1256,73 @@ class AnchoredDirectory(object):
                     expected_identity is not None and source_identity != expected_identity
                 ):
                     raise ArchiveError("anchored replacement source identity changed")
-                if expected_destination_identity is not None:
-                    destination_status = os.stat(
+                if replace_existing:
+                    try:
+                        destination_status = os.stat(
+                            destination_parts[-1],
+                            dir_fd=destination_parent,
+                            follow_symlinks=False,
+                        )
+                        if stat.S_ISLNK(destination_status.st_mode) and symlink_flag is not None:
+                            destination_flags = symlink_flag
+                        else:
+                            destination_flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
+                            destination_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+                        destination_descriptor = os.open(
+                            destination_parts[-1],
+                            destination_flags,
+                            dir_fd=destination_parent,
+                        )
+                        destination_opened = os.fstat(destination_descriptor)
+                    except FileNotFoundError as error:
+                        if expected_destination_identity is not None:
+                            raise ArchiveError("anchored replacement destination identity changed") from error
+                    if destination_opened is not None:
+                        destination_identity = {
+                            "kind": "posix",
+                            "device": int(destination_opened.st_dev),
+                            "inode": int(destination_opened.st_ino),
+                            "file_type": (
+                                "regular"
+                                if stat.S_ISREG(destination_opened.st_mode)
+                                else "symlink"
+                                if stat.S_ISLNK(destination_opened.st_mode)
+                                else "directory"
+                            ),
+                        }
+                        if _identity(destination_status) != _identity(destination_opened) or (
+                            expected_destination_identity is not None
+                            and destination_identity != expected_destination_identity
+                        ):
+                            raise ArchiveError("anchored replacement destination identity changed")
+                if destination_opened is not None:
+                    _rename_posix_exchange(
+                        source_parent,
+                        source_parts[-1],
+                        destination_parent,
+                        destination_parts[-1],
+                    )
+                    published = os.stat(
                         destination_parts[-1],
                         dir_fd=destination_parent,
                         follow_symlinks=False,
                     )
-                    if stat.S_ISLNK(destination_status.st_mode) and symlink_flag is not None:
-                        destination_flags = symlink_flag
-                    else:
-                        destination_flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
-                        destination_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
-                    destination_descriptor = os.open(
-                        destination_parts[-1],
-                        destination_flags,
-                        dir_fd=destination_parent,
-                    )
-                    destination_opened = os.fstat(destination_descriptor)
-                    destination_identity = {
-                        "kind": "posix",
-                        "device": int(destination_opened.st_dev),
-                        "inode": int(destination_opened.st_ino),
-                        "file_type": (
-                            "regular"
-                            if stat.S_ISREG(destination_opened.st_mode)
-                            else "symlink"
-                            if stat.S_ISLNK(destination_opened.st_mode)
-                            else "directory"
-                        ),
-                    }
-                    if (
-                        _identity(destination_status) != _identity(destination_opened)
-                        or destination_identity != expected_destination_identity
-                    ):
-                        raise ArchiveError("anchored replacement destination identity changed")
-                if replace_existing:
-                    os.replace(
+                    displaced = os.stat(
                         source_parts[-1],
-                        destination_parts[-1],
-                        src_dir_fd=source_parent,
-                        dst_dir_fd=destination_parent,
+                        dir_fd=source_parent,
+                        follow_symlinks=False,
                     )
+                    if _identity(published) != _identity(opened) or _identity(displaced) != _identity(
+                        destination_opened
+                    ):
+                        _rename_posix_exchange(
+                            source_parent,
+                            source_parts[-1],
+                            destination_parent,
+                            destination_parts[-1],
+                        )
+                        raise ArchiveError("anchored replacement changed at the publication boundary")
+                    _discard_posix_entry(source_parent, source_parts[-1], destination_opened)
                 else:
                     _rename_posix_noreplace(
                         source_parent,
@@ -1183,11 +1330,25 @@ class AnchoredDirectory(object):
                         destination_parent,
                         destination_parts[-1],
                     )
-                published = os.stat(
-                    destination_parts[-1],
-                    dir_fd=destination_parent,
-                    follow_symlinks=False,
-                )
+                    published = os.stat(
+                        destination_parts[-1],
+                        dir_fd=destination_parent,
+                        follow_symlinks=False,
+                    )
+                    if _identity(published) != _identity(opened):
+                        try:
+                            _rename_posix_noreplace(
+                                destination_parent,
+                                destination_parts[-1],
+                                source_parent,
+                                source_parts[-1],
+                            )
+                        except (ArchiveError, OSError) as error:
+                            raise ArchiveError(
+                                "anchored source changed at the publication boundary; "
+                                "substitute retained at the destination"
+                            ) from error
+                        raise ArchiveError("anchored source changed at the publication boundary")
                 if _identity(published) != _identity(opened):
                     raise ArchiveError("anchored replacement published a different entry")
                 source_outcome = flush_descriptor(source_parent, "anchored publication source directory")

@@ -1,5 +1,6 @@
 """Lightweight black-box checks for source and packaged JerryProxy CLIs."""
 
+import errno
 import hashlib
 import multiprocessing
 import os
@@ -60,6 +61,7 @@ _RECOVERY_CHILD_ERROR = 90
 _CHILD_STDERR_CAPTURE_ERROR = 96
 _CHILD_START_CANCELLED = 97
 _CHILD_START_GATE_TIMEOUT = 35.0
+_PROCESS_SUPERVISION_WAIT = 10.0
 _MAXIMUM_DETAIL_CHARACTERS = 2048
 _MAXIMUM_DIAGNOSTIC_CHARACTERS = 64 * 1024
 _MAXIMUM_DIAGNOSTIC_INPUT_CHARACTERS = 256 * 1024
@@ -422,11 +424,29 @@ def _probe_manager(paths, platform_info):
 
 
 def _write_recovery_child_error(path):  # pragma: no cover - spawned child only
+    descriptor = None
     try:
-        Path(path).write_text(_bounded_diagnostic(traceback.format_exc()), encoding="utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(str(path), flags, 0o600)
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
+        payload = _bounded_diagnostic(traceback.format_exc()).encode("utf-8")
+        while payload:
+            written = os.write(descriptor, payload)
+            if written <= 0:
+                raise OSError(errno.EIO, "diagnostic write made no progress")
+            payload = payload[written:]
     except OSError:
         # The parent still reports the child exit code when its diagnostic file is unavailable.
         pass
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                # Diagnostic cleanup must not replace the hard-exit probe's intended status.
+                pass
 
 
 class _BoundedChildStderr(object):
@@ -520,11 +540,15 @@ def _captured_child_entry(  # pragma: no cover - spawned child only
     diagnostic_descriptor = None
     null_descriptor = None
     try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
         diagnostic_descriptor = os.open(
             str(stderr_log),
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            flags,
             0o600,
         )
+        if os.name == "posix":
+            os.fchmod(diagnostic_descriptor, 0o600)
         null_descriptor = os.open(os.devnull, os.O_WRONLY)
         os.dup2(null_descriptor, 2)
         diagnostic_stream = os.fdopen(diagnostic_descriptor, "wb", buffering=0)
@@ -532,12 +556,24 @@ def _captured_child_entry(  # pragma: no cover - spawned child only
     except (OSError, ValueError):
         # A child without a private stderr boundary must not execute or inherit the terminal.
         if diagnostic_descriptor is not None:
-            os.close(diagnostic_descriptor)
+            try:
+                os.close(diagnostic_descriptor)
+            except OSError:
+                # A rejected capture boundary is already represented by the child exit code.
+                pass
         if null_descriptor is not None:
-            os.close(null_descriptor)
+            try:
+                os.close(null_descriptor)
+            except OSError:
+                # A rejected capture boundary is already represented by the child exit code.
+                pass
         os._exit(_CHILD_STDERR_CAPTURE_ERROR)
     if null_descriptor != 2:
-        os.close(null_descriptor)
+        try:
+            os.close(null_descriptor)
+        except OSError:
+            # The duplicated stderr descriptor remains authoritative for diagnostics.
+            pass
     diagnostic_writer = _BoundedChildStderr(diagnostic_stream)
     sys.stderr = diagnostic_writer
     if not _child_start_allowed(start_allowed, start_cancelled, start_ready, start_budget):
@@ -653,8 +689,94 @@ def _join_process(process, timeout, diagnostics):
         diagnostics.append(_process_control_error("join", error))
 
 
-def _start_process(process, start_allowed, start_cancelled, start_ready, start_budget, deadline):
+class _ProcessSupervision(object):
+    """Aggregate cleanup outcomes for process starts that return after a deadline."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._settled = threading.Event()
+        self._settled.set()
+        self._registered = 0
+        self._pending = 0
+        self._survivors = 0
+        self._diagnostics = []
+
+    def register(self):
+        with self._lock:
+            self._registered += 1
+            self._pending += 1
+            self._settled.clear()
+
+    def complete(self, alive, diagnostics):
+        with self._lock:
+            self._pending -= 1
+            if alive:
+                self._survivors += 1
+            self._diagnostics.extend(diagnostics)
+            if self._pending == 0:
+                self._settled.set()
+
+    def wait(self, timeout):
+        return self._settled.wait(timeout)
+
+    def result(self):
+        with self._lock:
+            registered = self._registered
+            pending = self._pending
+            survivors = self._survivors
+            diagnostics = tuple(self._diagnostics)
+        if pending:
+            noun = "cleanup is" if pending == 1 else "cleanups are"
+            return CheckResult.err(
+                "%d delayed child %s still pending" % (pending, noun),
+                diagnostics=diagnostics,
+            )
+        if survivors:
+            noun = "child remained" if survivors == 1 else "children remained"
+            return CheckResult.err(
+                "%d delayed %s alive after kill" % (survivors, noun),
+                diagnostics=diagnostics,
+            )
+        if not registered:
+            return CheckResult.ok("no delayed child starts required cleanup")
+        noun = "start was" if registered == 1 else "starts were"
+        return CheckResult.ok("%d delayed child %s cancelled and reaped" % (registered, noun))
+
+
+def _check_process_supervision(supervision):
+    supervision.wait(_PROCESS_SUPERVISION_WAIT)
+    return supervision.result()
+
+
+def _start_process(
+    process,
+    start_allowed,
+    start_cancelled,
+    start_ready,
+    start_budget,
+    deadline,
+    supervision=None,
+):
     outcome = []
+    start_finished = threading.Event()
+    cleanup_required = threading.Event()
+    ownership_decided = threading.Event()
+    supervision_registered = []
+
+    def abandon(status, error=None, track_cleanup=True):
+        cleanup_required.set()
+        if supervision is not None and track_cleanup:
+            supervision.register()
+            supervision_registered.append(True)
+        try:
+            start_cancelled.set()
+        except _PROCESS_CONTROL_EXCEPTIONS as cancellation_error:
+            # Local cleanup ownership must survive a failed cross-process cancellation signal.
+            status = "error"
+            error = cancellation_error
+        finally:
+            ownership_decided.set()
+        return status, error
 
     def start():
         try:
@@ -664,53 +786,73 @@ def _start_process(process, start_allowed, start_cancelled, start_ready, start_b
             outcome.append(error)
         else:
             outcome.append(None)
+        finally:
+            start_finished.set()
+        ownership_decided.wait()
+        if cleanup_required.is_set():
+            alive = False
+            diagnostics = []
+            if outcome and outcome[0] is None:
+                _join_process(process, 5.0, diagnostics)
+                alive = _process_is_alive(process, diagnostics)
+                if alive:
+                    alive, stop_diagnostics = _stop_process(process)
+                    diagnostics.extend(stop_diagnostics)
+            if supervision_registered:
+                supervision.complete(alive, tuple(diagnostics))
 
     thread = threading.Thread(target=start, name="jerryproxy-self-check-start", daemon=True)
     try:
         thread.start()
-        thread.join(max(deadline - time.monotonic(), 0.0))
     except RuntimeError as error:
         # A host that rejects thread startup cannot provide a bounded process launch.
-        start_cancelled.set()
-        return "unavailable", error
-    if thread.is_alive() or time.monotonic() >= deadline:
-        start_cancelled.set()
-        return "timeout", None
+        return abandon("unavailable", error, track_cleanup=False)
+    while not start_finished.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return abandon("timeout")
+        if start_finished.wait(min(remaining, 0.05)):
+            break
+        if not thread.is_alive():
+            return abandon("error", RuntimeError("process start thread returned no outcome"))
+    if time.monotonic() >= deadline:
+        return abandon("timeout")
     if not outcome:
-        start_cancelled.set()
-        return "error", RuntimeError("process start thread returned no outcome")
+        return abandon("error", RuntimeError("process start thread returned no outcome"))
     if outcome[0] is not None:
-        start_cancelled.set()
+        ownership_decided.set()
         return "unavailable", outcome[0]
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0.0:
-            start_cancelled.set()
-            return "timeout", None
+            return abandon("timeout")
         try:
             if start_ready.wait(min(remaining, 0.05)):
                 break
             if not process.is_alive():
-                start_cancelled.set()
+                try:
+                    start_cancelled.set()
+                except _PROCESS_CONTROL_EXCEPTIONS as error:
+                    # A dead child needs no cleanup, but cancellation publication still failed.
+                    ownership_decided.set()
+                    return "error", error
+                ownership_decided.set()
                 return "started", None
         except _PROCESS_CONTROL_EXCEPTIONS as error:
             # Child readiness and liveness are required before authorization.
-            start_cancelled.set()
-            return "error", error
+            return abandon("error", error)
     remaining = deadline - time.monotonic()
     if remaining <= 0.0:
-        start_cancelled.set()
-        return "timeout", None
+        return abandon("timeout")
     try:
         start_budget.value = remaining
         start_allowed.set()
     except (OSError, RuntimeError, ValueError) as error:
         # A started child must remain gated when its budget or authorization cannot be published.
-        start_cancelled.set()
-        return "error", error
+        return abandon("error", error)
     if time.monotonic() >= deadline:
-        start_cancelled.set()
-        return "timeout", None
+        return abandon("timeout")
+    ownership_decided.set()
     return "started", None
 
 
@@ -743,7 +885,7 @@ def _stop_process(process):
     return alive, tuple(diagnostics)
 
 
-def _run_recovery_child(target, arguments, expected_exit, error_log):
+def _run_recovery_child(target, arguments, expected_exit, error_log, supervision=None):
     started_at = time.monotonic()
     deadline = started_at + _RECOVERY_PROCESS_TIMEOUT
     start_method, context = _preferred_process_context()
@@ -781,11 +923,16 @@ def _run_recovery_child(target, arguments, expected_exit, error_log):
         start_ready,
         start_budget,
         deadline,
+        supervision=supervision,
     )
     if start_status == "timeout":
+        diagnostics = ()
+        if supervision is not None:
+            diagnostics = ("delayed process-start cleanup will be verified by the final supervision check",)
         return CheckResult.err(
             "hard-exit recovery child startup exceeded the %.3g-second timeout"
-            % _RECOVERY_PROCESS_TIMEOUT
+            % _RECOVERY_PROCESS_TIMEOUT,
+            diagnostics=diagnostics,
         )
     if start_status == "unavailable":
         # Frozen-runtime or host process policy may reject the selected start method.
@@ -892,7 +1039,7 @@ def _check_isolated_backend_lifecycle():
     return CheckResult.ok("install, use, verify, and uninstall succeeded in an isolated home")
 
 
-def _check_install_recovery():
+def _check_install_recovery(supervision=None):
     try:
         platform_info, unused_spec, asset_platform = _recovery_platform()
         if asset_platform is None:
@@ -905,6 +1052,7 @@ def _check_install_recovery():
                 (str(paths.root),),
                 _RECOVERY_CHILD_INSTALL,
                 error_log,
+                supervision=supervision,
             )
             if result is not None:
                 return result
@@ -951,7 +1099,7 @@ def _prepare_activation_recovery(temporary):
     return platform_info, spec, manager, target
 
 
-def _check_activation_recovery(direction):
+def _check_activation_recovery(direction, supervision=None):
     expected_exit = (
         _RECOVERY_CHILD_ACTIVATION_ROLLBACK if direction == "rollback" else _RECOVERY_CHILD_ACTIVATION_ROLLFORWARD
     )
@@ -967,6 +1115,7 @@ def _check_activation_recovery(direction):
                 (str(manager.paths.root), target.version, direction),
                 expected_exit,
                 error_log,
+                supervision=supervision,
             )
             if result is not None:
                 return result
@@ -984,7 +1133,7 @@ def _check_activation_recovery(direction):
     return CheckResult.ok("hard-exit activation %s converged to %s" % (direction, expected_version))
 
 
-def _check_removal_recovery(direction):
+def _check_removal_recovery(direction, supervision=None):
     expected_exit = _RECOVERY_CHILD_REMOVAL_ROLLBACK if direction == "rollback" else _RECOVERY_CHILD_REMOVAL_ROLLFORWARD
     try:
         with tempfile.TemporaryDirectory(prefix="jerryproxy-removal-recovery-self-check-") as temporary:
@@ -1010,6 +1159,7 @@ def _check_removal_recovery(direction):
                 (str(paths.root), installed.version, direction),
                 expected_exit,
                 error_log,
+                supervision=supervision,
             )
             if result is not None:
                 return result
@@ -1208,7 +1358,7 @@ def _read_relay_child_result(result_path):
     return _relay_child_result(result_path) if exists else None
 
 
-def _check_relay_in_process(profile):
+def _check_relay_in_process(profile, supervision=None):
     started = time.monotonic()
     deadline = started + _RELAY_CHECK_TOTAL_TIMEOUT
     start_method, context = _preferred_process_context()
@@ -1248,11 +1398,16 @@ def _check_relay_in_process(profile):
             start_ready,
             start_budget,
             deadline,
+            supervision=supervision,
         )
         if start_status == "timeout":
+            diagnostics = ()
+            if supervision is not None:
+                diagnostics = ("delayed process-start cleanup will be verified by the final supervision check",)
             return CheckResult.err(
                 "relay probe child startup exceeded the %.3g-second total deadline"
-                % _RELAY_CHECK_TOTAL_TIMEOUT
+                % _RELAY_CHECK_TOTAL_TIMEOUT,
+                diagnostics=diagnostics,
             )
         if start_status == "unavailable":
             # Frozen-runtime or host process policy may reject the selected start method.
@@ -1312,6 +1467,7 @@ def _check_relay_in_process(profile):
 
 
 def build_checks(paths, relay_session_factory=None):
+    supervision = _ProcessSupervision()
     checks = (
         ("Python runtime", _check_runtime),
         ("platform detection", _check_platform),
@@ -1324,22 +1480,28 @@ def build_checks(paths, relay_session_factory=None):
         ("filelock compatibility", _check_filelock),
         ("backend inventory", lambda: _check_backend_inventory(paths)),
         ("isolated backend lifecycle", _check_isolated_backend_lifecycle),
-        ("recovery install rollback", _check_install_recovery),
-        ("recovery activation rollback", lambda: _check_activation_recovery("rollback")),
-        ("recovery activation rollforward", lambda: _check_activation_recovery("rollforward")),
-        ("recovery removal rollback", lambda: _check_removal_recovery("rollback")),
-        ("recovery removal rollforward", lambda: _check_removal_recovery("rollforward")),
+        ("recovery install rollback", lambda: _check_install_recovery(supervision)),
+        ("recovery activation rollback", lambda: _check_activation_recovery("rollback", supervision)),
+        ("recovery activation rollforward", lambda: _check_activation_recovery("rollforward", supervision)),
+        ("recovery removal rollback", lambda: _check_removal_recovery("rollback", supervision)),
+        ("recovery removal rollforward", lambda: _check_removal_recovery("rollforward", supervision)),
     )
-    return checks + tuple(
+    relay_checks = tuple(
         (
             "relay %s" % profile.name,
             (
-                (lambda selected=profile: _check_relay_in_process(selected))
+                (lambda selected=profile: _check_relay_in_process(selected, supervision))
                 if relay_session_factory is None
                 else (lambda selected=profile: _check_relay(selected, relay_session_factory))
             ),
         )
         for profile in iter_builtin_relays()
+    )
+    return checks + relay_checks + (
+        (
+            "delayed process cleanup",
+            lambda: _check_process_supervision(supervision),
+        ),
     )
 
 
