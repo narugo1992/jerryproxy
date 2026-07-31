@@ -391,6 +391,24 @@ def test_linux_atomic_rename_syscall_dispatch_supports_release_architectures(
     assert calls[0][0].value == expected_syscall
 
 
+@pytest.mark.parametrize("rename", ("_rename_posix_noreplace", "_rename_posix_exchange"))
+def test_linux_atomic_rename_rejects_an_unknown_syscall_architecture(monkeypatch, rename):
+    class Libc(object):
+        syscall = object()
+
+    monkeypatch.setattr(anchored_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        anchored_module.os,
+        "uname",
+        lambda: type("Uname", (), {"machine": "unknown-cpu"})(),
+        raising=False,
+    )
+    monkeypatch.setattr(anchored_module.ctypes, "CDLL", lambda *args, **kwargs: Libc())
+
+    with pytest.raises(ArchiveError, match="unsupported on this Linux architecture"):
+        getattr(anchored_module, rename)(11, "source", 12, "destination")
+
+
 @pytest.mark.parametrize(
     ("rename", "expected_flag"),
     (
@@ -419,6 +437,15 @@ def test_macos_atomic_rename_dispatch_uses_the_required_native_flag(
     getattr(anchored_module, rename)(11, "source", 12, "destination")
 
     assert calls == [(11, b"source", 12, b"destination", expected_flag)]
+
+
+@pytest.mark.parametrize("rename", ("_rename_posix_noreplace", "_rename_posix_exchange"))
+def test_macos_atomic_rename_rejects_a_missing_native_operation(monkeypatch, rename):
+    monkeypatch.setattr(anchored_module.sys, "platform", "darwin")
+    monkeypatch.setattr(anchored_module.ctypes, "CDLL", lambda *args, **kwargs: object())
+
+    with pytest.raises(ArchiveError, match="unsupported on this macOS runtime"):
+        getattr(anchored_module, rename)(11, "source", 12, "destination")
 
 
 def test_posix_entry_isolation_rechecks_the_moved_identity_before_returning(monkeypatch):
@@ -504,6 +531,48 @@ def test_posix_entry_isolation_bounds_private_name_collisions():
         )
 
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_operation"),
+    (
+        (stat.S_IFREG | 0o600, "unlink"),
+        (stat.S_IFDIR | 0o700, "rmdir"),
+    ),
+)
+def test_posix_entry_disposal_uses_the_operation_for_the_verified_type(
+    monkeypatch,
+    mode,
+    expected_operation,
+):
+    status = SimpleNamespace(st_dev=17, st_ino=23, st_mode=mode)
+    calls = []
+
+    monkeypatch.setattr(anchored_module.os, "stat", lambda *args, **kwargs: status)
+    monkeypatch.setattr(
+        anchored_module.os,
+        "unlink",
+        lambda name, dir_fd: calls.append(("unlink", name, dir_fd)),
+    )
+    monkeypatch.setattr(
+        anchored_module.os,
+        "rmdir",
+        lambda name, dir_fd: calls.append(("rmdir", name, dir_fd)),
+    )
+
+    anchored_module._discard_posix_entry(91, "isolated", status)
+
+    assert calls == [(expected_operation, "isolated", 91)]
+
+
+def test_posix_entry_disposal_rejects_an_identity_change(monkeypatch):
+    expected = SimpleNamespace(st_dev=17, st_ino=23, st_mode=stat.S_IFREG | 0o600)
+    substitute = SimpleNamespace(st_dev=17, st_ino=29, st_mode=stat.S_IFREG | 0o600)
+
+    monkeypatch.setattr(anchored_module.os, "stat", lambda *args, **kwargs: substitute)
+
+    with pytest.raises(ArchiveError, match="changed before disposal"):
+        anchored_module._discard_posix_entry(91, "isolated", expected)
 
 
 def test_posix_entry_isolation_rejects_an_uninspectable_moved_object(monkeypatch):
