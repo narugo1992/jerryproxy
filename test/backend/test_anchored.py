@@ -1,6 +1,7 @@
 import errno
 import os
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -125,6 +126,40 @@ def test_windows_path_fallback_reads_a_bound_symlink(tmp_path):
 
     assert observed_target == target.name
     assert identity["file_type"] == "symlink"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path-based symlink observation")
+@pytest.mark.parametrize("failure", ("not-link", "identity", "target", "lstat"))
+def test_windows_path_fallback_rejects_unstable_symlink_observations(tmp_path, monkeypatch, failure):
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "target"
+    target.write_bytes(b"target")
+    link = root / "link"
+    if failure == "not-link":
+        link.write_bytes(b"regular")
+    else:
+        link.symlink_to(target.name)
+
+    with AnchoredDirectory(root) as anchored:
+        if failure == "identity":
+            identities = iter(("first", "second"))
+            monkeypatch.setattr(anchored_module, "capture_identity", lambda unused_path: next(identities))
+        elif failure == "target":
+            targets = iter((target.name, "replacement"))
+            monkeypatch.setattr(anchored_module.os, "readlink", lambda *args, **kwargs: next(targets))
+        elif failure == "lstat":
+            original_lstat = Path.lstat
+
+            def fail_link_lstat(path):
+                if path == link:
+                    raise OSError("simulated link inspection failure")
+                return original_lstat(path)
+
+            monkeypatch.setattr(Path, "lstat", fail_link_lstat)
+
+        with pytest.raises(ArchiveError, match="anchored|unable to read"):
+            anchored.read_symlink(("link",))
 
 
 def test_replace_uses_tracked_creation_identity(tmp_path):
