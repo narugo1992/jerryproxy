@@ -2454,6 +2454,28 @@ def test_simulated_windows_existing_file_handles_reject_untrusted_evidence(
             anchored.open_existing_file((state.name,))
 
 
+def test_simulated_windows_file_evidence_flush_opens_a_writable_native_handle(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    state = root / "state.json"
+    state.write_bytes(b"state")
+    kernel = SimulatedArchiveWindowsKernel()
+    configure_simulated_windows_archive_creation(monkeypatch, kernel)
+
+    with archive_module.AnchoredDirectory(root) as anchored:
+        size, digest, identity = anchored.file_evidence((state.name,), flush=True)
+
+    file_calls = [call for call in kernel.calls if call[0] == state]
+    assert len(file_calls) == 1
+    assert file_calls[0][1] & anchored_module._WINDOWS_GENERIC_WRITE
+    assert size == 5
+    assert digest == hashlib.sha256(b"state").hexdigest()
+    assert identity["file_type"] == "regular"
+
+
 def test_simulated_windows_handle_rename_replaces_only_the_pinned_destination(
     tmp_path,
     monkeypatch,

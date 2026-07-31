@@ -1518,6 +1518,7 @@ class AnchoredDirectory(object):
 
         stream, identity = self.open_existing_file(
             parts,
+            writable=flush,
             expected_identity=expected_identity,
         )
         digest = hashlib.sha256()
