@@ -319,8 +319,8 @@ def test_file_evidence_rejects_wrong_expected_identity_after_read(tmp_path, monk
     different["inode"] += 1
     original_open = AnchoredDirectory.open_existing_file
 
-    def ignore_expected(anchored, parts, expected_identity=None):
-        return original_open(anchored, parts)
+    def ignore_expected(anchored, parts, writable=False, expected_identity=None):
+        return original_open(anchored, parts, writable=writable)
 
     monkeypatch.setattr(AnchoredDirectory, "open_existing_file", ignore_expected)
     with AnchoredDirectory(root) as anchored:
