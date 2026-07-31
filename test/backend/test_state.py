@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import jerryproxy.backend.activation as activation_module
 import jerryproxy.backend.anchored as anchored_module
 import jerryproxy.backend.state as state_module
 from jerryproxy.backend.manager import BackendManager
@@ -130,6 +131,27 @@ def test_genuine_active_pair_absence_remains_inactive(tmp_path):
     manager = _manager(tmp_path)
     _install(manager, tmp_path, activate=False)
     assert manager.current("mihomo") is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows copy-mode state validation")
+def test_active_copy_rejects_wrong_digest_on_windows(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+
+    def force_copy_fallback(*args, **kwargs):
+        del args, kwargs
+        error = OSError("simulated Windows symlink privilege failure")
+        error.winerror = 1314
+        raise error
+
+    monkeypatch.setattr(activation_module, "_create_symlink_candidate", force_copy_fallback)
+    installed = _install(manager, tmp_path, activate=True)
+    link = manager.paths.bin / "mihomo"
+    assert manager.current("mihomo").link_mode == "copy"
+    link.write_bytes(b"changed")
+    assert len(b"changed") == installed.executable.stat().st_size
+
+    with pytest.raises(IntegrityError, match="invalid active backend manifest"):
+        manager.current("mihomo")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission boundary")
