@@ -1178,14 +1178,13 @@ class AnchoredDirectory(object):
         path = parent / selected[-1]
         try:
             before = path.lstat()
-            if is_path_alias(path) or not stat.S_ISLNK(before.st_mode):
+            if not stat.S_ISLNK(before.st_mode):
                 raise ArchiveError("anchored entry is not a symbolic link: %s" % path)
             identity = capture_identity(path)
             target = os.readlink(str(path))
             after = path.lstat()
             if (
-                is_path_alias(path)
-                or not stat.S_ISLNK(after.st_mode)
+                not stat.S_ISLNK(after.st_mode)
                 or capture_identity(path) != identity
             ):
                 raise ArchiveError("anchored symbolic link changed while being read: %s" % path)
