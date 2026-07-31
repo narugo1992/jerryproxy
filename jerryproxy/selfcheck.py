@@ -1149,6 +1149,7 @@ def _read_child_diagnostic(path):
         text += marker
     else:
         text = payload.decode("utf-8", errors="replace")
+    text = "\n".join(text.splitlines())
     return (_bounded_diagnostic(text),)
 
 

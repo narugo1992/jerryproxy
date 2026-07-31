@@ -101,6 +101,7 @@ def test_noninitializing_lock_rechecks_its_physical_lock_paths(tmp_path, monkeyp
     paths = JerryProxyPaths(tmp_path / "home")
     paths.ensure()
     if unsafe_lock:
+        paths.lock_file.touch()
         paths.lock_file.unlink()
         paths.lock_file.mkdir()
     else:

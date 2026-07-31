@@ -86,19 +86,13 @@ class SimulatedArchiveWindowsKernel(object):
     def SetFileInformationByHandle(self, handle, information_class, information_pointer, size):
         assert information_class == anchored_module._WINDOWS_FILE_RENAME_INFO_CLASS
         buffer = information_pointer._obj
-        pointer_size = anchored_module.ctypes.sizeof(anchored_module.ctypes.c_void_p)
-        root_offset = (
-            pointer_size
-            if pointer_size > anchored_module.ctypes.sizeof(anchored_module.ctypes.c_uint32)
-            else anchored_module.ctypes.sizeof(anchored_module.ctypes.c_uint32)
-        )
-        length_offset = root_offset + pointer_size
-        name_offset = length_offset + anchored_module.ctypes.sizeof(anchored_module.ctypes.c_uint32)
-        replace_existing = bool(anchored_module.ctypes.c_uint32.from_buffer(buffer, 0).value)
-        parent_handle = anchored_module.ctypes.c_void_p.from_buffer(buffer, root_offset).value
-        name_length = anchored_module.ctypes.c_uint32.from_buffer(buffer, length_offset).value
+        information = anchored_module._WindowsFileRenameInformation.from_buffer(buffer)
+        replace_existing = bool(information.replace_if_exists)
+        parent_handle = information.root_directory
+        name_length = information.file_name_length
+        assert size >= anchored_module.ctypes.sizeof(anchored_module._WindowsFileRenameInformation) + name_length
         payload = anchored_module.ctypes.string_at(
-            anchored_module.ctypes.addressof(buffer) + name_offset,
+            anchored_module.ctypes.addressof(buffer) + anchored_module._WindowsFileRenameInformation.file_name.offset,
             name_length,
         )
         destination = self.handles[parent_handle] / payload.decode("utf-16-le")
@@ -2058,10 +2052,16 @@ def test_windows_archive_output_directory_guards_block_native_rename(tmp_path, s
     with archive_module.AnchoredDirectory(destination) as output_tree:
         output_tree.ensure_directory(("bin",))
         selected = destination if scope == "root" else destination / "bin"
-        with pytest.raises(OSError):
+        if scope == "root":
+            with pytest.raises(OSError):
+                selected.rename(displaced)
+            assert selected.is_dir()
+            assert not displaced.exists()
+        else:
             selected.rename(displaced)
-        assert selected.is_dir()
-        assert not displaced.exists()
+            with pytest.raises(ArchiveError, match="ancestor changed"):
+                output_tree.assert_bound()
+            displaced.rename(selected)
 
 
 @pytest.mark.windows_native

@@ -185,6 +185,48 @@ def test_replace_rejects_changed_destination_identity(tmp_path):
             )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor flag semantics")
+def test_replace_opens_symlink_entries_without_combining_no_follow(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "source-target").write_bytes(b"source")
+    (root / "destination-target").write_bytes(b"destination")
+    (root / "candidate").symlink_to("source-target")
+    (root / "published").symlink_to("destination-target")
+    source_identity = anchored_module.capture_identity(root / "candidate")
+    destination_identity = anchored_module.capture_identity(root / "published")
+    native_o_symlink = hasattr(os, "O_SYMLINK")
+    o_symlink = getattr(os, "O_SYMLINK", 1 << 29)
+    original_open = anchored_module.os.open
+    opened_symlink_flags = []
+    anchored = AnchoredDirectory(root)
+
+    def simulate_darwin_symlink_open(path, flags, *args, **kwargs):
+        if flags & o_symlink:
+            opened_symlink_flags.append(flags)
+            assert not flags & getattr(os, "O_NOFOLLOW", 0)
+            if not native_o_symlink:
+                flags &= ~o_symlink
+                flags |= getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
+        return original_open(path, flags, *args, **kwargs)
+
+    if not native_o_symlink:
+        monkeypatch.setattr(anchored_module.os, "O_SYMLINK", o_symlink, raising=False)
+    monkeypatch.setattr(anchored_module.os, "open", simulate_darwin_symlink_open)
+
+    with anchored:
+        anchored.replace(
+            ("candidate",),
+            ("published",),
+            expected_identity=source_identity,
+            expected_destination_identity=destination_identity,
+        )
+
+    assert len(opened_symlink_flags) == 2
+    assert not (root / "candidate").exists()
+    assert os.readlink(str(root / "published")) == "source-target"
+
+
 def test_replace_maps_publication_oserror(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()

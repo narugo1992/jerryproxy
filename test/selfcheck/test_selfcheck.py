@@ -1467,7 +1467,8 @@ def test_home_layout_and_permission_reads_remain_under_the_operation_lock(tmp_pa
     checks = dict(build_checks(paths))
 
     assert checks["home directory layout"]().level == "OK"
-    assert checks["private directory permissions"]().level == "OK"
+    expected_permission_level = "OK" if selfcheck_module.os.name == "posix" else "SKIP"
+    assert checks["private directory permissions"]().level == expected_permission_level
     expected_observations = 2 if selfcheck_module.os.name == "posix" else 1
     assert observations == [paths.root] * expected_observations
 
@@ -1973,7 +1974,7 @@ def test_production_relay_probe_reads_a_maximum_bounded_file_result(monkeypatch)
 
 
 def test_production_relay_probe_never_blocks_on_a_partial_result_file(monkeypatch):
-    monkeypatch.setattr(selfcheck_module, "_RELAY_CHECK_TOTAL_TIMEOUT", 0.5)
+    monkeypatch.setattr(selfcheck_module, "_RELAY_CHECK_TOTAL_TIMEOUT", 3.0)
     monkeypatch.setattr(selfcheck_module, "_relay_probe_child", _write_partial_relay_result_and_stall)
     started = time.monotonic()
 

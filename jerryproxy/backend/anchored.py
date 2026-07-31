@@ -84,6 +84,15 @@ class _WindowsFileIdInformation(ctypes.Structure):
     )
 
 
+class _WindowsFileRenameInformation(ctypes.Structure):
+    _fields_ = (
+        ("replace_if_exists", ctypes.c_uint32),
+        ("root_directory", ctypes.c_void_p),
+        ("file_name_length", ctypes.c_uint32),
+        ("file_name", ctypes.c_uint16 * 1),
+    )
+
+
 if ctypes.sizeof(_WindowsFileInformation) != 52:  # pragma: no cover - ctypes ABI invariant
     raise RuntimeError("BY_HANDLE_FILE_INFORMATION must use the 52-byte Windows ABI")
 if ctypes.sizeof(_WindowsFileIdInformation) != 24:  # pragma: no cover - ctypes ABI invariant
@@ -190,15 +199,16 @@ def _close_windows_handle(handle, path):
 
 def _rename_windows_handle(source_handle, parent_handle, destination_name, replace_existing):
     payload = destination_name.encode("utf-16-le")
-    pointer_size = ctypes.sizeof(ctypes.c_void_p)
-    root_offset = pointer_size if pointer_size > ctypes.sizeof(ctypes.c_uint32) else ctypes.sizeof(ctypes.c_uint32)
-    length_offset = root_offset + pointer_size
-    name_offset = length_offset + ctypes.sizeof(ctypes.c_uint32)
-    buffer = ctypes.create_string_buffer(name_offset + len(payload))
-    ctypes.c_uint32.from_buffer(buffer, 0).value = 1 if replace_existing else 0
-    ctypes.c_void_p.from_buffer(buffer, root_offset).value = int(parent_handle)
-    ctypes.c_uint32.from_buffer(buffer, length_offset).value = len(payload)
-    ctypes.memmove(ctypes.addressof(buffer) + name_offset, payload, len(payload))
+    buffer = ctypes.create_string_buffer(ctypes.sizeof(_WindowsFileRenameInformation) + len(payload))
+    information = _WindowsFileRenameInformation.from_buffer(buffer)
+    information.replace_if_exists = 1 if replace_existing else 0
+    information.root_directory = int(parent_handle)
+    information.file_name_length = len(payload)
+    ctypes.memmove(
+        ctypes.addressof(buffer) + _WindowsFileRenameInformation.file_name.offset,
+        payload,
+        len(payload),
+    )
     if not _WINDOWS_KERNEL32.SetFileInformationByHandle(
         source_handle,
         _WINDOWS_FILE_RENAME_INFO_CLASS,
@@ -1057,12 +1067,10 @@ class AnchoredDirectory(object):
                     destination_parent = self._open_posix_directory(destination_parts[:-1])
                 status = os.stat(source_parts[-1], dir_fd=source_parent, follow_symlinks=False)
                 if stat.S_ISLNK(status.st_mode) and hasattr(os, "O_SYMLINK"):
-                    flags = os.O_SYMLINK
+                    flags = os.O_SYMLINK | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
                 else:
                     flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
-                flags |= getattr(os, "O_CLOEXEC", 0)
-                flags |= getattr(os, "O_NOFOLLOW", 0)
-                flags |= getattr(os, "O_NONBLOCK", 0)
+                    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
                 descriptor = os.open(source_parts[-1], flags, dir_fd=source_parent)
                 opened = os.fstat(descriptor)
                 source_identity = {
@@ -1088,12 +1096,10 @@ class AnchoredDirectory(object):
                         follow_symlinks=False,
                     )
                     if stat.S_ISLNK(destination_status.st_mode) and hasattr(os, "O_SYMLINK"):
-                        destination_flags = os.O_SYMLINK
+                        destination_flags = os.O_SYMLINK | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
                     else:
-                        destination_flags = getattr(os, "O_PATH", os.O_RDONLY)
-                    destination_flags |= getattr(os, "O_CLOEXEC", 0)
-                    destination_flags |= getattr(os, "O_NOFOLLOW", 0)
-                    destination_flags |= getattr(os, "O_NONBLOCK", 0)
+                        destination_flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
+                        destination_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
                     destination_descriptor = os.open(
                         destination_parts[-1],
                         destination_flags,
