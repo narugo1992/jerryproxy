@@ -22,6 +22,15 @@ from jerryproxy.backend.archive import (
 )
 from jerryproxy.errors import ArchiveError, DurabilityError, IntegrityError
 
+POSIX_FAULT_INJECTION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="requires POSIX descriptors and replaceable open filesystem objects",
+)
+SIMULATED_WINDOWS_BINDING = pytest.mark.skipif(
+    os.name == "nt",
+    reason="simulated Win32 bindings use POSIX descriptors; native behavior has a dedicated lane",
+)
+
 
 class SimulatedArchiveWindowsKernel(object):
     """Exercise Win32 archive creation calls on a POSIX test filesystem."""
@@ -426,6 +435,7 @@ def test_corrupt_standalone_gzip_is_a_domain_error(tmp_path):
         extract_archive(archive, tmp_path / "output", "mihomo")
 
 
+@POSIX_FAULT_INJECTION
 def test_archive_output_flush_continues_only_for_a_documented_unsupported_result(
     tmp_path,
     monkeypatch,
@@ -624,6 +634,7 @@ def test_archive_limits_require_positive_non_boolean_integers(tmp_path, value):
         )
 
 
+@POSIX_FAULT_INJECTION
 def test_archive_input_must_be_an_openable_private_regular_file(tmp_path):
     missing = tmp_path / "missing.zip"
     with pytest.raises(ArchiveError, match="unable to open"):
@@ -684,7 +695,10 @@ def test_zip_extraction_rejects_parent_traversal(tmp_path):
 def test_zip_extraction_rejects_noncanonical_cross_platform_names(tmp_path, member_name, message):
     archive = tmp_path / "noncanonical.zip"
     with zipfile.ZipFile(str(archive), "w") as stream:
-        stream.writestr(member_name, b"bad")
+        stream.writestr("bin/xray" if member_name == "bin\\xray" else member_name, b"bad")
+    if member_name == "bin\\xray":
+        raw = archive.read_bytes().replace(b"bin/xray", b"bin\\xray")
+        archive.write_bytes(raw)
 
     with pytest.raises(ArchiveError, match=message):
         extract_archive(archive, tmp_path / "output", "xray")
@@ -1414,6 +1428,7 @@ def test_anchored_directory_assert_bound_rejects_another_directory_authority(tmp
             output_tree.assert_bound(other_identity)
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_input_uses_a_nonfollowing_native_handle(tmp_path, monkeypatch):
     archive = tmp_path / "mihomo.gz"
     archive.write_bytes(gzip.compress(b"backend"))
@@ -1434,6 +1449,7 @@ def test_windows_archive_input_uses_a_nonfollowing_native_handle(tmp_path, monke
 
 
 @pytest.mark.parametrize("modern_failure", (None, "unsupported"))
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_input_compares_native_handles_not_crt_inode_values(
     tmp_path,
     monkeypatch,
@@ -1474,6 +1490,7 @@ def test_windows_archive_input_compares_native_handles_not_crt_inode_values(
     assert kernel.handles == {}
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_input_rejects_path_replacement_between_native_opens(
     tmp_path,
     monkeypatch,
@@ -1507,6 +1524,7 @@ def test_windows_archive_input_rejects_path_replacement_between_native_opens(
     assert kernel.handles == {}
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_input_prefers_modern_identity_over_truncated_legacy(
     tmp_path,
     monkeypatch,
@@ -1530,6 +1548,7 @@ def test_windows_archive_input_prefers_modern_identity_over_truncated_legacy(
     assert kernel.handles == {}
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_input_accepts_exact_legacy_identity_when_modern_is_unsupported(
     tmp_path,
     monkeypatch,
@@ -1552,6 +1571,7 @@ def test_windows_archive_input_accepts_exact_legacy_identity_when_modern_is_unsu
         ("zero", "no stable modern file identity"),
     ),
 )
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_input_rejects_untrusted_modern_identity(
     tmp_path,
     monkeypatch,
@@ -1572,6 +1592,7 @@ def test_windows_archive_input_rejects_untrusted_modern_identity(
     assert not (tmp_path / "output").exists()
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_input_rejects_a_reparse_handle(tmp_path, monkeypatch):
     archive = tmp_path / "mihomo.gz"
     archive.write_bytes(gzip.compress(b"backend"))
@@ -1600,6 +1621,7 @@ def test_windows_archive_input_rejects_a_reparse_handle(tmp_path, monkeypatch):
         ("descriptor", "simulated descriptor inspection failure"),
     ),
 )
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_input_rejects_untrusted_handle_evidence_and_closes_it(
     tmp_path,
     monkeypatch,
@@ -1679,6 +1701,7 @@ def test_windows_archive_input_rejects_untrusted_handle_evidence_and_closes_it(
             os.fstat(handle)
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_input_reports_close_failure_without_leaking_the_handle(
     tmp_path,
     monkeypatch,
@@ -1758,6 +1781,7 @@ def test_pinned_archive_view_rejects_untrusted_underlying_handle_results(
                 source.handle.read(1)
 
 
+@POSIX_FAULT_INJECTION
 def test_anchored_json_replaces_only_the_expected_destination_identity(tmp_path):
     root = tmp_path / "runtimes"
     root.mkdir()
@@ -1798,6 +1822,7 @@ def test_anchored_json_replaces_only_the_expected_destination_identity(tmp_path)
     assert json.loads((root / "journal.json").read_text(encoding="utf-8")) == {"phase": "committed"}
 
 
+@POSIX_FAULT_INJECTION
 def test_anchored_json_read_rejects_same_content_path_replacement(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir(mode=0o700)
@@ -1991,7 +2016,7 @@ def test_zip_extraction_rejects_existing_output_leaf_symlink(tmp_path):
     outside.write_bytes(b"sentinel")
     (destination / "xray").symlink_to(outside)
 
-    with pytest.raises(ArchiveError, match="exists|alias"):
+    with pytest.raises(ArchiveError, match="exists|alias|exclusively create"):
         extract_archive(archive, destination, "xray")
 
     assert outside.read_bytes() == b"sentinel"
@@ -2007,12 +2032,13 @@ def test_zip_extraction_rejects_existing_output_file(tmp_path):
     existing = destination / "xray"
     existing.write_bytes(b"sentinel")
 
-    with pytest.raises(ArchiveError, match="exists"):
+    with pytest.raises(ArchiveError, match="exists|exclusively create"):
         extract_archive(archive, destination, "xray")
 
     assert existing.read_bytes() == b"sentinel"
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_output_uses_native_exclusive_creation(tmp_path, monkeypatch):
     kernel = SimulatedArchiveWindowsKernel()
     configure_simulated_windows_archive_creation(monkeypatch, kernel)
@@ -2032,6 +2058,7 @@ def test_windows_archive_output_uses_native_exclusive_creation(tmp_path, monkeyp
     assert (destination / "bin" / "xray").read_bytes() == b"backend"
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_output_directory_guards_do_not_share_delete(tmp_path, monkeypatch):
     kernel = SimulatedArchiveWindowsKernel()
     configure_simulated_windows_archive_creation(monkeypatch, kernel)
@@ -2210,6 +2237,7 @@ def test_anchored_directory_creates_and_verifies_a_relative_symlink(tmp_path):
     assert identity["file_type"] == "symlink"
 
 
+@POSIX_FAULT_INJECTION
 def test_anchored_directory_closes_its_root_when_expected_identity_recheck_fails(
     tmp_path,
     monkeypatch,
@@ -2276,6 +2304,7 @@ def test_anchored_directory_replaces_one_verified_relative_entry(tmp_path):
     assert published_identity == identity
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_simulated_windows_anchored_replace_stays_on_the_pinned_parent(
     tmp_path,
     monkeypatch,
@@ -2320,6 +2349,7 @@ def test_simulated_windows_anchored_replace_stays_on_the_pinned_parent(
     assert (displaced / "mihomo.json").read_bytes() == b"candidate"
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_simulated_windows_anchored_replace_publishes_a_verified_directory_without_overwrite(
     tmp_path,
     monkeypatch,
@@ -2357,6 +2387,7 @@ def test_simulated_windows_anchored_replace_publishes_a_verified_directory_witho
     assert (root / "mihomo" / "1.0.0").is_dir()
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_simulated_windows_existing_file_handles_preserve_read_and_write_identity(
     tmp_path,
     monkeypatch,
@@ -2393,6 +2424,7 @@ def test_simulated_windows_existing_file_handles_preserve_read_and_write_identit
         ("identity", "changed while being opened"),
     ),
 )
+@SIMULATED_WINDOWS_BINDING
 def test_simulated_windows_existing_file_handles_reject_untrusted_evidence(
     tmp_path,
     monkeypatch,
@@ -2454,6 +2486,7 @@ def test_simulated_windows_existing_file_handles_reject_untrusted_evidence(
             anchored.open_existing_file((state.name,))
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_simulated_windows_file_evidence_flush_opens_a_writable_native_handle(
     tmp_path,
     monkeypatch,
@@ -2476,6 +2509,7 @@ def test_simulated_windows_file_evidence_flush_opens_a_writable_native_handle(
     assert identity["file_type"] == "regular"
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_simulated_windows_handle_rename_replaces_only_the_pinned_destination(
     tmp_path,
     monkeypatch,
@@ -2512,6 +2546,7 @@ def test_simulated_windows_handle_rename_replaces_only_the_pinned_destination(
     assert (root / "public").read_bytes() == b"candidate"
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_simulated_windows_cross_directory_rename_uses_the_destination_guard(
     tmp_path,
     monkeypatch,
@@ -2544,6 +2579,7 @@ def test_simulated_windows_cross_directory_rename_uses_the_destination_guard(
     assert (root / "destination" / "published").read_bytes() == b"candidate"
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_simulated_windows_handle_rename_releases_directory_guards_and_never_overwrites(
     tmp_path,
     monkeypatch,
@@ -2587,6 +2623,7 @@ def test_simulated_windows_handle_rename_releases_directory_guards_and_never_ove
     assert kernel.rename_flags == [0, 0]
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_archive_output_rejects_reparse_returned_handle(tmp_path, monkeypatch):
     kernel = SimulatedArchiveWindowsKernel(reparse_names=("xray",))
     configure_simulated_windows_archive_creation(monkeypatch, kernel)
@@ -2597,6 +2634,7 @@ def test_windows_archive_output_rejects_reparse_returned_handle(tmp_path, monkey
             output_tree.open_file(("xray",))
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_directory_identity_uses_exact_legacy_fallback(tmp_path, monkeypatch):
     kernel = SimulatedArchiveWindowsKernel(modern_failure="unsupported")
     configure_simulated_windows_archive_creation(monkeypatch, kernel)
@@ -2617,6 +2655,7 @@ def test_windows_directory_identity_uses_exact_legacy_fallback(tmp_path, monkeyp
         ("zero", "no stable modern identity"),
     ),
 )
+@SIMULATED_WINDOWS_BINDING
 def test_windows_directory_identity_failures_close_the_guard(
     tmp_path,
     monkeypatch,
@@ -2646,6 +2685,7 @@ def test_windows_directory_identity_failures_close_the_guard(
         ("identity-mismatch", "handle identity does not match"),
     ),
 )
+@SIMULATED_WINDOWS_BINDING
 def test_windows_directory_guard_rejects_untrusted_native_evidence(
     tmp_path,
     monkeypatch,
@@ -2697,6 +2737,7 @@ def test_windows_directory_guard_rejects_untrusted_native_evidence(
     }
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_directory_guard_accepts_exact_legacy_api_without_extended_binding(tmp_path, monkeypatch):
     kernel = SimulatedArchiveWindowsKernel()
     kernel.GetFileInformationByHandleEx = None
@@ -2706,6 +2747,7 @@ def test_windows_directory_guard_accepts_exact_legacy_api_without_extended_bindi
         output_tree.ensure_directory(("bin",))
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_directory_guard_reports_close_failure_after_releasing_all_handles(tmp_path, monkeypatch):
     class CloseFailureKernel(SimulatedArchiveWindowsKernel):
         def CloseHandle(self, handle):
@@ -2731,6 +2773,7 @@ def test_windows_directory_guard_reports_close_failure_after_releasing_all_handl
         ("identity", "changed while being created"),
     ),
 )
+@SIMULATED_WINDOWS_BINDING
 def test_windows_file_guard_rejects_untrusted_native_evidence(
     tmp_path,
     monkeypatch,
@@ -2773,6 +2816,7 @@ def test_windows_file_guard_rejects_untrusted_native_evidence(
             output_tree.open_file(("xray",))
 
 
+@SIMULATED_WINDOWS_BINDING
 def test_windows_root_guard_detects_disappearance_after_pinning(tmp_path, monkeypatch):
     kernel = SimulatedArchiveWindowsKernel()
     configure_simulated_windows_archive_creation(monkeypatch, kernel)
@@ -2792,6 +2836,7 @@ def test_windows_root_guard_detects_disappearance_after_pinning(tmp_path, monkey
 
 
 @pytest.mark.parametrize("replacement_scope", ("root", "nested"))
+@SIMULATED_WINDOWS_BINDING
 def test_windows_directory_pin_rejects_plain_directory_replacement_between_lstat_and_open(
     tmp_path,
     monkeypatch,
@@ -3056,6 +3101,7 @@ def test_posix_output_rejects_leaf_creation_failures(tmp_path, monkeypatch, fail
 
 
 @pytest.mark.parametrize("failure", ("exists", "identity"))
+@POSIX_FAULT_INJECTION
 def test_portable_output_rejects_leaf_conflicts_and_identity_races(tmp_path, monkeypatch, failure):
     monkeypatch.setattr(anchored_module, "_WINDOWS_KERNEL32", None)
     monkeypatch.setattr(anchored_module.os, "supports_dir_fd", set())

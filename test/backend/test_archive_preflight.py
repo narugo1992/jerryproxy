@@ -84,6 +84,34 @@ def _zip64_archive(data):
     return bytes(data[:eocd] + zip64 + locator + legacy)
 
 
+def _zip64_central_entry(data):
+    data = bytearray(data)
+    central = _central_offset(data)
+    eocd = data.rfind(b"PK\x05\x06")
+    compressed_size, uncompressed_size = struct.unpack_from("<II", data, central + 20)
+    name_length = struct.unpack_from("<H", data, central + 28)[0]
+    local_offset = struct.unpack_from("<I", data, central + 42)[0]
+    zip64_values = struct.pack(
+        "<QQQI",
+        uncompressed_size,
+        compressed_size,
+        local_offset,
+        0,
+    )
+    zip64_extra = struct.pack("<HH", 1, len(zip64_values)) + zip64_values
+    struct.pack_into("<II", data, central + 20, 0xFFFFFFFF, 0xFFFFFFFF)
+    struct.pack_into("<H", data, central + 28, name_length)
+    struct.pack_into("<HH", data, central + 30, len(zip64_extra), 0)
+    struct.pack_into("<H", data, central + 34, 0xFFFF)
+    struct.pack_into("<I", data, central + 42, 0xFFFFFFFF)
+    extra_offset = central + 46 + name_length
+    data[extra_offset:extra_offset] = zip64_extra
+    eocd += len(zip64_extra)
+    directory_size = struct.unpack_from("<I", data, eocd + 12)[0]
+    struct.pack_into("<I", data, eocd + 12, directory_size + len(zip64_extra))
+    return bytes(data)
+
+
 def _tar_gzip_bytes(members, pax_headers=None):
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
@@ -366,6 +394,16 @@ def test_zip_preflight_accepts_local_zip64_size_extra():
 
     plan = preflight_zip(io.BytesIO(output.getvalue()), _limits())
 
+    assert plan.entries[0].uncompressed_size == 7
+
+
+def test_zip_preflight_accepts_complete_central_zip64_member_metadata():
+    data = _zip64_central_entry(_zip_bytes([("xray", b"payload")]))
+
+    plan = preflight_zip(io.BytesIO(data), _limits())
+
+    assert plan.entry_count == 1
+    assert plan.entries[0].name == "xray"
     assert plan.entries[0].uncompressed_size == 7
 
 

@@ -167,7 +167,9 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     assert "[15/19] recovery removal rollback: OK" in result.output
     assert "[16/19] recovery removal rollforward: OK" in result.output
     assert "[19/19] relay gh.geekertao.top: OK" in result.output
-    assert "0 SKIP, 0 FAIL, 0 ERR" in result.output
+    assert "0 FAIL, 0 ERR" in result.output
+    expected_skips = 0 if os.name == "posix" else 1
+    assert "%d SKIP" % expected_skips in result.output
     assert "Self-check PASSED" in result.output
 
 
@@ -197,6 +199,8 @@ def test_self_check_can_force_ansi_color(tmp_path):
     assert "\033[1;32mOK\033[0m" in result.output
     if filelock_status().level == "WARN":
         assert "\033[1;33mSelf-check PASSED with warnings\033[0m" in result.output
+    elif os.name != "posix":
+        assert "\033[1;36mSelf-check PASSED with skips\033[0m" in result.output
     else:
         assert "\033[1;32mSelf-check PASSED\033[0m" in result.output
 

@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import threading
 import time
 from pathlib import Path
@@ -108,13 +109,19 @@ def test_self_check_validates_an_empty_private_home(tmp_path, monkeypatch):
 
     assert exit_code == 0
     status = filelock_status()
-    expected = (
-        "Summary: 19 OK, 0 WARN, 0 SKIP, 0 FAIL, 0 ERR"
-        if status.level == "OK"
-        else "Summary: 18 OK, 1 WARN, 0 SKIP, 0 FAIL, 0 ERR"
+    permission_skip = int(os.name != "posix")
+    lock_warning = int(status.level == "WARN")
+    expected = "Summary: %d OK, %d WARN, %d SKIP, 0 FAIL, 0 ERR" % (
+        19 - permission_skip - lock_warning,
+        lock_warning,
+        permission_skip,
     )
     assert expected in lines
-    assert lines[-1] in ("Self-check PASSED", "Self-check PASSED with warnings")
+    assert lines[-1] in (
+        "Self-check PASSED",
+        "Self-check PASSED with skips",
+        "Self-check PASSED with warnings",
+    )
     assert lines[1].startswith("Runtime: Python ")
     assert "; JerryProxy " in lines[1]
     assert lines[2].startswith("System: ")
@@ -2284,10 +2291,12 @@ def test_relay_warnings_keep_the_full_self_check_exit_code_zero(tmp_path):
 
     assert exit_code == 0
     status = filelock_status()
-    expected = (
-        "Summary: 16 OK, 3 WARN, 0 SKIP, 0 FAIL, 0 ERR"
-        if status.level == "OK"
-        else "Summary: 15 OK, 4 WARN, 0 SKIP, 0 FAIL, 0 ERR"
+    permission_skip = int(os.name != "posix")
+    lock_warning = int(status.level == "WARN")
+    expected = "Summary: %d OK, %d WARN, %d SKIP, 0 FAIL, 0 ERR" % (
+        16 - permission_skip - lock_warning,
+        3 + lock_warning,
+        permission_skip,
     )
     assert expected in lines
     assert lines[-1] == "Self-check PASSED with warnings"

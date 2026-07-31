@@ -25,6 +25,10 @@ from jerryproxy.utils.fs import atomic_write_json, read_json
 
 PLATFORM = PlatformInfo("linux", "amd64", "glibc")
 OPERATION = "0123456789abcdef0123456789abcdef"
+POSIX_FAULT_INJECTION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="requires POSIX descriptors and replaceable open filesystem objects",
+)
 
 
 def _digest(payload):
@@ -1601,6 +1605,7 @@ def test_activation_execute_rechecks_authority_after_candidate_creation(
     assert displaced and displaced[0].is_file()
 
 
+@POSIX_FAULT_INJECTION
 def test_symlink_candidate_creation_flushes_its_pinned_parent_before_return(
     tmp_path,
     monkeypatch,
@@ -1914,6 +1919,7 @@ def test_activation_publication_does_not_reopen_ready_candidate_by_path(tmp_path
     assert armed == [True]
 
 
+@POSIX_FAULT_INJECTION
 def test_activation_never_adopts_an_exact_candidate_replacement_after_creation(tmp_path, monkeypatch):
     paths = _layout(tmp_path)
     _installed(paths, "1.0.0", b"previous")
@@ -2360,6 +2366,7 @@ def test_copy_recovery_resumes_existing_empty_candidate(tmp_path, recorded):
     assert (paths.bin / "mihomo").read_bytes() == b"previous"
 
 
+@POSIX_FAULT_INJECTION
 def test_copy_recovery_rejects_candidate_replaced_after_reopen(tmp_path, monkeypatch):
     paths = _layout(tmp_path)
     value = _journal(paths)
@@ -2785,6 +2792,7 @@ def test_recovery_converges_when_owned_candidate_disappears_after_delete_plan(tm
     assert paths.bin in flushed
 
 
+@POSIX_FAULT_INJECTION
 def test_copy_recovery_rejects_nonregular_reopened_descriptor(tmp_path, monkeypatch):
     paths = _layout(tmp_path)
     value = _journal(paths)

@@ -91,7 +91,7 @@ def test_installed_state_maps_strict_json_failures_to_integrity_errors(tmp_path,
 def test_active_state_rejects_manifest_only_and_link_only_orphans(tmp_path):
     manager = _manager(tmp_path)
     _install(manager, tmp_path, activate=True)
-    link = manager.paths.bin / ("mihomo.exe" if os.name == "nt" else "mihomo")
+    link = manager.paths.bin / "mihomo"
 
     link.unlink()
     with pytest.raises(IntegrityError, match="active backend state is incomplete"):
@@ -99,7 +99,7 @@ def test_active_state_rejects_manifest_only_and_link_only_orphans(tmp_path):
 
     manager = _manager(tmp_path / "second")
     installed = _install(manager, tmp_path / "second", activate=False)
-    link = manager.paths.bin / ("mihomo.exe" if os.name == "nt" else "mihomo")
+    link = manager.paths.bin / "mihomo"
     link.parent.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
         link.write_bytes(installed.executable.read_bytes())
@@ -284,9 +284,15 @@ def test_managed_state_rejects_path_replacement_after_descriptor_open(tmp_path, 
     with pytest.raises(IntegrityError, match="invalid installed backend manifest") as error:
         manager.get_installed("mihomo", "1.0.0")
 
-    assert "changed while being read" in str(error.value.__cause__)
-    assert replaced == [manifest]
-    assert manifest.read_bytes() == displaced.read_bytes()
+    if os.name == "nt":
+        assert isinstance(error.value.__cause__, PermissionError)
+        assert error.value.__cause__.winerror == 32
+        assert replaced == []
+        assert manifest.is_file()
+    else:
+        assert "changed while being read" in str(error.value.__cause__)
+        assert replaced == [manifest]
+        assert manifest.read_bytes() == displaced.read_bytes()
 
 
 @pytest.mark.parametrize(
@@ -514,7 +520,11 @@ def test_active_state_rejects_path_replacement_after_descriptor_open(tmp_path, m
     with pytest.raises(IntegrityError, match="invalid active backend manifest") as error:
         load_active_state(manager.paths, "mihomo", manager.platform_info)
 
-    assert "changed while being read" in str(error.value.__cause__)
+    if os.name == "nt":
+        assert isinstance(error.value.__cause__, PermissionError)
+        assert error.value.__cause__.winerror == 32
+    else:
+        assert "changed while being read" in str(error.value.__cause__)
 
 
 def test_installed_state_rejects_manifest_at_noncanonical_backend_location(tmp_path):

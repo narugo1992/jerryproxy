@@ -8,6 +8,10 @@ from jerryproxy.backend.anchored import AnchoredDirectory
 from jerryproxy.errors import ArchiveError, IntegrityError
 
 pytestmark = pytest.mark.unittest
+POSIX_FAULT_INJECTION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="requires POSIX descriptors and replaceable open filesystem objects",
+)
 
 
 def _write_private(path, payload=b"data"):
@@ -79,6 +83,7 @@ def test_identity_reports_missing_entry_as_archive_error(tmp_path):
             anchored.identity(("missing",))
 
 
+@POSIX_FAULT_INJECTION
 def test_identity_reports_unsupported_fifo_type(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -167,6 +172,7 @@ def test_replace_rejects_destination_identity_for_no_replace(tmp_path):
             )
 
 
+@POSIX_FAULT_INJECTION
 def test_replace_rejects_changed_destination_identity(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -227,6 +233,7 @@ def test_replace_opens_symlink_entries_without_combining_no_follow(tmp_path, mon
     assert os.readlink(str(root / "published")) == "source-target"
 
 
+@POSIX_FAULT_INJECTION
 def test_replace_maps_publication_oserror(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -241,6 +248,7 @@ def test_replace_maps_publication_oserror(tmp_path, monkeypatch):
             anchored.replace(("candidate",), ("published",))
 
 
+@POSIX_FAULT_INJECTION
 def test_replace_rejects_published_identity_race(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -273,6 +281,7 @@ def test_create_directory_rejects_existing_entry(tmp_path):
             anchored.create_directory(("existing",))
 
 
+@POSIX_FAULT_INJECTION
 def test_create_file_rejects_existing_alias(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -297,6 +306,7 @@ def test_open_existing_file_rejects_changed_expected_identity(tmp_path):
             anchored.open_existing_file(("state",), expected_identity=identity)
 
 
+@POSIX_FAULT_INJECTION
 def test_open_existing_file_rejects_hard_link(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -309,6 +319,7 @@ def test_open_existing_file_rejects_hard_link(tmp_path):
             anchored.open_existing_file(("state",))
 
 
+@POSIX_FAULT_INJECTION
 def test_file_evidence_rejects_wrong_expected_identity_after_read(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -328,6 +339,7 @@ def test_file_evidence_rejects_wrong_expected_identity_after_read(tmp_path, monk
             anchored.file_evidence(("state",), expected_identity=different)
 
 
+@POSIX_FAULT_INJECTION
 def test_read_json_rejects_unsafe_permissions(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -340,6 +352,7 @@ def test_read_json_rejects_unsafe_permissions(tmp_path):
             anchored.read_json(("state.json",))
 
 
+@POSIX_FAULT_INJECTION
 def test_read_json_rejects_authority_changed_after_read(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -387,6 +400,7 @@ def test_write_json_rejects_invalid_publication_contract(
             )
 
 
+@POSIX_FAULT_INJECTION
 def test_validate_rejects_fifo_as_special_object(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -397,6 +411,7 @@ def test_validate_rejects_fifo_as_special_object(tmp_path):
             anchored.validate({})
 
 
+@POSIX_FAULT_INJECTION
 def test_prepare_executable_rejects_hard_linked_candidate(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -420,6 +435,7 @@ def test_prepare_executable_rejects_existing_normalized_destination(tmp_path):
             anchored.prepare_executable("backend", "normalized")
 
 
+@POSIX_FAULT_INJECTION
 def test_prepare_executable_rejects_mode_normalization_race(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -452,6 +468,7 @@ def test_fallback_validate_rejects_symlink(tmp_path):
             anchored.validate({})
 
 
+@POSIX_FAULT_INJECTION
 def test_fallback_validate_rejects_fifo(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -548,6 +565,7 @@ def test_fallback_flush_tree_rejects_symlink(tmp_path):
             anchored.flush_tree()
 
 
+@POSIX_FAULT_INJECTION
 def test_fallback_flush_tree_rejects_unsafe_directory_permissions(tmp_path):
     root = tmp_path / "root"
     child = root / "child"
@@ -560,6 +578,7 @@ def test_fallback_flush_tree_rejects_unsafe_directory_permissions(tmp_path):
             anchored.flush_tree()
 
 
+@POSIX_FAULT_INJECTION
 def test_fallback_flush_tree_rejects_special_object(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -571,6 +590,7 @@ def test_fallback_flush_tree_rejects_special_object(tmp_path):
             anchored.flush_tree()
 
 
+@POSIX_FAULT_INJECTION
 def test_posix_flush_tree_rejects_disappearing_entry(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -588,6 +608,7 @@ def test_posix_flush_tree_rejects_disappearing_entry(tmp_path, monkeypatch):
             anchored.flush_tree()
 
 
+@POSIX_FAULT_INJECTION
 def test_posix_flush_tree_rejects_directory_identity_race(tmp_path, monkeypatch):
     root = tmp_path / "root"
     child = root / "child"
@@ -610,6 +631,7 @@ def test_posix_flush_tree_rejects_directory_identity_race(tmp_path, monkeypatch)
             anchored.flush_tree()
 
 
+@POSIX_FAULT_INJECTION
 def test_ensure_directory_rejects_visible_identity_race(tmp_path, monkeypatch):
     root = tmp_path / "root"
     original_stat = anchored_module.os.stat
@@ -628,6 +650,7 @@ def test_ensure_directory_rejects_visible_identity_race(tmp_path, monkeypatch):
             anchored.ensure_directory(("child",))
 
 
+@POSIX_FAULT_INJECTION
 def test_ensure_directory_rejects_recreated_tracked_directory(tmp_path):
     root = tmp_path / "root"
     with AnchoredDirectory(root) as anchored:
@@ -639,6 +662,7 @@ def test_ensure_directory_rejects_recreated_tracked_directory(tmp_path):
             anchored.ensure_directory(("child",))
 
 
+@POSIX_FAULT_INJECTION
 def test_fallback_replace_rejects_no_replace_contract(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -665,6 +689,7 @@ def test_fallback_replace_rejects_changed_source_identity(tmp_path):
             anchored.replace(("candidate",), ("published",), expected_identity=identity)
 
 
+@POSIX_FAULT_INJECTION
 def test_fallback_replace_maps_publication_oserror(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -712,6 +737,7 @@ def test_fallback_create_file_rejects_identity_race(tmp_path, monkeypatch):
             anchored.create_file(("created",))
 
 
+@POSIX_FAULT_INJECTION
 def test_prepare_executable_rejects_hard_link_added_after_scan(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -797,6 +823,7 @@ def test_fallback_replace_maps_source_identity_validation_failure(tmp_path, monk
             anchored.replace(("candidate",), ("published",), expected_identity=identity)
 
 
+@POSIX_FAULT_INJECTION
 def test_fallback_replace_rejects_wrong_destination_identity(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -864,6 +891,7 @@ def test_fallback_replace_flushes_distinct_parents(tmp_path, monkeypatch):
     assert flushed == [source_parent, destination_parent]
 
 
+@POSIX_FAULT_INJECTION
 def test_create_directory_maps_creation_oserror(tmp_path, monkeypatch):
     root = tmp_path / "root"
     original_mkdir = anchored_module.os.mkdir
@@ -879,6 +907,7 @@ def test_create_directory_maps_creation_oserror(tmp_path, monkeypatch):
             anchored.create_directory(("created",))
 
 
+@POSIX_FAULT_INJECTION
 def test_create_file_rejects_visible_identity_race(tmp_path, monkeypatch):
     root = tmp_path / "root"
     original_stat = anchored_module.os.stat
@@ -897,6 +926,7 @@ def test_create_file_rejects_visible_identity_race(tmp_path, monkeypatch):
             anchored.create_file(("created",))
 
 
+@POSIX_FAULT_INJECTION
 def test_open_existing_file_rejects_identity_changed_during_open(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -1003,6 +1033,7 @@ def test_fallback_prepare_executable_maps_identity_validation_failure(tmp_path, 
             anchored.prepare_executable("backend")
 
 
+@POSIX_FAULT_INJECTION
 def test_fallback_prepare_executable_rejects_identity_race_after_normalization(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()

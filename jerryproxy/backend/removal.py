@@ -311,7 +311,7 @@ def _open_identity_guard(path, status, error_type):
     if os.name != "posix":
         return None
     if stat.S_ISLNK(status.st_mode) and hasattr(os, "O_SYMLINK"):
-        flags = os.O_SYMLINK
+        flags = os.O_SYMLINK | getattr(os, "O_NOFOLLOW", 0)
     else:
         flags = getattr(os, "O_PATH", os.O_RDONLY)
         flags |= getattr(os, "O_NOFOLLOW", 0)

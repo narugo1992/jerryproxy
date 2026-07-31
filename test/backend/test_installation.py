@@ -22,6 +22,10 @@ from jerryproxy.home import JerryProxyPaths
 OPERATION = "0123456789abcdef0123456789abcdef"
 WRITE_ID = "fedcba9876543210fedcba9876543210"
 DIGEST = "a" * 64
+POSIX_FAULT_INJECTION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="requires replacing filesystem objects while POSIX descriptors remain open",
+)
 
 
 def _paths(tmp_path):
@@ -198,6 +202,7 @@ def test_transaction_commits_exact_validated_tree_and_disposes_journal(tmp_path)
     assert not staging.exists()
 
 
+@POSIX_FAULT_INJECTION
 def test_install_recovery_rejects_final_executable_replacement_during_fixed_handle_read(
     tmp_path,
     monkeypatch,
@@ -722,6 +727,7 @@ def test_committed_recovery_accepts_exact_final_and_is_idempotent(tmp_path):
     assert not any(paths.runtimes.iterdir())
 
 
+@POSIX_FAULT_INJECTION
 def test_recovery_retains_authority_when_final_tree_changes_during_validation(
     tmp_path,
     monkeypatch,

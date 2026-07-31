@@ -17,6 +17,11 @@ from jerryproxy.backend.durable import (
 from jerryproxy.errors import DurabilityError, IntegrityError
 from jerryproxy.utils.fs import read_json
 
+POSIX_FAULT_INJECTION = pytest.mark.skipif(
+    os.name == "nt",
+    reason="requires POSIX directory descriptors; Windows durability has native tests",
+)
+
 
 def test_durable_json_publication_flushes_file_then_replaces_then_flushes_parent(tmp_path):
     destination = tmp_path / "journal.json"
@@ -189,6 +194,7 @@ def test_durable_replace_flushes_one_parent_once_for_an_adjacent_replace(tmp_pat
     assert outcomes == (UNSUPPORTED,)
 
 
+@POSIX_FAULT_INJECTION
 def test_flush_directory_rejects_alias_without_touching_target(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -208,6 +214,7 @@ def test_flush_directory_rejects_alias_without_touching_target(tmp_path):
         (errno.EACCES, DurabilityError),
     ),
 )
+@POSIX_FAULT_INJECTION
 def test_flush_directory_classifies_open_failures(
     tmp_path,
     monkeypatch,
@@ -225,6 +232,7 @@ def test_flush_directory_classifies_open_failures(
             flush_directory(tmp_path)
 
 
+@POSIX_FAULT_INJECTION
 def test_flush_directory_rejects_a_non_directory_pinned_descriptor(tmp_path, monkeypatch):
     regular = tmp_path / "regular"
     regular.write_bytes(b"payload")
