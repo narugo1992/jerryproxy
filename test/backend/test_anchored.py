@@ -206,6 +206,7 @@ def test_replace_opens_symlink_entries_without_combining_no_follow(
     (root / "published").symlink_to("destination-target")
     source_identity = anchored_module.capture_identity(root / "candidate")
     destination_identity = anchored_module.capture_identity(root / "published")
+    native_platform = anchored_module.sys.platform
     native_o_symlink = hasattr(os, "O_SYMLINK")
     o_symlink = getattr(os, "O_SYMLINK", anchored_module._DARWIN_O_SYMLINK)
     original_open = anchored_module.os.open
@@ -216,7 +217,7 @@ def test_replace_opens_symlink_entries_without_combining_no_follow(
         if flags & o_symlink:
             opened_symlink_flags.append(flags)
             assert not flags & getattr(os, "O_NOFOLLOW", 0)
-            if not native_o_symlink:
+            if not native_o_symlink and native_platform != "darwin":
                 flags &= ~o_symlink
                 flags |= getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
         return original_open(path, flags, *args, **kwargs)
