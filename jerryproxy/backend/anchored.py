@@ -1148,6 +1148,54 @@ class AnchoredDirectory(object):
         self._verify_root()
         return identity
 
+    def read_symlink(self, parts):
+        """Read one symbolic link while binding the observed object to its parent."""
+
+        selected = self._parts(parts)
+        if self._posix:
+            parent = self._open_posix_directory(selected[:-1])
+            try:
+                before = os.stat(selected[-1], dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISLNK(before.st_mode):
+                    raise ArchiveError("anchored entry is not a symbolic link: %s" % "/".join(selected))
+                identity = self._posix_identity(before, "symlink")
+                target = os.readlink(selected[-1], dir_fd=parent)
+                after = os.stat(selected[-1], dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISLNK(after.st_mode) or self._posix_identity(after, "symlink") != identity:
+                    raise ArchiveError("anchored symbolic link changed while being read: %s" % "/".join(selected))
+                if os.readlink(selected[-1], dir_fd=parent) != target:
+                    raise ArchiveError(
+                        "anchored symbolic link target changed while being read: %s" % "/".join(selected)
+                    )
+            except OSError as error:
+                raise ArchiveError("unable to read anchored symbolic link: %s" % "/".join(selected)) from error
+            finally:
+                os.close(parent)
+            self._verify_root()
+            return target, identity
+
+        parent = self._path_directory(selected[:-1])
+        path = parent / selected[-1]
+        try:
+            before = path.lstat()
+            if is_path_alias(path) or not stat.S_ISLNK(before.st_mode):
+                raise ArchiveError("anchored entry is not a symbolic link: %s" % path)
+            identity = capture_identity(path)
+            target = os.readlink(str(path))
+            after = path.lstat()
+            if (
+                is_path_alias(path)
+                or not stat.S_ISLNK(after.st_mode)
+                or capture_identity(path) != identity
+            ):
+                raise ArchiveError("anchored symbolic link changed while being read: %s" % path)
+            if os.readlink(str(path)) != target:
+                raise ArchiveError("anchored symbolic link target changed while being read: %s" % path)
+        except (OSError, IntegrityError) as error:
+            raise ArchiveError("unable to read anchored symbolic link: %s" % path) from error
+        self._verify_root()
+        return target, identity
+
     def create_symlink(self, parts, target):
         """Exclusively create and verify one relative symbolic link."""
 

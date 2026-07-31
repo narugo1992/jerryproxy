@@ -3262,6 +3262,32 @@ def test_same_version_use_is_a_verified_zero_write_noop(tmp_path, monkeypatch):
     assert not list(manager.paths.runtimes.glob(".use-*"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink observation boundary")
+def test_same_version_use_rejects_symlink_replacement_after_read(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    install_fake_mihomo(manager, tmp_path, "1.0.0", b"version one", activate=True)
+    link = manager.paths.bin / "mihomo"
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"attacker")
+    replacement_target = os.path.relpath(str(outside), str(link.parent))
+    original_readlink = anchored_module.os.readlink
+    replaced = {"value": False}
+
+    def replace_after_read(path, *args, **kwargs):
+        target = original_readlink(path, *args, **kwargs)
+        if path == link.name and not replaced["value"]:
+            replaced["value"] = True
+            link.unlink()
+            link.symlink_to(replacement_target)
+        return target
+
+    monkeypatch.setattr(anchored_module.os, "readlink", replace_after_read)
+    with pytest.raises(IntegrityError, match="invalid active backend manifest"):
+        manager.use("mihomo", "1.0.0")
+    assert os.readlink(str(link)) == replacement_target
+    assert not list(manager.paths.runtimes.glob(".use-*.json"))
+
+
 def test_next_public_read_recovers_an_interrupted_activation(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     install_fake_mihomo(manager, tmp_path, "1.0.0", b"version one", activate=True)

@@ -184,6 +184,7 @@ jobs:
           python -m pytest test -sv -m windows_native
           --junitxml=windows-hardening-junit.xml -o junit_family=legacy
           --cov=jerryproxy --cov-report=term-missing --cov-report=xml
+          --cov-fail-under=90
       - name: Upload native Windows coverage to Codecov
         if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
         uses: codecov/codecov-action@v7

@@ -472,6 +472,31 @@ def test_active_state_rejects_a_wrong_public_symlink_target(tmp_path):
         manager.current("mihomo")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink observation boundary")
+def test_active_state_rejects_symlink_replacement_after_read(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    _install(manager, tmp_path, activate=True)
+    link = manager.paths.bin / "mihomo"
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"attacker")
+    replacement_target = os.path.relpath(str(outside), str(link.parent))
+    original_readlink = anchored_module.os.readlink
+    replaced = {"value": False}
+
+    def replace_after_read(path, *args, **kwargs):
+        target = original_readlink(path, *args, **kwargs)
+        if path == link.name and not replaced["value"]:
+            replaced["value"] = True
+            link.unlink()
+            link.symlink_to(replacement_target)
+        return target
+
+    monkeypatch.setattr(anchored_module.os, "readlink", replace_after_read)
+    with pytest.raises(IntegrityError, match="invalid active backend manifest"):
+        load_active_state(manager.paths, "mihomo", manager.platform_info)
+    assert os.readlink(str(link)) == replacement_target
+
+
 def test_active_state_maps_manifest_disappearance_after_alias_check(tmp_path, monkeypatch):
     manager = _manager(tmp_path)
     _install(manager, tmp_path, activate=True)

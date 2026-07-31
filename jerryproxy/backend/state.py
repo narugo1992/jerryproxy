@@ -348,9 +348,10 @@ def load_active_state(paths, name, platform_info):
         if executable != installed.executable or recorded_link != link:
             raise IntegrityError("invalid managed state active paths")
         if link_mode == "symlink":
-            link_status = link.lstat()
             expected_target = os.path.relpath(str(installed.executable), str(link.parent))
-            if not stat.S_ISLNK(link_status.st_mode) or os.readlink(str(link)) != expected_target:
+            with AnchoredDirectory(paths.bin) as active_bin:
+                actual_target, unused_link_identity = active_bin.read_symlink((link.name,))
+            if actual_target != expected_target:
                 raise IntegrityError("invalid managed state active symlink")
         else:
             with AnchoredDirectory(paths.bin) as active_bin:
