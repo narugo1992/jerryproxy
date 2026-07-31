@@ -154,6 +154,26 @@ def test_active_copy_rejects_wrong_digest_on_windows(tmp_path, monkeypatch):
         manager.current("mihomo")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows simulation of POSIX state permissions")
+def test_installed_state_rejects_simulated_unsafe_posix_permissions(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    installed = _install(manager, tmp_path, activate=False)
+    real_os = state_module.os
+
+    class PosixStateOS(object):
+        name = "posix"
+        path = real_os.path
+
+        def __getattr__(self, attribute):
+            return getattr(real_os, attribute)
+
+    monkeypatch.setattr(state_module, "os", PosixStateOS())
+    monkeypatch.setattr(state_module.stat, "S_IMODE", lambda unused_mode: 0o644)
+
+    with pytest.raises(IntegrityError, match="unsafe permissions"):
+        manager.get_installed("mihomo", installed.version)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission boundary")
 def test_managed_state_rejects_unsafe_manifest_permissions(tmp_path):
     manager = _manager(tmp_path)

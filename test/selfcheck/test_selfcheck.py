@@ -937,6 +937,81 @@ def test_cancelled_spawn_child_never_enters_business_code(tmp_path):
         assert stat.S_IMODE((tmp_path / "child.stderr").stat().st_mode) == 0o600
 
 
+def test_child_start_gate_reports_cancellation_and_deadline(monkeypatch):
+    class Event(object):
+        def __init__(self, value=False):
+            self.value = value
+
+        def is_set(self):
+            return self.value
+
+        def set(self):
+            self.value = True
+
+        def wait(self, unused_timeout):
+            del unused_timeout
+            return self.value
+
+    ready = Event()
+    assert (
+        selfcheck_module._child_start_allowed(
+            Event(False),
+            Event(True),
+            ready,
+            SimpleNamespace(value=1.0),
+        )
+        is False
+    )
+    assert ready.is_set() is True
+
+    clock = iter((0.0, selfcheck_module._CHILD_START_GATE_TIMEOUT + 1.0))
+    monkeypatch.setattr(selfcheck_module.time, "monotonic", lambda: next(clock))
+    assert (
+        selfcheck_module._child_start_allowed(
+            Event(False),
+            Event(False),
+            Event(),
+            SimpleNamespace(value=1.0),
+        )
+        is False
+    )
+
+
+def test_captured_child_entry_rejects_an_unavailable_diagnostic_boundary(monkeypatch, tmp_path):
+    class ChildExit(Exception):
+        pass
+
+    opened = []
+    closed = []
+
+    def fake_open(path, flags, mode=None):
+        del path, flags, mode
+        if not opened:
+            opened.append(101)
+            return opened[0]
+        raise OSError("simulated stderr boundary failure")
+
+    def fake_exit(code):
+        assert code == selfcheck_module._CHILD_STDERR_CAPTURE_ERROR
+        raise ChildExit()
+
+    monkeypatch.setattr(selfcheck_module.os, "open", fake_open)
+    monkeypatch.setattr(selfcheck_module.os, "close", lambda descriptor: closed.append(descriptor))
+    monkeypatch.setattr(selfcheck_module.os, "_exit", fake_exit)
+
+    with pytest.raises(ChildExit):
+        selfcheck_module._captured_child_entry(
+            lambda: None,
+            (),
+            str(tmp_path / "child.stderr"),
+            None,
+            None,
+            None,
+            None,
+        )
+    assert closed == [101]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX no-follow diagnostic creation")
 def test_spawn_child_refuses_a_preexisting_stderr_alias(tmp_path):
     if "spawn" not in selfcheck_module.multiprocessing.get_all_start_methods():
