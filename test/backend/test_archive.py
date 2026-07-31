@@ -2029,6 +2029,11 @@ def test_windows_archive_output_directory_guards_do_not_share_delete(tmp_path, m
     ]
     assert len(directory_calls) == 2
     assert all(not share & anchored_module._WINDOWS_FILE_SHARE_DELETE for _, _, share, _, _ in directory_calls)
+    assert all(
+        access & anchored_module._WINDOWS_FILE_TRAVERSE
+        and access & anchored_module._WINDOWS_FILE_READ_ATTRIBUTES
+        for _, access, _, _, _ in directory_calls
+    )
 
 
 @pytest.mark.windows_native
@@ -2059,7 +2064,7 @@ def test_windows_archive_output_directory_guards_block_native_rename(tmp_path, s
             assert not displaced.exists()
         else:
             selected.rename(displaced)
-            with pytest.raises(ArchiveError, match="ancestor changed"):
+            with pytest.raises(ArchiveError, match="ancestor (?:changed|became unavailable)"):
                 output_tree.assert_bound()
             displaced.rename(selected)
 

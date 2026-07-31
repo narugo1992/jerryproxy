@@ -18,6 +18,7 @@ from .identity import capture_identity, identity_matches, validate_identity
 _WINDOWS_DELETE = 0x00010000
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_GENERIC_WRITE = 0x40000000
+_WINDOWS_FILE_TRAVERSE = 0x00000020
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_FILE_SHARE_WRITE = 0x00000002
@@ -306,7 +307,7 @@ def _rename_posix_noreplace(
 def _open_windows_directory(path, expected_status):
     handle = _WINDOWS_KERNEL32.CreateFileW(
         _windows_extended_path(path),
-        _WINDOWS_FILE_READ_ATTRIBUTES,
+        _WINDOWS_FILE_TRAVERSE | _WINDOWS_FILE_READ_ATTRIBUTES,
         _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
         None,
         _WINDOWS_OPEN_EXISTING,
