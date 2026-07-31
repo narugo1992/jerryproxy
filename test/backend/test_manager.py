@@ -4589,9 +4589,11 @@ def test_clean_final_rmdir_cannot_be_redirected_by_an_ancestor_swap(tmp_path, mo
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX identity guard behavior")
-def test_macos_symlink_identity_guard_uses_o_symlink_when_o_path_is_unavailable(
+@pytest.mark.parametrize("python_exposes_flag", (True, False))
+def test_macos_symlink_identity_guard_uses_o_symlink_with_old_and_new_python(
     tmp_path,
     monkeypatch,
+    python_exposes_flag,
 ):
     target = tmp_path / "target"
     target.write_bytes(b"target")
@@ -4600,7 +4602,6 @@ def test_macos_symlink_identity_guard_uses_o_symlink_when_o_path_is_unavailable(
     status = link.lstat()
     opened = []
     closed = []
-    o_symlink = 0x200000
 
     def fake_open(path, flags):
         opened.append((Path(path), flags))
@@ -4613,17 +4614,19 @@ def test_macos_symlink_identity_guard_uses_o_symlink_when_o_path_is_unavailable(
         O_NOFOLLOW=getattr(os, "O_NOFOLLOW", 0),
         O_NONBLOCK=getattr(os, "O_NONBLOCK", 0),
         O_DIRECTORY=getattr(os, "O_DIRECTORY", 0),
-        O_SYMLINK=o_symlink,
         open=fake_open,
         fstat=lambda descriptor: status,
         close=lambda descriptor: closed.append(descriptor),
     )
+    if python_exposes_flag:
+        fake_os.O_SYMLINK = removal_module._DARWIN_O_SYMLINK
     monkeypatch.setattr(removal_module, "os", fake_os)
+    monkeypatch.setattr(removal_module.sys, "platform", "darwin")
 
     descriptor = removal_module._open_identity_guard(link, status, CleanupScopeError)
     removal_module._close_identity_guard(descriptor)
 
-    assert opened == [(link, o_symlink)]
+    assert opened == [(link, removal_module._DARWIN_O_SYMLINK)]
     assert closed == [91]
 
 

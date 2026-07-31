@@ -200,8 +200,8 @@ def _check_platform():
     try:
         platform_info = detect_platform()
     except UnsupportedPlatformError as error:
-        # A recognized but unsupported host cannot run platform-dependent backend features.
-        return CheckResult.fail("%s: %s" % (error.__class__.__name__, _bounded_line(error)))
+        # Platform-dependent checks have no applicable target on an unsupported host.
+        return CheckResult.skip("%s: %s" % (error.__class__.__name__, _bounded_line(error)))
     except (OSError, RuntimeError) as error:
         # Host platform metadata may be temporarily unreadable.
         return _error_result(error)

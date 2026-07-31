@@ -183,3 +183,13 @@ def test_filelock_status_reports_legacy_and_outdated_lines(
     assert message in status.detail
     if python_version < (3, 10):
         assert "CVE-2025-68146" in status.detail
+
+
+def test_filelock_status_reports_a_supported_modern_line(monkeypatch):
+    monkeypatch.setattr(lock_module.sys, "version_info", (3, 10))
+    monkeypatch.setattr(lock_module.filelock, "__version__", "3.30.0")
+
+    status = filelock_status()
+
+    assert status.level == "OK"
+    assert status.detail == "filelock 3.30.0 uses the supported native lock line"

@@ -617,6 +617,20 @@ def test_activation_recovery_planner_rejects_every_unknown_evidence_position(
         plan_activation_recovery(value, classification)
 
 
+def test_activation_recovery_disposes_authority_when_public_state_already_matches(tmp_path):
+    paths = _layout(tmp_path)
+    value = _journal(paths)
+    value["recovery"] = {"direction": "rollback-previous"}
+    for candidate in value["candidates"].values():
+        candidate["purpose"] = "recovery-previous"
+    classification = ActivationClassification("P", "P", "missing", "missing")
+
+    plan = plan_activation_recovery(value, classification)
+
+    assert plan.direction == "rollback-previous"
+    assert plan.action == "dispose-journal"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="descriptor-relative public copy read requires POSIX")
 def test_public_copy_classification_does_not_reopen_the_command_by_path(tmp_path, monkeypatch):
     paths = _layout(tmp_path)

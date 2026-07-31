@@ -1401,14 +1401,14 @@ def test_runtime_check_reports_old_python_and_missing_package_version(tmp_path, 
     assert runtime_check() == CheckResult.fail("package version is empty")
 
 
-def test_platform_check_translates_detection_errors(tmp_path, monkeypatch):
+def test_platform_check_skips_unsupported_hosts(tmp_path, monkeypatch):
     def fail_platform():
         raise UnsupportedPlatformError("unsupported host")
 
     monkeypatch.setattr(selfcheck_module, "detect_platform", fail_platform)
     result = dict(build_checks(JerryProxyPaths(tmp_path)))["platform detection"]()
 
-    assert result.level == "FAIL"
+    assert result.level == "SKIP"
     assert "UnsupportedPlatformError: unsupported host" in result.detail
 
 
@@ -1424,6 +1424,20 @@ def test_platform_check_bounds_multiline_operational_diagnostics(tmp_path, monke
     assert len(result.detail) <= 2060
     assert result.diagnostics
     assert len(result.diagnostics[0]) <= 64 * 1024
+
+
+def test_platform_dependent_resource_checks_report_detection_errors(tmp_path, monkeypatch):
+    def fail_platform():
+        raise RuntimeError("platform metadata unavailable")
+
+    monkeypatch.setattr(selfcheck_module, "detect_platform", fail_platform)
+    checks = dict(build_checks(JerryProxyPaths(tmp_path)))
+
+    for name in ("backend registry", "catalog platform selection"):
+        result = checks[name]()
+        assert result.level == "ERR"
+        assert result.detail == "RuntimeError: platform metadata unavailable"
+        assert result.diagnostics and "platform metadata unavailable" in result.diagnostics[0]
 
 
 def test_home_layout_and_permission_checks_report_unmet_requirements(tmp_path, monkeypatch):
@@ -1621,7 +1635,7 @@ def test_platform_dependents_skip_after_an_unsupported_platform(tmp_path, monkey
     monkeypatch.setattr(selfcheck_module, "detect_platform", unsupported_platform)
     checks = dict(build_checks(JerryProxyPaths(tmp_path)))
 
-    assert checks["platform detection"]().level == "FAIL"
+    assert checks["platform detection"]().level == "SKIP"
     dependent_names = (
         "backend registry",
         "catalog platform selection",
@@ -1651,6 +1665,20 @@ def test_filelock_check_maps_legacy_status_to_warning(tmp_path, monkeypatch):
     assert result.level == "WARN"
     assert result.detail.startswith("legacy filelock;")
     assert "contention" in result.detail
+
+
+def test_filelock_check_runs_the_real_lock_probe_for_a_supported_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        selfcheck_module,
+        "filelock_status",
+        lambda: SimpleNamespace(level="OK", detail="supported filelock"),
+    )
+
+    result = dict(build_checks(JerryProxyPaths(tmp_path)))["filelock compatibility"]()
+
+    assert result == CheckResult.ok(
+        "supported filelock; exclusive acquire, contention, release, and reacquire succeeded"
+    )
 
 
 def test_filelock_check_fails_if_exclusive_contention_is_not_enforced(tmp_path, monkeypatch):

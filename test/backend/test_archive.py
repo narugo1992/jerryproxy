@@ -32,6 +32,25 @@ SIMULATED_WINDOWS_BINDING = pytest.mark.skipif(
 )
 
 
+class StatusOverride(object):
+    def __init__(self, status, **values):
+        self._status = status
+        self._values = values
+
+    def __getattr__(self, name):
+        if name in self._values:
+            return self._values[name]
+        return getattr(self._status, name)
+
+
+def legacy_windows_status(status):
+    return StatusOverride(
+        status,
+        st_dev=int(status.st_dev) & 0xFFFFFFFF,
+        st_ino=int(status.st_ino) & 0xFFFFFFFFFFFFFFFF,
+    )
+
+
 class SimulatedArchiveWindowsKernel(object):
     """Exercise Win32 archive creation calls on a POSIX test filesystem."""
 
@@ -1707,21 +1726,25 @@ def test_windows_archive_input_rejects_untrusted_handle_evidence_and_closes_it(
             status = original_lstat(path)
             if path != archive:
                 return status
-            values = list(status)
-            values[6] += 1
-            return os.stat_result(values)
+            return StatusOverride(status, st_size=int(status.st_size) + 1)
 
         monkeypatch.setattr(Path, "lstat", changed_lstat)
     elif failure == "descriptor":
+        transferred_descriptors = set()
+        original_transfer = archive_module._WINDOWS_OPEN_OSFHANDLE
         original_fstat = archive_module.os.fstat
 
+        def record_transfer(handle, flags):
+            descriptor = original_transfer(handle, flags)
+            transferred_descriptors.add(descriptor)
+            return descriptor
+
         def denied_fstat(descriptor):
-            if descriptor not in kernel.handles and any(
-                descriptor == handle for handle, unused_creation in kernel.opened_handles
-            ):
+            if descriptor in transferred_descriptors:
                 raise OSError("simulated descriptor inspection failure")
             return original_fstat(descriptor)
 
+        monkeypatch.setattr(archive_module, "_WINDOWS_OPEN_OSFHANDLE", record_transfer)
         monkeypatch.setattr(archive_module.os, "fstat", denied_fstat)
 
     with pytest.raises((ArchiveError, OSError), match=message):
@@ -2352,19 +2375,21 @@ def test_simulated_windows_anchored_replace_stays_on_the_pinned_parent(
     sentinel.write_bytes(b"outside")
     replaced = []
 
-    def rename_by_handle(source_handle, parent_handle, destination_name, replace_existing):
-        del source_handle, replace_existing
+    original_rename = kernel.NtSetInformationFile
+
+    def swap_root_before_rename(handle, io_status, information_pointer, size, information_class):
         destination.rename(displaced)
         destination.symlink_to(outside, target_is_directory=True)
+        for opened_handle, path in list(kernel.handles.items()):
+            try:
+                relative = path.relative_to(destination)
+            except ValueError:
+                continue
+            kernel.handles[opened_handle] = displaced / relative
         replaced.append(True)
-        os.replace(
-            ".candidate",
-            destination_name,
-            src_dir_fd=parent_handle,
-            dst_dir_fd=parent_handle,
-        )
+        return original_rename(handle, io_status, information_pointer, size, information_class)
 
-    monkeypatch.setattr(anchored_module, "_rename_windows_handle", rename_by_handle)
+    monkeypatch.setattr(kernel, "NtSetInformationFile", swap_root_before_rename)
 
     with pytest.raises(ArchiveError, match="root changed"):
         with archive_module.AnchoredDirectory(destination) as output_tree:
@@ -2394,18 +2419,6 @@ def test_simulated_windows_anchored_replace_publishes_a_verified_directory_witho
     with archive_module.AnchoredDirectory(root) as output_tree:
         output_tree.ensure_directory(("mihomo",))
         identity = output_tree.create_directory(("mihomo", ".1.0.0.install-operation"))
-
-    def rename_by_handle(source_handle, parent_handle, destination_name, replace_existing):
-        del source_handle
-        assert replace_existing is False
-        os.rename(
-            ".1.0.0.install-operation",
-            destination_name,
-            src_dir_fd=parent_handle,
-            dst_dir_fd=parent_handle,
-        )
-
-    monkeypatch.setattr(anchored_module, "_rename_windows_handle", rename_by_handle)
 
     with archive_module.AnchoredDirectory(root) as output_tree:
         outcome = output_tree.replace(
@@ -2508,9 +2521,7 @@ def test_simulated_windows_existing_file_handles_reject_untrusted_evidence(
             status = original_lstat(path)
             if path != state:
                 return status
-            values = list(status)
-            values[1] += 1
-            return os.stat_result(values)
+            return StatusOverride(status, st_ino=int(status.st_ino) + 1)
 
         monkeypatch.setattr(Path, "lstat", changed_lstat)
 
@@ -2671,6 +2682,12 @@ def test_windows_archive_output_rejects_reparse_returned_handle(tmp_path, monkey
 def test_windows_directory_identity_uses_exact_legacy_fallback(tmp_path, monkeypatch):
     kernel = SimulatedArchiveWindowsKernel(modern_failure="unsupported")
     configure_simulated_windows_archive_creation(monkeypatch, kernel)
+    original_lstat = Path.lstat
+
+    def legacy_lstat(path):
+        return legacy_windows_status(original_lstat(path))
+
+    monkeypatch.setattr(Path, "lstat", legacy_lstat)
 
     with archive_module.AnchoredDirectory(tmp_path / "output") as output_tree:
         output_tree.ensure_directory(("bin",))
@@ -2775,6 +2792,12 @@ def test_windows_directory_guard_accepts_exact_legacy_api_without_extended_bindi
     kernel = SimulatedArchiveWindowsKernel()
     kernel.GetFileInformationByHandleEx = None
     configure_simulated_windows_archive_creation(monkeypatch, kernel)
+    original_lstat = Path.lstat
+
+    def legacy_lstat(path):
+        return legacy_windows_status(original_lstat(path))
+
+    monkeypatch.setattr(Path, "lstat", legacy_lstat)
 
     with archive_module.AnchoredDirectory(tmp_path / "output") as output_tree:
         output_tree.ensure_directory(("bin",))
@@ -2838,9 +2861,7 @@ def test_windows_file_guard_rejects_untrusted_native_evidence(
             status = original_lstat(path)
             if path.name != "xray":
                 return status
-            values = list(status)
-            values[1] += 1
-            return os.stat_result(values)
+            return StatusOverride(status, st_ino=int(status.st_ino) + 1)
 
         monkeypatch.setattr(Path, "lstat", changed_lstat)
 

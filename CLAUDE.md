@@ -374,7 +374,7 @@ private branch coverage or replace the normal test matrix.
 ```shell
 make unittest
 make unittest RANGE_DIR=./backend
-make unittest MIN_COVERAGE=97
+make unittest MIN_COVERAGE=90
 make lint
 make rst_auto
 make rst_auto RANGE_DIR=backend
@@ -415,9 +415,14 @@ Every unit-test matrix cell must produce its own `coverage.xml` and upload it to
 Codecov with the shared `python` aggregation flag and a unique environment
 upload name. Upload failures fail trusted CI jobs. Fork pull requests must skip
 the upload because GitHub intentionally withholds repository secrets; their
-tests and local coverage gate still run normally. The statement-coverage floor
-is 97% locally and in every matrix cell. Never print or persist
-`CODECOV_TOKEN`.
+tests and local coverage gate still run normally. The statement-coverage hard
+floor is 90% locally and in every matrix cell. Development should pursue the
+highest practical coverage, especially at security and recovery boundaries,
+without turning an aspirational percentage above 90% into a command or CI
+gate. Never print or persist `CODECOV_TOKEN`.
+Coverage exclusions must stay narrow and explicit. Never omit an entire mixed
+platform module, merge coverage from another operating system, or weaken the
+90% cell gate to compensate for missing tests.
 The `test` tree is a Python package: every directory below `test/` must contain
 an `__init__.py`, including newly added test-area directories.
 

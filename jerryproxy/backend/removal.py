@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -56,6 +57,17 @@ _WINDOWS_FILE_DISPOSITION_INFO_CLASS = 4
 _WINDOWS_FILE_ID_INFO_CLASS = 18
 _WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 _WINDOWS_UNSUPPORTED_FILE_ID_ERRORS = (1, 50, 87)
+_DARWIN_O_SYMLINK = 0x00200000
+
+
+def _symlink_open_flag():
+    flag = getattr(os, "O_SYMLINK", None)
+    if flag is not None:
+        return flag
+    if sys.platform == "darwin":
+        # O_SYMLINK is a stable Darwin ABI flag that older CPython os modules omit.
+        return _DARWIN_O_SYMLINK
+    return None
 
 
 @dataclass(frozen=True)
@@ -310,9 +322,10 @@ def _open_identity_guard(path, status, error_type):
         return _open_windows_identity_guard(path, status, error_type)
     if os.name != "posix":
         return None
-    if stat.S_ISLNK(status.st_mode) and hasattr(os, "O_SYMLINK"):
+    symlink_flag = _symlink_open_flag()
+    if stat.S_ISLNK(status.st_mode) and symlink_flag is not None:
         # Darwin's symlink-open contract uses O_SYMLINK alone; os.open returns a non-inheritable fd.
-        flags = os.O_SYMLINK
+        flags = symlink_flag
     else:
         flags = getattr(os, "O_PATH", os.O_RDONLY)
         flags |= getattr(os, "O_NOFOLLOW", 0)

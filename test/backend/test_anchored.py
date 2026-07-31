@@ -191,8 +191,13 @@ def test_replace_rejects_changed_destination_identity(tmp_path):
             )
 
 
+@pytest.mark.parametrize("python_exposes_flag", (True, False))
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor flag semantics")
-def test_replace_opens_symlink_entries_without_combining_no_follow(tmp_path, monkeypatch):
+def test_replace_opens_symlink_entries_without_combining_no_follow(
+    tmp_path,
+    monkeypatch,
+    python_exposes_flag,
+):
     root = tmp_path / "root"
     root.mkdir()
     (root / "source-target").write_bytes(b"source")
@@ -202,7 +207,7 @@ def test_replace_opens_symlink_entries_without_combining_no_follow(tmp_path, mon
     source_identity = anchored_module.capture_identity(root / "candidate")
     destination_identity = anchored_module.capture_identity(root / "published")
     native_o_symlink = hasattr(os, "O_SYMLINK")
-    o_symlink = getattr(os, "O_SYMLINK", 1 << 29)
+    o_symlink = getattr(os, "O_SYMLINK", anchored_module._DARWIN_O_SYMLINK)
     original_open = anchored_module.os.open
     opened_symlink_flags = []
     anchored = AnchoredDirectory(root)
@@ -216,8 +221,11 @@ def test_replace_opens_symlink_entries_without_combining_no_follow(tmp_path, mon
                 flags |= getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
         return original_open(path, flags, *args, **kwargs)
 
-    if not native_o_symlink:
+    if python_exposes_flag:
         monkeypatch.setattr(anchored_module.os, "O_SYMLINK", o_symlink, raising=False)
+    else:
+        monkeypatch.delattr(anchored_module.os, "O_SYMLINK", raising=False)
+        monkeypatch.setattr(anchored_module.sys, "platform", "darwin")
     monkeypatch.setattr(anchored_module.os, "open", simulate_darwin_symlink_open)
 
     with anchored:

@@ -54,6 +54,17 @@ _LINUX_RENAMEAT2_SYSCALLS = {
 }
 _RENAME_NOREPLACE = 1
 _RENAME_EXCL = 0x00000004
+_DARWIN_O_SYMLINK = 0x00200000
+
+
+def _symlink_open_flag():
+    flag = getattr(os, "O_SYMLINK", None)
+    if flag is not None:
+        return flag
+    if sys.platform == "darwin":
+        # O_SYMLINK is a stable Darwin ABI flag that older CPython os modules omit.
+        return _DARWIN_O_SYMLINK
+    return None
 
 
 class _WindowsFileTime(ctypes.Structure):
@@ -1100,8 +1111,9 @@ class AnchoredDirectory(object):
                 else:
                     destination_parent = self._open_posix_directory(destination_parts[:-1])
                 status = os.stat(source_parts[-1], dir_fd=source_parent, follow_symlinks=False)
-                if stat.S_ISLNK(status.st_mode) and hasattr(os, "O_SYMLINK"):
-                    flags = os.O_SYMLINK | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+                symlink_flag = _symlink_open_flag()
+                if stat.S_ISLNK(status.st_mode) and symlink_flag is not None:
+                    flags = symlink_flag
                 else:
                     flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
                     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -1129,8 +1141,8 @@ class AnchoredDirectory(object):
                         dir_fd=destination_parent,
                         follow_symlinks=False,
                     )
-                    if stat.S_ISLNK(destination_status.st_mode) and hasattr(os, "O_SYMLINK"):
-                        destination_flags = os.O_SYMLINK | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+                    if stat.S_ISLNK(destination_status.st_mode) and symlink_flag is not None:
+                        destination_flags = symlink_flag
                     else:
                         destination_flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_NOFOLLOW", 0)
                         destination_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
