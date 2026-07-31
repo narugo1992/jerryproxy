@@ -149,11 +149,12 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     result = CliRunner().invoke(cli, ["--home", str(tmp_path), "self-check"])
 
     assert result.exit_code == 0
-    assert "[1/12] Python runtime: OK" in result.output
-    assert "[7/12] packaged backend catalog: OK" in result.output
-    assert "[8/12] filelock compatibility:" in result.output
-    assert "[9/12] backend inventory: OK" in result.output
-    assert "[12/12] relay gh.geekertao.top: OK" in result.output
+    assert "[1/13] Python runtime: OK" in result.output
+    assert "[7/13] packaged backend catalog: OK" in result.output
+    assert "[8/13] filelock compatibility:" in result.output
+    assert "[9/13] backend inventory: OK" in result.output
+    assert "[10/13] backend transaction recovery: OK" in result.output
+    assert "[13/13] relay gh.geekertao.top: OK" in result.output
     assert "0 FAIL, 0 ERR" in result.output
     assert "Self-check PASSED" in result.output
 
@@ -163,6 +164,7 @@ def test_self_check_help_discloses_bounded_network_behavior():
     normalized = " ".join(result.output.split())
 
     assert result.exit_code == 0
+    assert "isolated temporary home" in normalized
     assert "fixed 1 MiB Range" in normalized
     assert "5-second network timeout" in normalized
     assert "Response-header latency" in normalized
@@ -595,8 +597,19 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
                 "COMP_CWORD": "6",
             },
         )
+        busy_backend = runner.invoke(
+            cli,
+            [],
+            env={
+                "_CLI_COMPLETE": "bash_complete",
+                "COMP_WORDS": "cli --home %s backend use mi" % shlex.quote(home.as_posix()),
+                "COMP_CWORD": "5",
+            },
+        )
     assert busy.exit_code == 0
     assert busy.output.strip() == ""
+    assert busy_backend.exit_code == 0
+    assert busy_backend.output.strip() == ""
 
 
 @pytest.mark.parametrize("layout", ["locks-only", "locks-and-backends", "missing-directory"])
@@ -624,6 +637,17 @@ def test_installed_completion_rejects_partial_existing_layouts_without_repair(tm
 
     assert result.exit_code == 0
     assert result.output.strip() == ""
+    cached = CliRunner().invoke(
+        cli,
+        [],
+        env={
+            "_CLI_COMPLETE": "bash_complete",
+            "COMP_WORDS": "cli --home %s backend clean mi" % shlex.quote(home.as_posix()),
+            "COMP_CWORD": "5",
+        },
+    )
+    assert cached.exit_code == 0
+    assert cached.output.strip() == ""
     if layout != "missing-directory":
         assert not paths.lock_file.exists()
     else:

@@ -1,10 +1,17 @@
 import hashlib
+import json
 import os
 
 import pytest
 
 import jerryproxy.utils.fs as fs_module
-from jerryproxy.utils.fs import atomic_write_json, read_json, sha256_file
+from jerryproxy.utils.fs import (
+    MAXIMUM_JSON_BYTES,
+    MAXIMUM_JSON_NODES,
+    atomic_write_json,
+    read_json,
+    sha256_file,
+)
 
 
 def test_atomic_json_round_trip_uses_private_file(tmp_path):
@@ -51,6 +58,54 @@ def test_read_json_rejects_non_object_documents(tmp_path):
     path = tmp_path / "state.json"
     path.write_text("[]\n", encoding="ascii")
     with pytest.raises(ValueError, match="JSON object expected"):
+        read_json(path)
+
+
+@pytest.mark.parametrize(
+    "payload, message",
+    [
+        (b'{"name":"mihomo","name":"xray"}', "duplicate JSON key"),
+        (b'{"value":NaN}', "non-standard JSON constant"),
+        (b'{"value":Infinity}', "non-standard JSON constant"),
+        (b'{"value":1.5}', "floating-point JSON values"),
+        (b'{"value":123456789012345678901234567890123}', "JSON integer is too long"),
+    ],
+)
+def test_read_json_rejects_ambiguous_or_unbounded_values(tmp_path, payload, message):
+    path = tmp_path / "state.json"
+    path.write_bytes(payload)
+
+    with pytest.raises(ValueError, match=message):
+        read_json(path)
+
+
+def test_read_json_enforces_byte_limit_before_decoding(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_bytes(b" " * MAXIMUM_JSON_BYTES + b"{}")
+
+    with pytest.raises(ValueError, match="exceeds the safety limit"):
+        read_json(path)
+
+
+def test_read_json_rejects_invalid_utf8_and_excessive_nesting(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_bytes(b'{"value":"\xff"}')
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        read_json(path)
+
+    path.write_text('{"value":' + "[" * 17 + "0" + "]" * 17 + "}", encoding="ascii")
+    with pytest.raises(ValueError, match="nesting exceeds"):
+        read_json(path)
+
+
+def test_read_json_rejects_too_many_structural_values(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps({"values": [0] * MAXIMUM_JSON_NODES}),
+        encoding="ascii",
+    )
+
+    with pytest.raises(ValueError, match="contains too many values"):
         read_json(path)
 
 

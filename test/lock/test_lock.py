@@ -4,6 +4,7 @@ import os
 import pytest
 
 import jerryproxy.lock as lock_module
+from jerryproxy.backend.installation import InstallTransaction
 from jerryproxy.errors import JerryProxyBusyError
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.lock import JerryProxyOperationLock, filelock_status
@@ -53,6 +54,28 @@ def test_global_lock_is_released_when_owner_process_exits(tmp_path):
         assert (tmp_path / "locks" / "jerryproxy.lock").is_file()
 
 
+def test_lock_acquisition_recovers_an_interrupted_install(tmp_path):
+    paths = JerryProxyPaths(tmp_path)
+    paths.ensure()
+    transaction = InstallTransaction.prepare(
+        paths,
+        "xray",
+        "1.2.3",
+        {
+            "sha256": "a" * 64,
+            "size": 1,
+            "asset_name": "Xray-linux-64.zip",
+            "platform": "linux-amd64",
+        },
+    )
+    staging = transaction.begin_staging()
+    (staging / "partial").write_bytes(b"partial")
+
+    with JerryProxyOperationLock(paths):
+        assert not staging.exists()
+        assert not transaction.journal.exists()
+
+
 def test_different_homes_can_be_locked_independently(tmp_path):
     first = JerryProxyPaths(tmp_path / "first")
     second = JerryProxyPaths(tmp_path / "second")
@@ -61,6 +84,56 @@ def test_different_homes_can_be_locked_independently(tmp_path):
         with JerryProxyOperationLock(second):
             assert first.lock_file.is_file()
             assert second.lock_file.is_file()
+
+
+def test_noninitializing_lock_rejects_an_absent_home(tmp_path):
+    paths = JerryProxyPaths(tmp_path / "missing")
+
+    with pytest.raises(FileNotFoundError, match="no existing managed state"):
+        with JerryProxyOperationLock(paths, initialize=False):
+            pass
+
+    assert not paths.root.exists()
+
+
+@pytest.mark.parametrize("unsafe_lock", (False, True))
+def test_noninitializing_lock_rechecks_its_physical_lock_paths(tmp_path, monkeypatch, unsafe_lock):
+    paths = JerryProxyPaths(tmp_path / "home")
+    paths.ensure()
+    if unsafe_lock:
+        paths.lock_file.unlink()
+        paths.lock_file.mkdir()
+    else:
+        paths.locks.rename(tmp_path / "displaced-locks")
+    monkeypatch.setattr(paths, "_validate_existing_layout", lambda: True)
+
+    message = "safe operation lock path" if unsafe_lock else "existing operation lock"
+    with pytest.raises(FileNotFoundError, match=message):
+        with JerryProxyOperationLock(paths, initialize=False):
+            pass
+
+
+@pytest.mark.parametrize(
+    "layout_results,message",
+    (
+        ([True, False], "no existing managed state"),
+        ([True, True, False], "changed during transaction recovery"),
+    ),
+)
+def test_noninitializing_lock_rejects_layout_disappearance_at_each_locked_recheck(
+    tmp_path,
+    monkeypatch,
+    layout_results,
+    message,
+):
+    paths = JerryProxyPaths(tmp_path / "home")
+    paths.ensure()
+    results = iter(layout_results)
+    monkeypatch.setattr(paths, "_validate_existing_layout", lambda: next(results))
+
+    with pytest.raises(FileNotFoundError, match=message):
+        with JerryProxyOperationLock(paths, initialize=False):
+            pass
 
 
 def test_layout_failure_releases_acquired_filelock(tmp_path, monkeypatch):

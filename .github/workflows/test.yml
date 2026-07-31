@@ -142,7 +142,7 @@ jobs:
       - run: python -m pip install -e . -r requirements-test.txt
       - name: Run unit tests
         run: >-
-          python -m pytest test -sv -m unittest
+          python -m pytest test -sv -m "unittest and not windows_native"
           --junitxml=junit.xml -o junit_family=legacy
           --cov=jerryproxy --cov-report=term-missing --cov-report=xml
           --cov-fail-under=97
@@ -165,10 +165,47 @@ jobs:
             junit.xml
             coverage.xml
 
+  windows-hardening:
+    name: Windows native hardening
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e . -r requirements-test.txt
+      - name: Run native Windows hardening tests
+        run: >-
+          python -m pytest test -sv -m windows_native
+          --junitxml=windows-hardening-junit.xml -o junit_family=legacy
+          --cov=jerryproxy --cov-report=term-missing --cov-report=xml
+      - name: Upload native Windows coverage to Codecov
+        if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          disable_search: true
+          flags: python
+          name: windows-hardening-py3.11
+          fail_ci_if_error: true
+      - name: Upload native Windows test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-hardening-junit
+          if-no-files-found: error
+          path: |
+            windows-hardening-junit.xml
+            coverage.xml
+
   gate:
     name: Code test gate
     if: always()
-    needs: [repository-policy, lint, unit]
+    needs: [repository-policy, lint, unit, windows-hardening]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -176,7 +213,9 @@ jobs:
           POLICY_RESULT: ${{ needs.repository-policy.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          WINDOWS_HARDENING_RESULT: ${{ needs.windows-hardening.result }}
         run: |
           test "$POLICY_RESULT" = success
           test "$LINT_RESULT" = success
           test "$UNIT_RESULT" = success
+          test "$WINDOWS_HARDENING_RESULT" = success

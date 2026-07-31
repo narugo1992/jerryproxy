@@ -5,7 +5,7 @@ import pytest
 
 import jerryproxy.selfcheck as selfcheck_module
 from jerryproxy.backend.model import PlatformInfo
-from jerryproxy.errors import BackendCatalogError, JerryProxyBusyError, UnsupportedPlatformError
+from jerryproxy.errors import BackendCatalogError, IntegrityError, JerryProxyBusyError, UnsupportedPlatformError
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.lock import JerryProxyOperationLock, filelock_status
 from jerryproxy.selfcheck import CheckResult, ansi_color_enabled, build_checks, run_checks, run_self_check
@@ -30,9 +30,9 @@ def test_self_check_validates_an_empty_private_home(tmp_path, monkeypatch):
     assert exit_code == 0
     status = filelock_status()
     expected = (
-        "Summary: 12 OK, 0 WARN, 0 FAIL, 0 ERR"
+        "Summary: 13 OK, 0 WARN, 0 FAIL, 0 ERR"
         if status.level == "OK"
-        else "Summary: 11 OK, 1 WARN, 0 FAIL, 0 ERR"
+        else "Summary: 12 OK, 1 WARN, 0 FAIL, 0 ERR"
     )
     assert expected in lines
     assert lines[-1] in ("Self-check PASSED", "Self-check PASSED with warnings")
@@ -158,8 +158,110 @@ def test_self_check_reports_corrupt_active_inventory_without_stopping_other_chec
     )
 
     assert exit_code == 1
-    assert any("backend inventory: ERR" in line for line in lines)
+    assert any("backend inventory: FAIL" in line for line in lines)
+    assert any("IntegrityError" in line for line in lines)
     assert lines[-1] == "Self-check FAILED"
+
+
+def test_backend_inventory_check_keeps_unexpected_internal_failures_as_errors(tmp_path, monkeypatch):
+    class BrokenManager(object):
+        def __init__(self, paths):
+            self.paths = paths
+
+        def inventory(self):
+            raise RuntimeError("unexpected recovery failure")
+
+    monkeypatch.setattr(selfcheck_module, "BackendManager", BrokenManager)
+
+    result = dict(build_checks(JerryProxyPaths(tmp_path)))["backend inventory"]()
+
+    assert result == CheckResult.err("RuntimeError: unexpected recovery failure")
+
+
+def test_transaction_recovery_check_uses_an_isolated_home_and_exercises_real_recovery(tmp_path):
+    paths = JerryProxyPaths(tmp_path / "user-home")
+
+    result = dict(build_checks(paths))["backend transaction recovery"]()
+
+    assert result == CheckResult.ok("install and activation crash recovery converged")
+    assert not paths.root.exists()
+
+
+def test_transaction_recovery_check_fails_without_a_compatible_backend_platform(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        selfcheck_module,
+        "detect_platform",
+        lambda: PlatformInfo("unsupported", "architecture"),
+    )
+
+    result = dict(build_checks(JerryProxyPaths(tmp_path)))["backend transaction recovery"]()
+
+    assert result == CheckResult.fail("no compatible backend platform for recovery probe")
+
+
+def test_transaction_recovery_check_fails_when_install_evidence_is_retained(tmp_path, monkeypatch):
+    class RetainedInstallTransaction(object):
+        @classmethod
+        def prepare(cls, paths, *args, **kwargs):
+            del args, kwargs
+            return cls(paths.root)
+
+        def __init__(self, retained_path):
+            self.retained_path = retained_path
+
+        def begin_staging(self):
+            return self.retained_path
+
+    monkeypatch.setattr(selfcheck_module, "InstallTransaction", RetainedInstallTransaction)
+
+    result = dict(build_checks(JerryProxyPaths(tmp_path)))["backend transaction recovery"]()
+
+    assert result == CheckResult.fail("interrupted install transaction did not converge")
+
+
+def test_transaction_recovery_check_fails_when_activation_evidence_is_retained(tmp_path, monkeypatch):
+    class RetainedActivationTransaction(object):
+        @classmethod
+        def prepare(cls, paths, platform_info, name, version):
+            del platform_info, name, version
+            return cls(paths.backends)
+
+        def __init__(self, retained_path):
+            self.journal_path = retained_path
+
+    monkeypatch.setattr(selfcheck_module, "ActivationTransaction", RetainedActivationTransaction)
+
+    result = dict(build_checks(JerryProxyPaths(tmp_path)))["backend transaction recovery"]()
+
+    assert result == CheckResult.fail("interrupted activation transaction did not converge")
+
+
+def test_transaction_recovery_check_maps_integrity_failures_to_fail(tmp_path, monkeypatch):
+    class BrokenInstallTransaction(object):
+        @classmethod
+        def prepare(cls, *args, **kwargs):
+            del args, kwargs
+            raise IntegrityError("simulated retained recovery evidence")
+
+    monkeypatch.setattr(selfcheck_module, "InstallTransaction", BrokenInstallTransaction)
+
+    result = dict(build_checks(JerryProxyPaths(tmp_path)))["backend transaction recovery"]()
+
+    assert result == CheckResult.fail("IntegrityError: simulated retained recovery evidence")
+
+
+def test_transaction_recovery_check_maps_operational_failures_to_error(tmp_path, monkeypatch):
+    class BrokenInstallTransaction(object):
+        @classmethod
+        def prepare(cls, *args, **kwargs):
+            del args, kwargs
+            raise OSError("simulated temporary storage failure")
+
+    monkeypatch.setattr(selfcheck_module, "InstallTransaction", BrokenInstallTransaction)
+
+    result = dict(build_checks(JerryProxyPaths(tmp_path)))["backend transaction recovery"]()
+
+    assert result == CheckResult.err("OSError: simulated temporary storage failure")
 
 
 def test_runtime_check_reports_old_python_and_missing_package_version(tmp_path, monkeypatch):
@@ -537,9 +639,9 @@ def test_relay_warnings_keep_the_full_self_check_exit_code_zero(tmp_path):
     assert exit_code == 0
     status = filelock_status()
     expected = (
-        "Summary: 9 OK, 3 WARN, 0 FAIL, 0 ERR"
+        "Summary: 10 OK, 3 WARN, 0 FAIL, 0 ERR"
         if status.level == "OK"
-        else "Summary: 8 OK, 4 WARN, 0 FAIL, 0 ERR"
+        else "Summary: 9 OK, 4 WARN, 0 FAIL, 0 ERR"
     )
     assert expected in lines
     assert lines[-1] == "Self-check PASSED with warnings"

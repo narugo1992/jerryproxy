@@ -1,8 +1,8 @@
 """Backend download, immutable installation, activation, and rollback."""
 
 import errno
+import hashlib
 import os
-import shutil
 import subprocess
 import uuid
 from contextlib import contextmanager
@@ -10,26 +10,36 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..errors import (
+    ArchiveError,
     BackendActiveError,
     BackendAlreadyInstalledError,
     BackendNotInstalledError,
     CleanupScopeError,
+    DurabilityError,
     IntegrityError,
     RemovalCleanupError,
-    UnsupportedBackendError,
     UnsupportedPlatformError,
 )
 from ..home import JerryProxyPaths, is_path_alias
 from ..lock import JerryProxyOperationLock
-from ..utils.fs import atomic_write_json, ensure_private_directory, read_json, sha256_file
+from ..utils.fs import ensure_private_directory, sha256_file
 from . import removal as removal_module
-from .archive import extract_archive, find_executable
+from .activation import ActivationTransaction, recover_use_transactions
+from .anchored import AnchoredDirectory
+from .archive import ArchiveLimits, PinnedArchive
 from .catalog import BackendCatalog
 from .download import AssetDownloader
-from .model import ActiveBackend, BackendInventory, CleanupResult, InstalledBackend, RemovalResult
+from .durable import flush_directory
+from .installation import InstallTransaction, recover_install_transactions
+from .model import BackendInventory, CleanupResult, RemovalResult
 from .platform import detect_platform
 from .registry import get_backend, iter_backend_platforms, iter_backends, version_sort_key
 from .relay import build_download_sources
+from .state import (
+    load_active_state,
+    load_installed_manifest,
+    validate_staged_installed_manifest_value,
+)
 
 
 class BackendManager(object):
@@ -42,13 +52,25 @@ class BackendManager(object):
         catalog=None,
         downloader=None,
         probe_runner=None,
+        archive_limits=None,
     ):
-        # type: (JerryProxyPaths, Optional[PlatformInfo], BackendCatalog, AssetDownloader, Callable) -> None
+        # type: (JerryProxyPaths, Optional[PlatformInfo], BackendCatalog, AssetDownloader, Callable, Optional[ArchiveLimits]) -> None
         self.paths = paths
         self.platform_info = platform_info or detect_platform()
         self._catalog = catalog
         self.downloader = downloader or AssetDownloader()
         self.probe_runner = probe_runner or self._probe_installed
+        default_archive_limits = ArchiveLimits()
+        selected_archive_limits = archive_limits or default_archive_limits
+        if not isinstance(selected_archive_limits, ArchiveLimits):
+            raise TypeError("archive_limits must be an ArchiveLimits value")
+        for name, ceiling in default_archive_limits.__dict__.items():
+            value = getattr(selected_archive_limits, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError("%s must be a positive integer" % name)
+            if value > ceiling:
+                raise ValueError("archive limit %s cannot exceed the built-in safety budget" % name)
+        self.archive_limits = selected_archive_limits
 
     @property
     def catalog(self):  # type: () -> BackendCatalog
@@ -66,7 +88,11 @@ class BackendManager(object):
             yield False
             return
         try:
-            with JerryProxyOperationLock(self.paths, initialize=False):
+            with JerryProxyOperationLock(
+                self.paths,
+                initialize=False,
+                platform_info=self.platform_info,
+            ):
                 yield True
         except FileNotFoundError as error:
             # A concurrent external layout change can invalidate the pre-lock snapshot.
@@ -105,7 +131,7 @@ class BackendManager(object):
             relay_pattern=relay_pattern,
         )
         normalized_version = asset.version
-        with JerryProxyOperationLock(self.paths):
+        with JerryProxyOperationLock(self.paths, platform_info=self.platform_info):
             download_directory = self.paths.downloads / spec.name / normalized_version
             self._reject_backend_alias(self.paths.downloads, spec.name, download_directory)
             ensure_private_directory(download_directory)
@@ -124,6 +150,7 @@ class BackendManager(object):
                 normalized_version,
                 archive,
                 expected_sha256=asset.sha256,
+                expected_size=asset.size,
                 asset_name=asset.name,
                 source_url=asset.url,
                 asset_platform=asset.platform,
@@ -163,19 +190,21 @@ class BackendManager(object):
         version,
         archive,
         expected_sha256,
+        expected_size=None,
         asset_name=None,
         source_url=None,
         asset_platform=None,
         archive_executable=None,
         activate=False,
     ):
-        # type: (str, str, Path, str, Optional[str], Optional[str], Optional[str], Optional[str], bool) -> InstalledBackend
-        with JerryProxyOperationLock(self.paths):
+        # type: (str, str, Path, str, Optional[int], Optional[str], Optional[str], Optional[str], Optional[str], bool) -> InstalledBackend
+        with JerryProxyOperationLock(self.paths, platform_info=self.platform_info):
             installed = self._install_from_archive_locked(
                 name,
                 version,
                 archive,
                 expected_sha256,
+                expected_size=expected_size,
                 asset_name=asset_name,
                 source_url=source_url,
                 asset_platform=asset_platform,
@@ -191,6 +220,7 @@ class BackendManager(object):
         version,
         archive,
         expected_sha256,
+        expected_size=None,
         asset_name=None,
         source_url=None,
         asset_platform=None,
@@ -200,41 +230,44 @@ class BackendManager(object):
         normalized_version = spec.normalize_version(version)
         selected_platform = asset_platform or self._default_asset_platform(spec.name)
         archive = Path(archive)
-        actual_sha256 = sha256_file(archive)
-        if actual_sha256.lower() != expected_sha256.lower():
-            raise IntegrityError(
-                "backend asset SHA-256 mismatch: expected %s, got %s" % (expected_sha256.lower(), actual_sha256.lower())
-            )
-
         target = self.paths.backends / spec.name / normalized_version
         self._reject_backend_alias(self.paths.backends, spec.name, target)
-        if target.exists():
-            installed = self._load_installed_manifest(target / "manifest.json")
-            if installed.sha256 != actual_sha256:
-                raise BackendAlreadyInstalledError(
-                    "%s %s already exists with a different digest" % (spec.name, normalized_version)
+        with PinnedArchive(archive, limits=self.archive_limits) as source:
+            actual_sha256 = source.sha256
+            if actual_sha256.lower() != expected_sha256.lower():
+                raise IntegrityError(
+                    "backend asset SHA-256 mismatch: expected %s, got %s"
+                    % (expected_sha256.lower(), actual_sha256.lower())
                 )
-            self._verify_installed_executable(installed)
-            self.probe_runner(installed)
-        else:
-            installed = self._install_new_version(
-                spec,
-                normalized_version,
-                archive,
-                actual_sha256,
-                asset_name or archive.name,
-                source_url,
-                selected_platform,
-                archive_executable,
-                target,
-            )
+            if expected_size is not None and source.size != expected_size:
+                raise IntegrityError("backend asset size mismatch: expected %d, got %d" % (expected_size, source.size))
+            if target.exists():
+                installed = self._load_installed_manifest(target / "manifest.json")
+                if installed.sha256 != actual_sha256:
+                    raise BackendAlreadyInstalledError(
+                        "%s %s already exists with a different digest" % (spec.name, normalized_version)
+                    )
+                self._verify_installed_executable(installed)
+                self.probe_runner(installed)
+            else:
+                installed = self._install_new_version(
+                    spec,
+                    normalized_version,
+                    source,
+                    actual_sha256,
+                    asset_name or archive.name,
+                    source_url,
+                    selected_platform,
+                    archive_executable,
+                    target,
+                )
         return installed
 
     def _install_new_version(
         self,
         spec,
         version,
-        archive,
+        source,
         sha256,
         asset_name,
         source_url,
@@ -242,41 +275,117 @@ class BackendManager(object):
         archive_executable,
         target,
     ):
-        # type: (BackendSpec, str, Path, str, str, Optional[str], str, Optional[str], Path) -> InstalledBackend
-        ensure_private_directory(target.parent)
-        staging = target.parent / (".%s.tmp-%s" % (version, uuid.uuid4().hex))
-        ensure_private_directory(staging)
+        # type: (BackendSpec, str, PinnedArchive, str, str, Optional[str], str, Optional[str], Path) -> InstalledBackend
+        artifact = {
+            "sha256": sha256,
+            "size": source.size,
+            "asset_name": asset_name,
+            "platform": asset_platform,
+        }
+        transaction = InstallTransaction.prepare(self.paths, spec.name, version, artifact)
         try:
+            staging = transaction.begin_staging()
             executable_name = spec.executable_filename(self.platform_info)
             source_executable_name = archive_executable or executable_name
-            extract_archive(archive, staging, source_executable_name)
-            executable = find_executable(staging, source_executable_name)
-            if executable.name != executable_name:
-                normalized_executable = executable.with_name(executable_name)
-                os.replace(str(executable), str(normalized_executable))
-                executable = normalized_executable
-            relative_executable = executable.relative_to(staging)
-            manifest_value = {
-                "name": spec.name,
-                "version": version,
-                "platform": asset_platform,
-                "asset_name": asset_name,
-                "sha256": sha256,
-                "executable_sha256": sha256_file(executable),
-                "source_url": source_url,
-                "catalog_generated_at": self.catalog.generated_at,
-                "executable": str(relative_executable).replace(os.sep, "/"),
-                "installed_at": datetime.now(timezone.utc).isoformat(),
-            }
-            staging_manifest = staging / "manifest.json"
-            atomic_write_json(staging_manifest, manifest_value)
-            staged = InstalledBackend.from_manifest(staging_manifest, manifest_value)
-            self._verify_installed_executable(staged)
-            self.probe_runner(staged)
-            os.replace(str(staging), str(target))
-        finally:
-            if staging.exists():
-                shutil.rmtree(str(staging))
+            with AnchoredDirectory(
+                staging,
+                expected_identity=transaction.value["tree_identity"],
+            ) as staging_anchor:
+                source.extract(
+                    staging,
+                    source_executable_name,
+                    output_tree=staging_anchor,
+                )
+                executable_parts = staging_anchor.prepare_executable(
+                    source_executable_name,
+                    executable_name,
+                )
+                executable = staging.joinpath(*executable_parts)
+                executable_size, executable_digest, executable_identity = staging_anchor.file_evidence(
+                    executable_parts,
+                    flush=True,
+                )
+                executable_value = "/".join(executable_parts)
+                manifest_value = {
+                    "name": spec.name,
+                    "version": version,
+                    "platform": asset_platform,
+                    "asset_name": asset_name,
+                    "sha256": sha256,
+                    "executable_sha256": executable_digest,
+                    "source_url": source_url,
+                    "catalog_generated_at": self.catalog.generated_at,
+                    "executable": executable_value,
+                    "installed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                manifest_parts = ("manifest.json",)
+                manifest_temporary_parts = (".manifest.json.tmp-%s" % uuid.uuid4().hex,)
+                manifest_payload, manifest_identity = staging_anchor.write_json(
+                    manifest_parts,
+                    manifest_value,
+                    manifest_temporary_parts,
+                )
+                staged = validate_staged_installed_manifest_value(
+                    self.paths,
+                    staging / "manifest.json",
+                    target / "manifest.json",
+                    manifest_value,
+                )
+                if staged.platform not in self.platform_info.compatible_asset_keys:
+                    raise IntegrityError(
+                        "%s %s targets %s, not %s"
+                        % (staged.name, staged.version, staged.platform, self.platform_info.asset_key)
+                    )
+                if staged.executable != executable or staged.executable_sha256 != executable_digest:
+                    raise IntegrityError("staged backend executable evidence does not match its manifest")
+                staging_anchor.assert_bound(transaction.value["tree_identity"])
+                probe_size, probe_digest, probe_identity = staging_anchor.file_evidence(
+                    executable_parts,
+                    expected_identity=executable_identity,
+                )
+                if (
+                    probe_identity != executable_identity
+                    or probe_size != executable_size
+                    or probe_digest != executable_digest
+                ):
+                    raise IntegrityError("staged backend executable changed before probe")
+                self.probe_runner(staged)
+                staging_anchor.assert_bound(transaction.value["tree_identity"])
+                final_size, final_digest, final_identity = staging_anchor.file_evidence(
+                    executable_parts,
+                    flush=True,
+                )
+                if (
+                    final_identity != executable_identity
+                    or final_size != executable_size
+                    or final_digest != executable_digest
+                ):
+                    raise IntegrityError("staged backend executable changed during validation")
+                _manifest_size, manifest_digest, final_manifest_identity = staging_anchor.file_evidence(
+                    manifest_parts,
+                    flush=True,
+                )
+                if (
+                    final_manifest_identity != manifest_identity
+                    or manifest_digest != hashlib.sha256(manifest_payload).hexdigest()
+                ):
+                    raise IntegrityError("staged backend manifest changed during validation")
+                publication = {
+                    "manifest_sha256": manifest_digest,
+                    "executable": executable_value,
+                    "executable_sha256": executable_digest,
+                    "executable_size": executable_size,
+                }
+                transaction.mark_validated(publication, staging_anchor=staging_anchor)
+                transaction.commit()
+        except (ArchiveError, DurabilityError, IntegrityError, OSError) as error:
+            # Any ordinary failure after journal publication uses the restart recovery protocol immediately.
+            try:
+                recover_install_transactions(self.paths)
+            except (DurabilityError, IntegrityError, OSError) as recovery_error:
+                # Unprovable recovery retains its authoritative evidence and supersedes the operation failure.
+                raise recovery_error from error
+            raise
         return self._load_installed_manifest(target / "manifest.json")
 
     def list_installed(self, name=None):  # type: (Optional[str]) -> List[InstalledBackend]
@@ -314,9 +423,7 @@ class BackendManager(object):
         normalized_version = spec.normalize_version(version)
         with self._read_operation() as has_state:
             if not has_state:
-                raise BackendNotInstalledError(
-                    "%s %s is not installed" % (spec.name, normalized_version)
-                )
+                raise BackendNotInstalledError("%s %s is not installed" % (spec.name, normalized_version))
             return self._get_installed_locked(spec.name, normalized_version)
 
     def _get_installed_locked(self, name, version):
@@ -332,8 +439,6 @@ class BackendManager(object):
                 "%s %s was installed for %s, not %s"
                 % (spec.name, normalized_version, installed.platform, self.platform_info.asset_key)
             )
-        if not installed.executable.is_file():
-            raise BackendNotInstalledError("%s %s executable is missing" % (spec.name, normalized_version))
         return installed
 
     def verify(self, name=None, version=None):
@@ -347,9 +452,7 @@ class BackendManager(object):
         with self._read_operation() as has_state:
             if not has_state:
                 if normalized_version is not None:
-                    raise BackendNotInstalledError(
-                        "%s %s is not installed" % (spec.name, normalized_version)
-                    )
+                    raise BackendNotInstalledError("%s %s is not installed" % (spec.name, normalized_version))
                 return []
             if version is None:
                 installed = self._list_installed_locked(name=name)
@@ -369,9 +472,7 @@ class BackendManager(object):
             if not has_state:
                 if normalized_version is None:
                     raise BackendNotInstalledError("%s has no current version" % spec.name)
-                raise BackendNotInstalledError(
-                    "%s %s is not installed" % (spec.name, normalized_version)
-                )
+                raise BackendNotInstalledError("%s %s is not installed" % (spec.name, normalized_version))
             if version is None:
                 current = self._current_locked(spec.name)
                 if current is None:
@@ -386,77 +487,33 @@ class BackendManager(object):
     def use(self, name, version):  # type: (str, str) -> ActiveBackend
         """Activate one exact already installed backend version."""
 
-        with JerryProxyOperationLock(self.paths):
+        with JerryProxyOperationLock(self.paths, platform_info=self.platform_info):
             return self._switch_locked(name, version)
 
     def _switch_locked(self, name, version):
         spec = get_backend(name)
-        link = self.paths.bin / spec.executable_filename(self.platform_info)
-        active_manifest = self.paths.active / ("%s.json" % spec.name)
         installed = self._get_installed_locked(spec.name, version)
         self._verify_installed_executable(installed)
         self.probe_runner(installed)
-        link_backup = link.with_name(".%s.%s.rollback" % (link.name, uuid.uuid4().hex))
-        manifest_backup = active_manifest.with_name(".%s.%s.rollback" % (active_manifest.name, uuid.uuid4().hex))
-        had_link = os.path.lexists(str(link))
-        had_manifest = active_manifest.is_file()
-        discard_backups = True
+        current = self._current_locked(spec.name)
+        if current is not None and current.version == installed.version:
+            return current
         try:
-            if had_link:
-                self._backup_path(link, link_backup)
-            if had_manifest:
-                shutil.copy2(str(active_manifest), str(manifest_backup))
-            value = {
-                "name": spec.name,
-                "version": installed.version,
-                "executable": str(installed.executable.relative_to(self.paths.root)).replace(os.sep, "/"),
-                "link": str(link.relative_to(self.paths.root)).replace(os.sep, "/"),
-                "activated_at": datetime.now(timezone.utc).isoformat(),
-            }
+            transaction = ActivationTransaction.prepare(
+                self.paths,
+                self.platform_info,
+                spec.name,
+                installed.version,
+            )
+            return transaction.execute()
+        except (DurabilityError, IntegrityError, OSError) as error:
+            # Activation failures use the persisted restart protocol while the lock is still held.
             try:
-                link_mode = self._replace_active_link(installed.executable, link)
-                value["link_mode"] = link_mode
-                atomic_write_json(active_manifest, value)
-            except OSError:
-                # Filesystem failures must restore the previously active command and manifest.
-                discard_backups = False
-                self._restore_path(link, link_backup, had_link)
-                self._restore_path(active_manifest, manifest_backup, had_manifest)
-                discard_backups = True
-                raise
-        finally:
-            if discard_backups:
-                self._remove_path(link_backup)
-                self._remove_path(manifest_backup)
-        return ActiveBackend(
-            name=spec.name,
-            version=installed.version,
-            executable=installed.executable,
-            link=link,
-            link_mode=link_mode,
-        )
-
-    def _replace_active_link(self, executable, link):  # type: (Path, Path) -> str
-        ensure_private_directory(link.parent)
-        temporary = link.with_name(".%s.%s.tmp" % (link.name, os.getpid()))
-        if os.path.lexists(str(temporary)):
-            temporary.unlink()
-        relative_target = os.path.relpath(str(executable), str(link.parent))
-        link_mode = "symlink"
-        try:
-            try:
-                os.symlink(relative_target, str(temporary), target_is_directory=False)
-            except (OSError, NotImplementedError):
-                if os.name != "nt":
-                    raise
-                # Windows commonly lacks symlink privilege; record an explicit copy fallback.
-                link_mode = "copy"
-                shutil.copy2(str(executable), str(temporary))
-            os.replace(str(temporary), str(link))
-        finally:
-            if os.path.lexists(str(temporary)):
-                temporary.unlink()
-        return link_mode
+                recover_use_transactions(self.paths, self.platform_info)
+            except (DurabilityError, IntegrityError, OSError) as recovery_error:
+                # Unprovable recovery retains its journal and supersedes the operation failure.
+                raise recovery_error from error
+            raise
 
     def current(self, name):  # type: (str) -> Optional[ActiveBackend]
         spec = get_backend(name)
@@ -466,49 +523,8 @@ class BackendManager(object):
             return self._current_locked(spec.name)
 
     def _current_locked(self, name):
-        spec = get_backend(name)
-        manifest = self.paths.active / ("%s.json" % spec.name)
-        if not manifest.is_file():
-            return None
-        value = read_json(manifest)
-        required = ("name", "version", "executable", "link", "link_mode")
-        if any(not isinstance(value.get(key), str) or not value[key] for key in required):
-            raise BackendNotInstalledError("invalid active backend manifest: %s" % manifest)
-        if value["name"] != spec.name:
-            raise BackendNotInstalledError("active backend manifest has the wrong backend name: %s" % manifest)
-        try:
-            version = spec.normalize_version(value["version"])
-        except ValueError:
-            # BackendSpec rejects malformed versions read from the active manifest.
-            raise BackendNotInstalledError("active backend manifest has an invalid version: %s" % manifest)
-        if version != value["version"] or value["link_mode"] not in ("symlink", "copy"):
-            raise BackendNotInstalledError("invalid active backend manifest: %s" % manifest)
-        executable_path = self._safe_relative_path(value["executable"], manifest, "executable")
-        link_path = self._safe_relative_path(value["link"], manifest, "link")
-        try:
-            installed = self._get_installed_locked(spec.name, version)
-        except BackendNotInstalledError:
-            # Active state may reference an install that is missing or invalid.
-            raise BackendNotInstalledError("active %s backend is incomplete" % spec.name)
-        expected_link = self.paths.bin / spec.executable_filename(self.platform_info)
-        if executable_path != installed.executable or link_path != expected_link:
-            raise BackendNotInstalledError("active backend manifest paths do not match %s %s" % (spec.name, version))
-        if not os.path.lexists(str(link_path)):
-            raise BackendNotInstalledError("active %s backend is incomplete" % spec.name)
-        if value["link_mode"] == "symlink":
-            if not link_path.is_symlink() or link_path.resolve() != installed.executable.resolve():
-                raise BackendNotInstalledError("active %s backend link is invalid" % spec.name)
-        elif link_path.is_symlink() or not link_path.is_file():
-            raise BackendNotInstalledError("active %s backend copy is invalid" % spec.name)
-        elif sha256_file(link_path) != installed.executable_sha256:
-            raise BackendNotInstalledError("active %s backend copy failed integrity verification" % spec.name)
-        return ActiveBackend(
-            name=spec.name,
-            version=version,
-            executable=installed.executable,
-            link=link_path,
-            link_mode=str(value["link_mode"]),
-        )
+        state = load_active_state(self.paths, name, self.platform_info)
+        return None if state is None else state[0]
 
     def list_active(self):  # type: () -> List[ActiveBackend]
         with self._read_operation() as has_state:
@@ -548,15 +564,14 @@ class BackendManager(object):
 
         spec = get_backend(name)
         normalized_version = spec.normalize_version(version)
-        with JerryProxyOperationLock(self.paths):
+        with JerryProxyOperationLock(self.paths, platform_info=self.platform_info):
             cleanup_targets = self._download_cleanup_targets(spec.name, normalized_version) if cache else []
             installed = self._get_installed_locked(spec.name, normalized_version)
             active = self._current_locked(spec.name)
             if active is not None and active.version == installed.version:
                 if not deactivate:
                     raise BackendActiveError(
-                        "%s %s is current; use another version or pass --deactivate"
-                        % (spec.name, installed.version)
+                        "%s %s is current; use another version or pass --deactivate" % (spec.name, installed.version)
                     )
             cleanup = self._remove_transaction_locked(
                 (installed,),
@@ -570,7 +585,7 @@ class BackendManager(object):
         """Uninstall every version of one backend and deactivate it."""
 
         spec = get_backend(name)
-        with JerryProxyOperationLock(self.paths):
+        with JerryProxyOperationLock(self.paths, platform_info=self.platform_info):
             cleanup_targets = self._download_cleanup_targets(spec.name, None) if cache else []
             installed = self._list_installed_locked(spec.name)
             active = self._current_locked(spec.name)
@@ -600,7 +615,7 @@ class BackendManager(object):
             if version is not None:
                 normalized_version = spec.normalize_version(version)
 
-        with JerryProxyOperationLock(self.paths):
+        with JerryProxyOperationLock(self.paths, platform_info=self.platform_info):
             targets = []
             for area in selected_areas:
                 if area == "downloads":
@@ -681,7 +696,11 @@ class BackendManager(object):
             cleanup_size += measured_size
 
         transaction = self.paths.runtimes / (".remove-%s" % uuid.uuid4().hex)
-        ensure_private_directory(transaction)
+        try:
+            with AnchoredDirectory(self.paths.runtimes) as runtimes:
+                transaction_identity = runtimes.create_directory((transaction.name,))
+        except ArchiveError as error:
+            raise IntegrityError("unable to create removal transaction directory") from error
         removal_module._validate_removal_tree(
             self.paths.runtimes,
             transaction,
@@ -703,23 +722,39 @@ class BackendManager(object):
             )
 
         if not sources:
-            transaction.rmdir()
+            if not removal_module._secure_remove_empty_directory(
+                self.paths.runtimes,
+                transaction,
+                IntegrityError,
+                expected_identity=transaction_identity,
+            ):
+                raise IntegrityError("removal transaction disappeared before disposal: %s" % transaction)
+            flush_directory(transaction.parent)
             return CleanupResult(
                 ("downloads",) if downloads else (),
                 0,
                 0,
             )
 
-        moves = [
-            removal_module._removal_move(self.paths, source, destination, kind)
-            for source, destination, kind in sources
-        ]
-        removal_module._write_removal_journal(transaction, moves)
-
-        moved = []
-        backend_root = installed[0].manifest.parent.parent if installed else None
         try:
+            moves = [
+                removal_module._removal_move(self.paths, source, destination, kind)
+                for source, destination, kind in sources
+            ]
+            journal_value, journal_identity = removal_module._write_removal_journal(
+                transaction,
+                moves,
+            )
+            removal_record = removal_module._preflight_expected_removal_record(
+                self.paths,
+                transaction,
+                journal_value,
+                journal_identity,
+                platform_info=self.platform_info,
+            )
+            backend_root = installed[0].manifest.parent.parent if installed else None
             for (source, destination, kind), move in zip(sources, moves):
+                removal_module._require_removal_authority(removal_record)
                 removal_module._validate_chain(
                     self.paths.runtimes,
                     destination.parent,
@@ -752,8 +787,15 @@ class BackendManager(object):
                         IntegrityError,
                     )
                     error_type = IntegrityError
-                os.replace(str(source), str(destination))
-                moved.append(move)
+                removal_module._move_no_replace(
+                    self.paths,
+                    source,
+                    destination,
+                    move["identity"],
+                    error_type=error_type,
+                    description="removal staging",
+                )
+                removal_module._require_removal_authority(removal_record)
                 if kind == "download":
                     self._validate_cleanup_chain(self.paths.downloads, source)
                 elif kind == "installed":
@@ -767,21 +809,44 @@ class BackendManager(object):
                     error_type,
                 )
             if backend_root is not None:
+                removal_module._require_removal_authority(removal_record)
                 self._remove_empty_directory(backend_root)
-            removal_module._write_removal_journal(transaction, moves, phase="committed")
-        except (OSError, CleanupScopeError, IntegrityError):
-            # A staging failure restores every path already moved into quarantine.
-            removal_module._rollback_removal_transaction(
+            removal_module._require_removal_authority(removal_record)
+            journal_value, journal_identity = removal_module._write_removal_journal(
+                transaction,
+                moves,
+                phase="committed",
+                expected_transaction_identity=removal_record.transaction_identity,
+                expected_journal_identity=removal_record.journal_identity,
+            )
+            removal_record = removal_module._preflight_expected_removal_record(
                 self.paths,
                 transaction,
-                moved,
-                replace=os.replace,
+                journal_value,
+                journal_identity,
+                platform_info=self.platform_info,
             )
-            removal_module._discard_rolled_back_transaction(self.paths, transaction)
+        except (DurabilityError, OSError, CleanupScopeError, IntegrityError) as error:
+            # Disk-visible authority, rather than in-memory progress, chooses recovery direction.
+            if isinstance(error, removal_module._RemovalAuthorityError):
+                raise
+            try:
+                removal_module._recover_removal_transactions(
+                    self.paths,
+                    platform_info=self.platform_info,
+                )
+            except (DurabilityError, OSError, CleanupScopeError, IntegrityError, RemovalCleanupError) as recovery_error:
+                # Unprovable recovery retains its journal and supersedes the operation failure.
+                raise recovery_error from error
             raise
 
         try:
-            removal_module._dispose_removal_transaction(self.paths, transaction)
+            removal_module._dispose_removal_transaction(
+                self.paths,
+                transaction,
+                platform_info=self.platform_info,
+                record=removal_record,
+            )
         except OSError as error:
             # Public state is already atomically absent; retain private evidence for explicit cleanup.
             raise RemovalCleanupError(
@@ -816,9 +881,7 @@ class BackendManager(object):
         current = target
         while True:
             if is_path_alias(current):
-                raise CleanupScopeError(
-                    "refusing cleanup through managed symlink or Windows path alias: %s" % current
-                )
+                raise CleanupScopeError("refusing cleanup through managed symlink or Windows path alias: %s" % current)
             if current == root:
                 return
             if current == self.paths.root or current.parent == current:
@@ -847,6 +910,7 @@ class BackendManager(object):
             reclaimed += removal_module._secure_path_size(root, target, CleanupScopeError)
             self._validate_cleanup_chain(root, target)
             removal_module._secure_remove_tree(root, target, CleanupScopeError)
+            flush_directory(target.parent)
             removed += 1
         return CleanupResult(selected_areas, removed, reclaimed)
 
@@ -854,6 +918,7 @@ class BackendManager(object):
     def _remove_empty_directory(path):  # type: (Path) -> bool
         try:
             path.rmdir()
+            flush_directory(path.parent)
             return True
         except FileNotFoundError:
             # Another cleanup path may already have removed this empty parent.
@@ -875,73 +940,10 @@ class BackendManager(object):
     def _reject_backend_alias(area, name, target):  # type: (Path, str, Path) -> None
         backend_root = area / name
         if is_path_alias(backend_root) or is_path_alias(target):
-            raise IntegrityError(
-                "managed backend path must not be a symlink or Windows path alias: %s" % target
-            )
-
-    @staticmethod
-    def _backup_path(source, backup):  # type: (Path, Path) -> None
-        if source.is_symlink():
-            os.symlink(os.readlink(str(source)), str(backup), target_is_directory=False)
-        else:
-            shutil.copy2(str(source), str(backup))
-
-    @staticmethod
-    def _restore_path(path, backup, existed):  # type: (Path, Path, bool) -> None
-        if existed:
-            os.replace(str(backup), str(path))
-        elif os.path.lexists(str(path)):
-            path.unlink()
-
-    @staticmethod
-    def _remove_path(path):  # type: (Path) -> None
-        if os.path.lexists(str(path)):
-            path.unlink()
+            raise IntegrityError("managed backend path must not be a symlink or Windows path alias: %s" % target)
 
     def _load_installed_manifest(self, manifest):  # type: (Path) -> InstalledBackend
-        manifest = Path(manifest)
-        value = read_json(manifest)
-        required = (
-            "name",
-            "version",
-            "platform",
-            "asset_name",
-            "sha256",
-            "executable_sha256",
-            "executable",
-        )
-        if any(not isinstance(value.get(key), str) or not value[key] for key in required):
-            raise BackendNotInstalledError("invalid installed backend manifest: %s" % manifest)
-        try:
-            spec = get_backend(value["name"])
-            normalized_version = spec.normalize_version(value["version"])
-        except (UnsupportedBackendError, ValueError):
-            # Installed manifest identity fields may contain an unknown backend or invalid version.
-            raise BackendNotInstalledError("invalid installed backend identity: %s" % manifest)
-        expected_manifest = self.paths.backends / spec.name / normalized_version / "manifest.json"
-        if value["version"] != normalized_version or manifest.absolute() != expected_manifest.absolute():
-            raise BackendNotInstalledError("installed backend manifest does not match its directory: %s" % manifest)
-        try:
-            manifest.resolve().relative_to(self.paths.backends.resolve())
-        except ValueError:
-            # Path.relative_to rejects a resolved manifest outside the backend tree.
-            raise BackendNotInstalledError("installed backend manifest escapes the backend home: %s" % manifest)
-        supported_platforms = {item.asset_key for item in iter_backend_platforms(spec.name)}
-        if value["platform"] not in supported_platforms:
-            raise BackendNotInstalledError("invalid platform in installed backend manifest: %s" % manifest)
-        executable = Path(str(value["executable"]))
-        if executable.is_absolute() or ".." in executable.parts:
-            raise BackendNotInstalledError("unsafe executable path in installed backend manifest: %s" % manifest)
-        try:
-            (manifest.parent / executable).resolve().relative_to(manifest.parent.resolve())
-        except ValueError:
-            # Path.relative_to rejects a resolved executable outside its immutable version.
-            raise BackendNotInstalledError("installed backend executable escapes its version directory: %s" % manifest)
-        for digest_key in ("sha256", "executable_sha256"):
-            digest = str(value[digest_key]).lower()
-            if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
-                raise BackendNotInstalledError("invalid %s in installed backend manifest: %s" % (digest_key, manifest))
-        return InstalledBackend.from_manifest(manifest, value)
+        return load_installed_manifest(self.paths, manifest)
 
     def _verify_installed_executable(self, installed):  # type: (InstalledBackend) -> None
         if installed.platform not in self.platform_info.compatible_asset_keys:
@@ -949,18 +951,17 @@ class BackendManager(object):
                 "%s %s targets %s, not %s"
                 % (installed.name, installed.version, installed.platform, self.platform_info.asset_key)
             )
-        if not installed.executable.is_file():
-            raise IntegrityError("%s %s executable is missing" % (installed.name, installed.version))
-        actual = sha256_file(installed.executable)
+        try:
+            executable_parts = installed.executable.relative_to(self.paths.backends).parts
+            with AnchoredDirectory(self.paths.backends) as backends:
+                unused_size, actual, unused_identity = backends.file_evidence(executable_parts)
+        except (ArchiveError, OSError, ValueError) as error:
+            # Verification must not follow a replaced executable or managed ancestor.
+            raise IntegrityError(
+                "%s %s executable is missing or unsafe" % (installed.name, installed.version)
+            ) from error
         if actual != installed.executable_sha256:
             raise IntegrityError(
                 "%s %s executable SHA-256 mismatch: expected %s, got %s"
                 % (installed.name, installed.version, installed.executable_sha256, actual)
             )
-
-    def _safe_relative_path(self, value, manifest, field):
-        # type: (str, Path, str) -> Path
-        relative = Path(value)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise BackendNotInstalledError("unsafe %s path in active backend manifest: %s" % (field, manifest))
-        return self.paths.root / relative

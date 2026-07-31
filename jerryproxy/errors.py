@@ -38,6 +38,10 @@ class IntegrityError(JerryProxyError):
     """Raised when a downloaded or local asset fails integrity checks."""
 
 
+class DurabilityError(JerryProxyError):
+    """Raised when durable managed-state publication cannot be completed."""
+
+
 class ArchiveError(JerryProxyError):
     """Raised when an archive is unsupported or unsafe to extract."""
 

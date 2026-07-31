@@ -6,12 +6,16 @@ import platform
 import sys
 import tempfile
 import time
+import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
 
-from .backend import BackendCatalog, BackendManager, iter_backends
+from .backend import BackendCatalog, BackendManager, get_backend, iter_backend_platforms, iter_backends
+from .backend.activation import ActivationTransaction
+from .backend.installation import InstallTransaction
 from .backend.platform import detect_platform
 from .backend.relay import (
     RELAY_PROBE_BYTES,
@@ -22,7 +26,8 @@ from .backend.relay import (
     render_relay_url,
 )
 from .config.meta import __VERSION__
-from .errors import BackendCatalogError, JerryProxyError, UnsupportedPlatformError
+from .errors import BackendCatalogError, IntegrityError, JerryProxyError, UnsupportedPlatformError
+from .home import JerryProxyPaths
 from .lock import JerryProxyOperationLock, filelock_status
 
 _ANSI_BOLD = "\033[1m"
@@ -228,12 +233,98 @@ def _check_filelock():
 def _check_backend_inventory(paths):
     try:
         inventory = BackendManager(paths).inventory()
+    except IntegrityError as error:
+        # Retained managed-state evidence is a failed integrity requirement.
+        message = str(error).strip() or repr(error)
+        return CheckResult.fail("%s: %s" % (error.__class__.__name__, message))
     except (JerryProxyError, OSError, RuntimeError, ValueError) as error:
-        # Inventory reads can fail on invalid state or filesystem access.
+        # Operational and unexpected inventory failures are diagnostic errors.
         return _error_result(error)
     return CheckResult.ok(
         "%d installed; %d active" % (len(inventory.installed), len(inventory.active))
     )
+
+
+def _check_transaction_recovery():
+    try:
+        platform_info = detect_platform()
+        spec = get_backend("mihomo")
+        supported = {item.asset_key for item in iter_backend_platforms(spec.name)}
+        compatible = [key for key in platform_info.compatible_asset_keys if key in supported]
+        if not compatible:
+            return CheckResult.fail("no compatible backend platform for recovery probe")
+        asset_platform = compatible[0]
+        with tempfile.TemporaryDirectory(prefix="jerryproxy-recovery-self-check-") as temporary:
+            root = Path(temporary)
+            paths = JerryProxyPaths(root / ".jerryproxy")
+            archive = root / "backend.zip"
+            executable_name = spec.executable_filename(platform_info)
+            with zipfile.ZipFile(str(archive), "w", compression=zipfile.ZIP_STORED) as stream:
+                stream.writestr(executable_name, b"jerryproxy-recovery-self-check\n")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            manager = BackendManager(
+                paths,
+                platform_info=platform_info,
+                probe_runner=lambda installed: None,
+            )
+            installed = manager.install_from_archive(
+                spec.name,
+                "1.0.0",
+                archive,
+                expected_sha256=digest,
+                asset_name=archive.name,
+                asset_platform=asset_platform,
+                archive_executable=executable_name,
+                activate=False,
+            )
+
+            artifact = {
+                "sha256": "0" * 64,
+                "size": 1,
+                "asset_name": "interrupted.zip",
+                "platform": asset_platform,
+            }
+            with JerryProxyOperationLock(paths, platform_info=platform_info):
+                install_transaction = InstallTransaction.prepare(
+                    paths,
+                    spec.name,
+                    "2.0.0",
+                    artifact,
+                )
+                staging = install_transaction.begin_staging()
+            with JerryProxyOperationLock(paths, platform_info=platform_info):
+                pass
+            if staging.exists() or list(paths.runtimes.glob(".install-*")):
+                return CheckResult.fail("interrupted install transaction did not converge")
+
+            with JerryProxyOperationLock(paths, platform_info=platform_info):
+                activation_transaction = ActivationTransaction.prepare(
+                    paths,
+                    platform_info,
+                    spec.name,
+                    installed.version,
+                )
+                activation_journal = activation_transaction.journal_path
+            with JerryProxyOperationLock(paths, platform_info=platform_info):
+                pass
+            if (
+                activation_journal.exists()
+                or list(paths.runtimes.glob(".use-*"))
+                or list(paths.bin.glob(".*.use-*.candidate"))
+                or list(paths.active.glob(".*.use-*.candidate.json"))
+                or os.path.lexists(str(paths.bin / executable_name))
+                or (paths.active / ("%s.json" % spec.name)).exists()
+                or not installed.manifest.is_file()
+            ):
+                return CheckResult.fail("interrupted activation transaction did not converge")
+    except IntegrityError as error:
+        # Retained or inconsistent isolated recovery evidence is a failed safety requirement.
+        message = str(error).strip() or repr(error)
+        return CheckResult.fail("%s: %s" % (error.__class__.__name__, message))
+    except (JerryProxyError, OSError, RuntimeError, ValueError) as error:
+        # Platform, temporary-storage, archive, and operational probe failures are diagnostics.
+        return _error_result(error)
+    return CheckResult.ok("install and activation crash recovery converged")
 
 
 def _relay_warning(reason):
@@ -340,6 +431,7 @@ def build_checks(paths, relay_session_factory=None):
         ("packaged backend catalog", _check_backend_catalog),
         ("filelock compatibility", _check_filelock),
         ("backend inventory", lambda: _check_backend_inventory(paths)),
+        ("backend transaction recovery", _check_transaction_recovery),
     )
     return checks + tuple(
         (

@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from ..errors import DownloadError, DownloadPolicyError, DownloadTransportError, IntegrityError
 from ..utils.fs import ensure_private_directory
+from .durable import flush_descriptor, flush_directory
 
 
 def _write_status(message):  # type: (str) -> None
@@ -210,7 +211,7 @@ class AssetDownloader(object):
                             "stream",
                         )
                     stream.flush()
-                    os.fsync(stream.fileno())
+                    flush_descriptor(stream.fileno(), "backend download cache file")
             if expected_size is not None and total != expected_size:
                 raise IntegrityError("backend asset size mismatch: expected %d, got %d" % (expected_size, total))
             actual_sha256 = digest.hexdigest()
@@ -220,6 +221,7 @@ class AssetDownloader(object):
                     % (expected_sha256.lower(), actual_sha256.lower())
                 )
             os.replace(str(temporary), str(destination))
+            flush_directory(destination.parent)
             progress.set_description("Downloaded %s" % destination.name, refresh=True)
             return destination
         except (DownloadError, IntegrityError):

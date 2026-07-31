@@ -89,20 +89,6 @@ class InstalledBackend:
     platform: str
     executable_sha256: str
 
-    @classmethod
-    def from_manifest(cls, manifest, value):  # type: (Path, Dict[str, Any]) -> "InstalledBackend"
-        root = manifest.parent
-        return cls(
-            name=str(value["name"]),
-            version=str(value["version"]),
-            executable=root / str(value["executable"]),
-            manifest=manifest,
-            asset_name=str(value["asset_name"]),
-            sha256=str(value["sha256"]),
-            platform=str(value["platform"]),
-            executable_sha256=str(value["executable_sha256"]),
-        )
-
 
 @dataclass(frozen=True)
 class ActiveBackend:

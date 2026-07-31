@@ -31,7 +31,7 @@ InstalledBackend
 -----------------------------------------------------
 
 .. autoclass:: InstalledBackend
-   :members: name,version,executable,manifest,asset_name,sha256,platform,executable_sha256,from_manifest
+   :members: name,version,executable,manifest,asset_name,sha256,platform,executable_sha256
 
 
 ActiveBackend

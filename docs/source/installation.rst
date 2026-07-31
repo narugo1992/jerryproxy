@@ -29,7 +29,9 @@ Packaged CLI self-check
 
 ``jerryproxy self-check`` validates the runtime, platform mapping, private state
 tree, write access, backend registry, ``filelock`` compatibility, and one
-lock-consistent backend inventory. It then streams a fixed 1 MiB Range from a
+lock-consistent backend inventory. It also exercises install and activation
+crash recovery in an isolated temporary JerryProxy home without changing the
+configured home. It then streams a fixed 1 MiB Range from a
 pinned public Xray release through each of the three built-in relays. Each relay
 request has a five-second network timeout. The check requires an HTTPS redirect
 chain, HTTP 206, the exact ``Content-Range`` and byte count, and the pinned

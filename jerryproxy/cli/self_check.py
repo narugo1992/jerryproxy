@@ -16,6 +16,9 @@ from . import _common
 def self_check_command(context, color):  # type: (click.Context, bool) -> None
     """Check local state plus bounded availability of built-in relays.
 
+    Install and activation crash recovery are exercised in an isolated
+    temporary home without changing the configured JerryProxy home.
+
     Relay checks stream and verify a fixed 1 MiB Range from a pinned GitHub
     Release asset with a 5-second network timeout. Response-header latency,
     latency to the first chunk, and subsequent stream speed are reported
@@ -30,4 +33,3 @@ def self_check_command(context, color):  # type: (click.Context, bool) -> None
 
     if run_self_check(_common.paths(context), output=output, color=use_color):
         raise click.ClickException("self-check failed; inspect the diagnostics above")
-

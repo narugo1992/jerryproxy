@@ -154,9 +154,7 @@ class BackendSpec:
             return _mihomo_asset_name(platform_info, normalized)
         if self.asset_family == "sing-box":
             return _sing_box_asset_name(platform_info, normalized)
-        if self.asset_family in ("xray", "v2ray"):
-            return _v2ray_family_asset_name(self.asset_family, platform_info)
-        raise UnsupportedPlatformError("unknown asset family: %s" % self.asset_family)
+        return _v2ray_family_asset_name(self.asset_family, platform_info)
 
 
 def _mihomo_asset_name(platform_info, version):  # type: (PlatformInfo, str) -> str

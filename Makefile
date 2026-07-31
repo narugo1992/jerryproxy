@@ -1,4 +1,4 @@
-.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check relay_health_sync relay_health_check relay_health_wiki relay_health_gate check
+.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check archive_corpus archive_corpus_check relay_health_sync relay_health_check relay_health_wiki relay_health_gate check
 
 PYTHON ?= $(shell which python)
 PYTHON37 ?= python3.7
@@ -68,6 +68,8 @@ help:
 	@echo "                      RANGE_DIR=<path>"
 	@echo "  make catalog_update - Refresh the packaged backend catalog from GitHub"
 	@echo "  make catalog_check  - Validate the packaged catalog without network access"
+	@echo "  make archive_corpus - Download and measure pinned official backend archives"
+	@echo "  make archive_corpus_check - Validate the checked archive measurements offline"
 	@echo "  make relay_health_sync - Download relay targets from the health Gist"
 	@echo "  make relay_health_check - Probe the local relay target JSON"
 	@echo "  make relay_health_wiki - Render local relay JSON as Wiki Markdown"
@@ -168,6 +170,12 @@ catalog_update:
 catalog_check:
 	$(PYTHON) -m tools.backend_catalog --validate-only
 
+archive_corpus:
+	$(PYTHON) -m tools.archive_corpus --download
+
+archive_corpus_check:
+	$(PYTHON) -m tools.archive_corpus --validate-only
+
 relay_health_sync:
 	curl --fail --location --silent --show-error \
 		--max-time 30 \
@@ -193,4 +201,4 @@ relay_health_wiki:
 relay_health_gate:
 	$(PYTHON) -m tools.relay_health --gate-results "${RELAY_HEALTH_RESULTS}"
 
-check: lint catalog_check unittest pdocs package test_cli
+check: lint catalog_check archive_corpus_check unittest pdocs package test_cli

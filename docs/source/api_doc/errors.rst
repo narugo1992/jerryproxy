@@ -55,6 +55,12 @@ IntegrityError
 .. autoclass:: IntegrityError
 
 
+DurabilityError
+-----------------------------------------------------
+
+.. autoclass:: DurabilityError
+
+
 ArchiveError
 -----------------------------------------------------
 

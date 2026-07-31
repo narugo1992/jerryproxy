@@ -68,10 +68,11 @@ def filelock_status():
 class JerryProxyOperationLock(object):
     """Serialize all managed-state access for one JerryProxy home."""
 
-    def __init__(self, paths, timeout=0.0, initialize=True):
+    def __init__(self, paths, timeout=0.0, initialize=True, platform_info=None):
         self.paths = paths
         self.timeout = timeout
         self.initialize = initialize
+        self.platform_info = platform_info
         self._exit_stack = None
 
     def _validate_existing_lock(self):  # type: () -> None
@@ -111,9 +112,11 @@ class JerryProxyOperationLock(object):
                 self._validate_existing_lock()
                 if not self.paths._validate_existing_layout():
                     raise FileNotFoundError("JerryProxy home has no existing managed state")
-            from .backend.removal import _recover_removal_transactions
+            from .backend.recovery import recover_backend_transactions
 
-            _recover_removal_transactions(self.paths)
+            recover_backend_transactions(self.paths, self.platform_info)
+            if not self.paths._validate_existing_layout():
+                raise FileNotFoundError("JerryProxy home changed during transaction recovery")
             self._exit_stack = stack.pop_all()
         return self
 

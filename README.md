@@ -302,7 +302,9 @@ tree cannot be mutated under unrelated locks.
 `jerryproxy self-check` actively validates the packaged Python runtime, host
 platform mapping, private home layout and write access, POSIX directory modes,
 backend registry, `filelock` compatibility, and one lock-consistent
-installed/active backend inventory. It then streams one fixed 1 MiB Range from
+installed/active backend inventory. It also exercises install and activation
+crash recovery in an isolated temporary JerryProxy home without changing the
+configured home. It then streams one fixed 1 MiB Range from
 a pinned public Xray release through each built-in relay. The probe separates
 response-header latency, first-chunk latency, and the speed of the remaining
 chunks, uses a five-second network timeout per relay, and requires HTTPS, HTTP 206, the exact

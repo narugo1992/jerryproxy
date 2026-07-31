@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import os
 
@@ -11,6 +12,7 @@ from jerryproxy.errors import (
     DownloadError,
     DownloadPolicyError,
     DownloadTransportError,
+    DurabilityError,
     IntegrityError,
 )
 
@@ -133,6 +135,96 @@ def test_download_verifies_digest_size_and_requests_streaming_contract(tmp_path)
             },
         )
     ]
+
+
+def test_download_flushes_cache_parent_after_verified_publication(tmp_path, monkeypatch):
+    payload = b"verified backend"
+    downloader, _ = make_downloader(FakeResponse(payload))
+    target = tmp_path / "backend.gz"
+    observed = []
+
+    def flush_parent(path):
+        observed.append((path, target.read_bytes()))
+        return "flushed"
+
+    monkeypatch.setattr(download_module, "flush_directory", flush_parent)
+    downloader.download(
+        "https://example.test/backend.gz",
+        target,
+        hashlib.sha256(payload).hexdigest(),
+        expected_size=len(payload),
+    )
+
+    assert observed == [(tmp_path, payload)]
+
+
+def test_download_preserves_verified_cache_when_parent_flush_fails(tmp_path, monkeypatch):
+    payload = b"verified backend"
+    downloader, _ = make_downloader(FakeResponse(payload))
+    target = tmp_path / "backend.gz"
+
+    def fail_parent_flush(path):
+        assert path == tmp_path
+        assert target.read_bytes() == payload
+        raise DurabilityError("simulated cache parent flush failure")
+
+    monkeypatch.setattr(download_module, "flush_directory", fail_parent_flush)
+    with pytest.raises(DurabilityError, match="cache parent"):
+        downloader.download(
+            "https://example.test/backend.gz",
+            target,
+            hashlib.sha256(payload).hexdigest(),
+            expected_size=len(payload),
+        )
+
+    assert target.read_bytes() == payload
+    assert not list(tmp_path.glob(".*.part"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX fsync capability classification")
+def test_download_continues_when_cache_file_flush_is_documented_unsupported(tmp_path, monkeypatch):
+    payload = b"verified backend"
+    downloader, _ = make_downloader(FakeResponse(payload))
+    target = tmp_path / "backend.gz"
+
+    def unsupported(descriptor):
+        del descriptor
+        raise OSError(errno.EINVAL, "simulated unsupported cache flush")
+
+    monkeypatch.setattr(download_module.os, "fsync", unsupported)
+
+    downloader.download(
+        "https://example.test/backend.gz",
+        target,
+        hashlib.sha256(payload).hexdigest(),
+        expected_size=len(payload),
+    )
+
+    assert target.read_bytes() == payload
+    assert not list(tmp_path.glob(".*.part"))
+
+
+def test_download_maps_cache_file_flush_failure_and_cleans_partial(tmp_path, monkeypatch):
+    payload = b"verified backend"
+    downloader, _ = make_downloader(FakeResponse(payload))
+    target = tmp_path / "backend.gz"
+
+    def failed(descriptor):
+        del descriptor
+        raise OSError(errno.EIO, "simulated cache flush failure")
+
+    monkeypatch.setattr(download_module.os, "fsync", failed)
+
+    with pytest.raises(DurabilityError, match="backend download cache file"):
+        downloader.download(
+            "https://example.test/backend.gz",
+            target,
+            hashlib.sha256(payload).hexdigest(),
+            expected_size=len(payload),
+        )
+
+    assert not target.exists()
+    assert not list(tmp_path.glob(".*.part"))
 
 
 def test_download_rejects_digest_mismatch(tmp_path):

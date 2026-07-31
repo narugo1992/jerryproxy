@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
+import jerryproxy.home as home_module
 from jerryproxy.errors import IntegrityError
-from jerryproxy.home import JerryProxyPaths, resolve_home
+from jerryproxy.home import JerryProxyPaths, is_path_alias, resolve_home
 
 
 def test_default_home(monkeypatch, tmp_path):
@@ -17,6 +18,28 @@ def test_default_home(monkeypatch, tmp_path):
 def test_explicit_home_wins_over_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("JERRYPROXY_HOME", str(tmp_path / "environment"))
     assert resolve_home(str(tmp_path / "explicit")) == tmp_path / "explicit"
+
+
+@pytest.mark.parametrize("missing,attributes,expected", ((True, 0, False), (False, 0x400, True)))
+def test_windows_alias_detection_handles_missing_paths_and_reparse_points(
+    monkeypatch,
+    missing,
+    attributes,
+    expected,
+):
+    class WindowsPath(object):
+        def is_symlink(self):
+            return False
+
+        def lstat(self):
+            if missing:
+                raise FileNotFoundError("missing")
+            return type("Status", (), {"st_file_attributes": attributes})()
+
+    monkeypatch.setattr(home_module, "Path", lambda value: WindowsPath())
+    monkeypatch.setattr(home_module.os, "name", "nt")
+
+    assert is_path_alias("managed") is expected
 
 
 def test_paths_create_single_private_tree(tmp_path):
