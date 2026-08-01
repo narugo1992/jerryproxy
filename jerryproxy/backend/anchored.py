@@ -721,15 +721,15 @@ class AnchoredDirectory(object):
             if not stat.S_ISDIR(opened.st_mode) or _identity(opened) != self._root_identity:
                 self.close()
                 raise ArchiveError("archive output root changed while being pinned: %s" % self.root)
-            if created_root and self._require_private_permissions:
+            if created_root and self._require_private_permissions:  # pragma: no cover - POSIX-only permission path
                 os.fchmod(self._descriptor, 0o700)
-            elif self._require_private_permissions and stat.S_IMODE(opened.st_mode) != 0o700:
+            elif self._require_private_permissions and stat.S_IMODE(opened.st_mode) != 0o700:  # pragma: no cover
                 self.close()
                 raise ArchiveError("archive output root has unsafe permissions: %s" % self.root)
         elif os.name == "posix" and self._require_private_permissions:
-            if created_root:
+            if created_root:  # pragma: no cover - POSIX fallback permission path
                 self.root.chmod(0o700)
-            elif stat.S_IMODE(status.st_mode) != 0o700:
+            elif stat.S_IMODE(status.st_mode) != 0o700:  # pragma: no cover - POSIX fallback permission path
                 raise ArchiveError("archive output root has unsafe permissions: %s" % self.root)
         if self._expected_identity is not None:
             try:
