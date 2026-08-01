@@ -436,7 +436,9 @@ single CI matrix cell is informational and has no per-cell minimum. Codecov's
 cross-platform aggregated result is the authoritative coverage signal.
 Development should pursue the highest practical coverage, especially at
 security and recovery boundaries. Never print or persist `CODECOV_TOKEN`.
-Coverage exclusions must stay narrow and explicit. Never omit an entire mixed
+Do not use `pragma: no cover` (or equivalent source pragmas) to hide executable
+branches. Platform-only code must remain visible in the aggregate result and
+be exercised by its native CI lane where applicable. Never omit an entire mixed
 platform module to improve the reported result.
 The `test` tree is a Python package: every directory below `test/` must contain
 an `__init__.py`, including newly added test-area directories.
