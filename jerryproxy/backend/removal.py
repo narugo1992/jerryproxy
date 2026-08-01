@@ -141,11 +141,11 @@ class _WindowsFileIdInformation(ctypes.Structure):
     )
 
 
-if ctypes.sizeof(_WindowsFileDispositionInformation) != 1:  # pragma: no cover - ctypes ABI invariant
+if ctypes.sizeof(_WindowsFileDispositionInformation) != 1:
     raise RuntimeError("FILE_DISPOSITION_INFO must use the one-byte Windows BOOLEAN ABI")
-if ctypes.sizeof(_WindowsFileInformation) != 52:  # pragma: no cover - ctypes ABI invariant
+if ctypes.sizeof(_WindowsFileInformation) != 52:
     raise RuntimeError("BY_HANDLE_FILE_INFORMATION must use the 52-byte Windows ABI")
-if ctypes.sizeof(_WindowsFileIdInformation) != 24:  # pragma: no cover - ctypes ABI invariant
+if ctypes.sizeof(_WindowsFileIdInformation) != 24:
     raise RuntimeError("FILE_ID_INFO must use the 24-byte Windows ABI")
 
 
@@ -162,7 +162,7 @@ class _WindowsIdentityGuard(object):
 
 
 _WINDOWS_KERNEL32 = None
-if os.name == "nt":  # pragma: no cover - platform-only Win32 binding declarations
+if os.name == "nt":
     _WINDOWS_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _WINDOWS_KERNEL32.CreateFileW.argtypes = (
         ctypes.c_wchar_p,
@@ -214,7 +214,7 @@ def _validate_chain(root, target, error_type):
             _alias_error(error_type, current)
         if current == root:
             return
-        if current.parent == current:  # pragma: no cover - callers constrain targets below managed roots
+        if current.parent == current:
             raise error_type("managed removal target escapes its area: %s" % target)
         current = current.parent
 
@@ -436,7 +436,7 @@ def _open_parent_guard(root, target, error_type):
 
 
 def _delete_windows_guard(descriptor, expect_directory):
-    if descriptor.is_directory != expect_directory:  # pragma: no cover - caller uses the pinned status type
+    if descriptor.is_directory != expect_directory:
         raise IntegrityError("managed removal object type changed while pinned")
     disposition = _WindowsFileDispositionInformation(True)
     if not _WINDOWS_KERNEL32.SetFileInformationByHandle(
@@ -1597,7 +1597,7 @@ def _dispose_removal_transaction(paths, transaction, platform_info=None, record=
             raise IntegrityError("missing committed removal transaction: %s" % transaction)
         record = matching[0]
     preflight_removal_record(paths, record)
-    if record.phase != "committed":  # pragma: no cover - manager calls disposal only after commit
+    if record.phase != "committed":
         raise IntegrityError("cannot dispose a staging removal transaction: %s" % transaction)
     _dispose_transaction(paths, transaction, record.moves, record=record)
 

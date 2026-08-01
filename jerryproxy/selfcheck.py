@@ -423,7 +423,7 @@ def _probe_manager(paths, platform_info):
     )
 
 
-def _write_recovery_child_error(path):  # pragma: no cover - spawned child only
+def _write_recovery_child_error(path):
     descriptor = None
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
@@ -507,7 +507,7 @@ class _BoundedChildStderr(object):
         return False
 
 
-def _child_start_allowed(  # pragma: no cover - spawned child only
+def _child_start_allowed(
     start_allowed,
     start_cancelled,
     start_ready,
@@ -528,7 +528,7 @@ def _child_start_allowed(  # pragma: no cover - spawned child only
         start_allowed.wait(min(remaining, 0.05))
 
 
-def _captured_child_entry(  # pragma: no cover - spawned child only
+def _captured_child_entry(
     target,
     arguments,
     stderr_log,
@@ -585,7 +585,7 @@ def _captured_child_entry(  # pragma: no cover - spawned child only
         diagnostic_writer.finish()
 
 
-def _install_recovery_child(root, error_log):  # pragma: no cover - spawned hard-exit child
+def _install_recovery_child(root, error_log):
     try:
         paths = JerryProxyPaths(Path(root))
         platform_info, spec, asset_platform = _recovery_platform()
@@ -606,7 +606,7 @@ def _install_recovery_child(root, error_log):  # pragma: no cover - spawned hard
         os._exit(_RECOVERY_CHILD_ERROR)
 
 
-def _activation_recovery_child(root, version, direction, error_log):  # pragma: no cover - spawned hard-exit child
+def _activation_recovery_child(root, version, direction, error_log):
     try:
         from .backend import activation as activation_module
 
@@ -636,7 +636,7 @@ def _activation_recovery_child(root, version, direction, error_log):  # pragma: 
         os._exit(_RECOVERY_CHILD_ERROR)
 
 
-def _removal_recovery_child(root, version, direction, error_log):  # pragma: no cover - spawned hard-exit child
+def _removal_recovery_child(root, version, direction, error_log):
     try:
         from .backend import removal as removal_module
 
@@ -1310,7 +1310,7 @@ def _child_diagnostics(*paths):
     return diagnostics
 
 
-def _relay_probe_child(profile, result_path):  # pragma: no cover - spawned relay child
+def _relay_probe_child(profile, result_path):
     try:
         result = _check_relay(profile, requests.Session)
     except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:

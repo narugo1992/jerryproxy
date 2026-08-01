@@ -1965,7 +1965,7 @@ def recover_use_transactions(paths, platform_info, write_id=None):
             plan = recover_use_record(paths, record)
             _execute_recovery_plan(paths, record, plan, platform_info, write_id)
             progressed = True
-        if not progressed:  # pragma: no cover - each accepted plan advances or disposes
+        if not progressed:
             raise IntegrityError("activation recovery made no progress")
 
 
@@ -1979,7 +1979,7 @@ def _recover_use_operation(paths, platform_info, operation, write_id=None):
         selected = [record for record in records if record.operation == operation]
         if not selected:
             return
-        if len(selected) != 1:  # pragma: no cover - filenames make duplicates impossible
+        if len(selected) != 1:
             raise IntegrityError("duplicate activation recovery operation")
         record = selected[0]
         _flush_public_parents_before_recovery(paths, record, flushed_operations)

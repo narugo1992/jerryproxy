@@ -62,7 +62,7 @@ def _preflight(paths, platform_info):
             recover_use_record(paths, record)
         elif record.kind == "remove":
             preflight_removal_record(paths, record)
-        else:  # pragma: no cover - every strict scanner returns one closed kind
+        else:
             raise IntegrityError("unknown backend recovery record kind: %s" % record.kind)
     return records, install_orphans, use_orphans
 
@@ -80,7 +80,7 @@ def recover_backend_transactions(paths, platform_info=None):
             _recover_use_operation(paths, selected_platform, record.operation)
         elif record.kind == "remove":
             recover_removal_record(paths, record, selected_platform)
-        else:  # pragma: no cover - every producer assigns a closed kind
+        else:
             raise IntegrityError("unknown backend recovery record kind: %s" % record.kind)
     for temporary, identity in install_orphans:
         _dispose_file(paths, temporary, identity)

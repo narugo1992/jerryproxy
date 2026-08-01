@@ -524,7 +524,7 @@ def preflight_install_record(record):
         return staging, staging_identity, final
     if phase == "committed" and staging == "absent" and final == "identity":
         return staging, staging_identity, final
-    raise IntegrityError(  # pragma: no cover - strict preflight exhausts every accepted row
+    raise IntegrityError(
         "unknown install recovery evidence: %s" % record.journal
     )
 

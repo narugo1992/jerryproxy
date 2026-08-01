@@ -113,16 +113,16 @@ class _WindowsIoStatusBlock(ctypes.Structure):
     )
 
 
-if ctypes.sizeof(_WindowsFileInformation) != 52:  # pragma: no cover - ctypes ABI invariant
+if ctypes.sizeof(_WindowsFileInformation) != 52:
     raise RuntimeError("BY_HANDLE_FILE_INFORMATION must use the 52-byte Windows ABI")
-if ctypes.sizeof(_WindowsFileIdInformation) != 24:  # pragma: no cover - ctypes ABI invariant
+if ctypes.sizeof(_WindowsFileIdInformation) != 24:
     raise RuntimeError("FILE_ID_INFO must use the 24-byte Windows ABI")
 
 
 _WINDOWS_KERNEL32 = None
 _WINDOWS_NTDLL = None
 _WINDOWS_OPEN_OSFHANDLE = None
-if os.name == "nt":  # pragma: no cover - platform-only Win32 binding declarations
+if os.name == "nt":
     import msvcrt
 
     _WINDOWS_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
