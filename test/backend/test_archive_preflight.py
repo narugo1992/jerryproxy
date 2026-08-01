@@ -645,6 +645,16 @@ def test_zip_preflight_rejects_compressed_and_extension_boundaries():
         preflight_zip(io.BytesIO(data), _limits(maximum_total_extension_bytes=8))
 
 
+def test_zip_preflight_counts_local_and_central_member_names_in_aggregate_limit():
+    data = _zip_bytes([("long-name", b"payload")])
+
+    with pytest.raises(ArchiveError, match="aggregate ZIP extension"):
+        preflight_zip(io.BytesIO(data), _limits(maximum_total_extension_bytes=17))
+
+    plan = preflight_zip(io.BytesIO(data), _limits(maximum_total_extension_bytes=18))
+    assert plan.entry_count == 1
+
+
 def test_zip_preflight_rejects_truncated_extra_header_and_outside_directory():
     truncated = bytearray(_zip_bytes([("xray", b"payload")]))
     central = _central_offset(truncated)

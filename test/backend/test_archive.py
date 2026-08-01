@@ -557,7 +557,8 @@ def test_exclusive_anchored_directory_creation_flushes_child_then_parent(
 ):
     root = tmp_path / "backends"
     backend = root / "mihomo"
-    backend.mkdir(mode=0o700, parents=True)
+    root.mkdir(mode=0o700)
+    backend.mkdir(mode=0o700)
     flushed = []
 
     def record_flush(descriptor, kind):
@@ -1840,7 +1841,7 @@ def test_pinned_archive_view_rejects_untrusted_underlying_handle_results(
 @POSIX_FAULT_INJECTION
 def test_anchored_json_replaces_only_the_expected_destination_identity(tmp_path):
     root = tmp_path / "runtimes"
-    root.mkdir()
+    root.mkdir(mode=0o700)
     with anchored_module.AnchoredDirectory(root) as anchored:
         first_payload, first_identity = anchored.write_json(
             ("journal.json",),
@@ -2050,9 +2051,9 @@ def test_zip_extraction_rejects_existing_output_ancestor_symlink(tmp_path):
     with zipfile.ZipFile(str(archive), "w") as stream:
         stream.writestr("bin/xray", b"backend")
     destination = tmp_path / "output"
-    destination.mkdir()
+    destination.mkdir(mode=0o700)
     outside = tmp_path / "outside"
-    outside.mkdir()
+    outside.mkdir(mode=0o700)
     (destination / "bin").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(ArchiveError, match="alias|directory"):
@@ -2067,7 +2068,7 @@ def test_zip_extraction_rejects_existing_output_leaf_symlink(tmp_path):
     with zipfile.ZipFile(str(archive), "w") as stream:
         stream.writestr("xray", b"backend")
     destination = tmp_path / "output"
-    destination.mkdir()
+    destination.mkdir(mode=0o700)
     outside = tmp_path / "outside"
     outside.write_bytes(b"sentinel")
     (destination / "xray").symlink_to(outside)
@@ -2084,7 +2085,7 @@ def test_zip_extraction_rejects_existing_output_file(tmp_path):
     with zipfile.ZipFile(str(archive), "w") as stream:
         stream.writestr("xray", b"backend")
     destination = tmp_path / "output"
-    destination.mkdir()
+    destination.mkdir(mode=0o700)
     existing = destination / "xray"
     existing.write_bytes(b"sentinel")
 
@@ -3189,8 +3190,9 @@ def test_executable_selection_requires_exactly_one_matching_leaf(tmp_path):
         find_executable(empty, "xray")
 
     duplicate = tmp_path / "duplicate"
+    duplicate.mkdir(mode=0o700)
     for directory in (duplicate / "one", duplicate / "two"):
-        directory.mkdir(parents=True, mode=0o700)
+        directory.mkdir(mode=0o700)
         executable = directory / "xray"
         executable.write_bytes(b"backend")
         executable.chmod(0o600)

@@ -89,6 +89,8 @@ def _make_valid_tree(paths):
 
 def _populate_valid_tree(directory):
     directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        directory.chmod(0o700)
     executable = directory / "xray"
     executable.write_bytes(b"payload")
     manifest_value = {

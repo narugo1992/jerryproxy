@@ -4049,6 +4049,19 @@ def test_inventory_returns_one_installed_and_active_snapshot(tmp_path):
     assert inventory.active[0].version == installed.version
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory permissions are required")
+def test_inventory_rejects_unsafe_installed_version_permissions_without_repair(tmp_path):
+    manager = manager_for(tmp_path)
+    installed = install_fake_mihomo(manager, tmp_path, "1.0.0", b"version one", activate=False)
+    version_tree = installed.manifest.parent
+    version_tree.chmod(0o755)
+
+    with pytest.raises(IntegrityError, match="unsafe permissions"):
+        manager.inventory()
+
+    assert version_tree.stat().st_mode & 0o777 == 0o755
+
+
 def test_inventory_does_not_initialize_an_empty_home(tmp_path):
     manager = manager_for(tmp_path)
 

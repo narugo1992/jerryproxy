@@ -676,12 +676,14 @@ class AnchoredDirectory(object):
                 validate_identity(self._expected_identity, expected_file_type="directory")
             except IntegrityError as error:
                 raise ArchiveError("invalid expected archive output root identity") from error
+        created_root = False
         if os.path.lexists(str(self.root)):
             if is_path_alias(self.root):
                 raise ArchiveError("archive output root is a path alias: %s" % self.root)
         else:
             try:
                 self.root.mkdir(mode=0o700)
+                created_root = True
             except OSError as error:
                 # The transaction-owned staging parent may reject exclusive root creation.
                 raise ArchiveError("unable to create archive output root: %s" % self.root) from error
@@ -719,10 +721,16 @@ class AnchoredDirectory(object):
             if not stat.S_ISDIR(opened.st_mode) or _identity(opened) != self._root_identity:
                 self.close()
                 raise ArchiveError("archive output root changed while being pinned: %s" % self.root)
-            if self._require_private_permissions:
+            if created_root and self._require_private_permissions:
                 os.fchmod(self._descriptor, 0o700)
+            elif self._require_private_permissions and stat.S_IMODE(opened.st_mode) != 0o700:
+                self.close()
+                raise ArchiveError("archive output root has unsafe permissions: %s" % self.root)
         elif os.name == "posix" and self._require_private_permissions:
-            self.root.chmod(0o700)
+            if created_root:
+                self.root.chmod(0o700)
+            elif stat.S_IMODE(status.st_mode) != 0o700:
+                raise ArchiveError("archive output root has unsafe permissions: %s" % self.root)
         if self._expected_identity is not None:
             try:
                 matches_expected = identity_matches(self.root, self._expected_identity)

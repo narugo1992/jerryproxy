@@ -139,6 +139,20 @@ def test_local_backend_list_does_not_load_the_packaged_catalog(tmp_path, monkeyp
     assert json.loads(result.output)[0]["executable"] == str(installed.executable)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory permissions are required")
+def test_local_backend_list_rejects_unsafe_version_permissions_without_repair(tmp_path):
+    home = tmp_path / "home"
+    installed = install_fake_mihomo(home, tmp_path, "1.0.0", b"one", activate=False)
+    version_tree = installed.manifest.parent
+    version_tree.chmod(0o755)
+
+    result = CliRunner().invoke(cli, ["--home", str(home), "backend", "list", "mihomo"])
+
+    assert result.exit_code == 1
+    assert "unsafe permissions" in str(result.exception)
+    assert version_tree.stat().st_mode & 0o777 == 0o755
+
+
 def test_doctor_reports_platform_and_counts(tmp_path):
     result = CliRunner().invoke(cli, ["--home", str(tmp_path), "doctor"])
     assert result.exit_code == 0

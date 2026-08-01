@@ -347,6 +347,9 @@ def preflight_zip(handle, limits):
             raise ArchiveError("local ZIP member name disagrees with central directory")
         if local_flags != entry.flags or local_method != entry.method:
             raise ArchiveError("local ZIP method or flags disagree with central directory")
+        total_extension += local_name_length
+        if total_extension > maximum_total_extension:
+            raise ArchiveError("aggregate ZIP extension data exceeds the safety limit")
         local_fields, total_extension = _parse_extra_fields(local_extra, maximum_total_extension, total_extension)
         if not entry.flags & 0x0008:
             local_uncompressed, local_compressed, _unused_offset, _unused_disk = _zip64_values(
