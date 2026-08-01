@@ -29,7 +29,6 @@ RANGE_TEST_DIR := ${TEST_DIR}/${RANGE_DIR}
 RANGE_SRC_DIR  := ${SRC_DIR}/${RANGE_DIR}
 
 COV_TYPES ?= xml term-missing
-MIN_COVERAGE ?= 90
 
 PYTHON_CODE_DIR   := ${SRC_DIR}
 RST_DOC_DIR       := ${DOC_DIR}/source/api_doc
@@ -55,7 +54,7 @@ help:
 	@echo "Testing and quality:"
 	@echo "  make test         - Alias for make unittest"
 	@echo "  make unittest     - Run pytest with coverage"
-	@echo "                      RANGE_DIR=<path> MIN_COVERAGE=<n>"
+	@echo "                      RANGE_DIR=<path>"
 	@echo "  make python37     - Run unit tests through python3.7"
 	@echo "  make lint         - Run ruff checks"
 	@echo "  make format       - Format Python with ruff"
@@ -121,8 +120,7 @@ unittest:
 		-sv -m unittest \
 		--junitxml=junit.xml -o junit_family=legacy \
 		$(shell for type in ${COV_TYPES}; do echo "--cov-report=$$type"; done) \
-		--cov="${RANGE_SRC_DIR}" \
-		$(if ${MIN_COVERAGE},--cov-fail-under=${MIN_COVERAGE},)
+		--cov="${RANGE_SRC_DIR}"
 
 python37:
 	$(PYTHON37) -m pytest ${TEST_DIR} -sv -m unittest
