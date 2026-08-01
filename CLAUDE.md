@@ -434,6 +434,9 @@ the upload because GitHub intentionally withholds repository secrets; their
 tests and local coverage reports still run normally. Coverage reported by a
 single CI matrix cell is informational and has no per-cell minimum. Codecov's
 cross-platform aggregated result is the authoritative coverage signal.
+The Makefile and test workflows must not define or accept a local coverage
+minimum such as `MIN_COVERAGE`, `--cov-fail-under`, or an equivalent hard gate;
+coverage thresholds are reviewed only from the final Codecov aggregate.
 Development should pursue the highest practical coverage, especially at
 security and recovery boundaries. Never print or persist `CODECOV_TOKEN`.
 Do not use `pragma: no cover` (or equivalent source pragmas) to hide executable
