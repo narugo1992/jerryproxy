@@ -111,8 +111,12 @@ Current URI-runtime invariants:
 * subscription URLs never appear in argv or displayed logs;
 * the generated Mihomo provider, access descriptor, and session files are
   owner-only below ``JERRYPROXY_HOME``;
-* the foreground mixed listener binds to loopback and requires a random secret;
-* backend stdout/stderr are drained separately and redacted before persistence;
+* the foreground listener binds to loopback and is unauthenticated by default;
+  ``server --auth`` explicitly enables generated local credentials;
+* backend process output is drained as one merged stream, decoded only for
+  bounded diagnostics, redacted before persistence or terminal forwarding,
+  and labeled only with the backend name (for example ``[mihomo]``);
+  JerryProxy-owned records have no owner prefix;
 * health recovery uses bounded restart/alternate/refresh steps and preserves
   the saved node preference;
 * managed downloads enforce time, size, and redirect policy.

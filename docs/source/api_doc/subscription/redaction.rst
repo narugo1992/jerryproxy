@@ -18,6 +18,12 @@ redact\_text
 .. autofunction:: redact_text
 
 
+terminal\_safe\_text
+-----------------------------------------------------
+
+.. autofunction:: terminal_safe_text
+
+
 redact\_bytes
 -----------------------------------------------------
 

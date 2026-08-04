@@ -27,9 +27,10 @@ JerryProxy separates backend distribution from backend runtime behavior:
 
 The first Mihomo runtime slice is implemented for Base64/plain SS, VMess, and
 VLESS URI lines. It writes a private file provider below the session's Mihomo
-safe path, exposes one authenticated loopback mixed listener, and performs a
-global health quorum with deterministic restart/failover and one policy-
-controlled source refresh. Xray, V2Ray, and sing-box runtime drivers remain
+safe path, exposes one loopback listener (open by default, with explicit
+optional authentication), and performs a global health quorum with
+deterministic restart/failover and one policy-controlled source refresh. Xray,
+V2Ray, and sing-box runtime drivers remain
 optional compatibility work; all four binaries can already be installed and
 version-switched by the generic manager.
 

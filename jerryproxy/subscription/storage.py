@@ -1,6 +1,8 @@
 """Private, lock-serialized subscription publication and inventory."""
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -26,7 +28,12 @@ _NAME_BYTES = 64
 _ID_HEX = 32
 _MAXIMUM_DISPLAY_BYTES = 512
 _MAXIMUM_URI_BYTES = 16 * 1024
+_MAXIMUM_STATE_BYTES = 16 * 1024 * 1024
 _FORMATS = ("uri-lines", "base64-uri-lines")
+_IDENTITY_KEY_BYTES = 32
+_MAXIMUM_TOMBSTONES = 4096
+_IDENTITY_FILE = "identity.key"
+_TOMBSTONES_FILE = "tombstones.json"
 _RECORD_KEYS = {
     "body",
     "enabled",
@@ -39,6 +46,169 @@ _RECORD_KEYS = {
     "updated_at",
 }
 _NODE_KEYS = {"display", "id", "occurrence", "scheme", "uri"}
+
+
+def _identity_path(paths):  # type: (object) -> object
+    return paths.nodes / _IDENTITY_FILE
+
+
+def _tombstones_path(paths):  # type: (object) -> object
+    return paths.nodes / _TOMBSTONES_FILE
+
+
+def _ensure_identity_key_locked(paths):  # type: (object) -> bytes
+    """Create or read the home-local node identity key under the home lock."""
+
+    _ensure_extension_directory(paths.nodes)
+    path = _identity_path(paths)
+    if is_path_alias(path):
+        raise IntegrityError("node identity key is aliased")
+    if path.exists():
+        if not path.is_file():
+            raise IntegrityError("node identity key is not a regular file")
+        if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) != 0o600:
+            raise IntegrityError("node identity key has unsafe permissions")
+        try:
+            value = path.read_bytes()
+        except OSError as error:
+            # The private identity key cannot be read safely.
+            raise IntegrityError("node identity key cannot be read") from error
+        if len(value) != _IDENTITY_KEY_BYTES:
+            raise IntegrityError("node identity key has an invalid length")
+        return value
+    value = secrets.token_bytes(_IDENTITY_KEY_BYTES)
+    descriptor = -1
+    try:
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
+        descriptor = os.open(
+            str(path),
+            flags,
+            0o600,
+        )
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
+        written = 0
+        while written < len(value):
+            count = os.write(descriptor, value[written:])
+            if count <= 0:
+                raise IntegrityError("node identity key write made no progress")
+            written += count
+        if os.fstat(descriptor).st_size != len(value):
+            raise IntegrityError("node identity key has an invalid published length")
+        os.fsync(descriptor)
+        flush_directory(path.parent)
+        return value
+    except FileExistsError:
+        # Another operation cannot win while the home lock is held; treat this
+        # as an integrity failure rather than silently adopting an unknown key.
+        raise IntegrityError("node identity key was created concurrently")
+    except OSError as error:
+        # Private key publication may fail through filesystem errors.
+        raise IntegrityError("node identity key publication failed") from error
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _read_tombstones_locked(paths):  # type: (object) -> list
+    """Read retained retired node IDs, treating absent state as empty."""
+
+    path = _tombstones_path(paths)
+    if not path.exists():
+        return []
+    if is_path_alias(path) or not path.is_file():
+        raise IntegrityError("node tombstone state is invalid")
+    if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) != 0o600:
+        raise IntegrityError("node tombstone state has unsafe permissions")
+    try:
+        value = _read_json(path)
+    except SubscriptionStateError as error:
+        # Tombstone corruption must fail closed before identity allocation.
+        raise IntegrityError("node tombstone state cannot be read") from error
+    entries = value.get("entries")
+    if set(value) != {"entries"} or not isinstance(entries, list):
+        raise IntegrityError("node tombstone state is invalid")
+    result = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"id", "removed_at"}:
+            raise IntegrityError("node tombstone entry is invalid")
+        node_id = entry["id"]
+        removed_at = entry["removed_at"]
+        if (
+            not isinstance(node_id, str)
+            or len(node_id) != _ID_HEX
+            or any(char not in "0123456789abcdef" for char in node_id)
+            or not isinstance(removed_at, str)
+        ):
+            raise IntegrityError("node tombstone entry is invalid")
+        result.append(entry)
+    if len(result) > _MAXIMUM_TOMBSTONES:
+        raise IntegrityError("node tombstone count exceeds the safety bound")
+    return result
+
+
+def _retire_node_ids_locked(paths, node_ids):  # type: (object, object) -> None
+    """Reserve removed IDs before unlinking a subscription record."""
+
+    if not node_ids:
+        return
+    entries = _read_tombstones_locked(paths)
+    existing = {entry["id"] for entry in entries}
+    now = _now()
+    for node_id in node_ids:
+        if node_id not in existing:
+            entries.append({"id": node_id, "removed_at": now})
+            existing.add(node_id)
+    entries = entries[-_MAXIMUM_TOMBSTONES:]
+    _write_json(_tombstones_path(paths), {"entries": entries})
+
+
+def _canonical_node_bytes(scheme, display, uri, occurrence):  # type: (str, str, str, int) -> bytes
+    value = {
+        "display": display,
+        "occurrence": occurrence,
+        "scheme": scheme,
+        "uri": uri,
+    }
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+def _derive_node_id(key, scheme, display, uri, occurrence, ordinal=0):
+    preimage = b"jerryproxy-node-v1\x00" + _canonical_node_bytes(scheme, display, uri, occurrence)
+    if ordinal:
+        preimage += b"\x00collision-%d" % ordinal
+    return hmac.new(key, preimage, hashlib.sha256).hexdigest()[:_ID_HEX]
+
+
+def _node_id_matches(key, node):  # type: (bytes, NodeRecord) -> bool
+    for ordinal in range(17):
+        if _derive_node_id(
+            key,
+            node.scheme,
+            node.display,
+            node.uri,
+            node.occurrence,
+            ordinal=ordinal,
+        ) == node.node_id:
+            return True
+    return False
+
+
+def _validate_record_identity_if_present(paths, record):  # type: (object, SubscriptionRecord) -> None
+    identity_path = _identity_path(paths)
+    if not identity_path.exists():
+        if _tombstones_path(paths).exists():
+            raise IntegrityError("node identity key is missing while tombstones exist")
+        return
+    key = _ensure_identity_key_locked(paths)
+    if any(not _node_id_matches(key, node) for node in record.nodes):
+        raise IntegrityError("subscription node identity does not match the home key")
 
 
 def validate_subscription_name(name):  # type: (str) -> str
@@ -68,6 +238,12 @@ def _ensure_extension_directory(path):  # type: (Path) -> None
 def _read_json(path):  # type: (Path) -> dict
     if is_path_alias(path) or not path.is_file():
         raise SubscriptionStateError("subscription state file is invalid")
+    try:
+        if path.stat().st_size > _MAXIMUM_STATE_BYTES:
+            raise SubscriptionStateError("subscription state exceeds the size bound")
+    except OSError as error:
+        # A state file whose metadata cannot be checked is not safe to parse.
+        raise SubscriptionStateError("subscription state cannot be read") from error
 
     def reject_duplicates(pairs):
         value = {}
@@ -79,8 +255,11 @@ def _read_json(path):  # type: (Path) -> dict
 
     try:
         with path.open("r", encoding="utf-8") as stream:
-            value = json.load(stream, object_pairs_hook=reject_duplicates)
-    except (OSError, ValueError) as error:
+            payload = stream.read(_MAXIMUM_STATE_BYTES + 1)
+        if len(payload.encode("utf-8")) > _MAXIMUM_STATE_BYTES:
+            raise SubscriptionStateError("subscription state exceeds the size bound")
+        value = json.loads(payload, object_pairs_hook=reject_duplicates)
+    except (OSError, ValueError, UnicodeError, RecursionError) as error:
         # Filesystem and JSON decoder failures identify corrupt private state.
         raise SubscriptionStateError("subscription state cannot be read") from error
     if not isinstance(value, dict):
@@ -211,7 +390,10 @@ def _record_from_value(value, parser=None):  # type: (dict, Optional[Subscriptio
             raise SubscriptionStateError("subscription source URL is invalid") from error
     parser = parser or DEFAULT_SUBSCRIPTION_PARSER
     try:
-        parsed = parser.parse(body, format_hint="uri-lines")
+        parsed = parser.parse(
+            body,
+            format_hint="auto" if value["format"] == "base64-uri-lines" else "uri-lines",
+        )
     except (SubscriptionFetchError, SubscriptionParseError, SubscriptionStateError, ValueError) as error:
         # The digest-protected source must remain parseable before its private
         # node projection can be trusted.
@@ -281,6 +463,7 @@ class SubscriptionStore(object):
             if is_path_alias(path) or not path.is_file() or path.suffix != ".json":
                 raise IntegrityError("subscription namespace contains unexpected content")
             record = _record_from_value(_read_json(path), parser=self.parser)
+            _validate_record_identity_if_present(self.paths, record)
             if path.stem != record.name:
                 raise SubscriptionStateError("subscription filename does not match its name")
             records.append(record)
@@ -325,6 +508,7 @@ class SubscriptionStore(object):
         existing = None
         if path.exists():
             existing = _record_from_value(_read_json(path), parser=self.parser)
+            _validate_record_identity_if_present(self.paths, existing)
         if existing is not None and not replace:
             raise SubscriptionStateError("subscription already exists: %s" % record.name)
         if expected_revision is not None and (existing is None or existing.revision != expected_revision):
@@ -333,6 +517,7 @@ class SubscriptionStore(object):
             raise SubscriptionStateError("subscription identity changed during replacement")
         if existing is None and len(self._records_locked()) >= MAXIMUM_SUBSCRIPTIONS:
             raise SubscriptionStateError("subscription count exceeds the safety bound")
+        _validate_record_identity_if_present(self.paths, record)
         _write_json(path, _record_value(record))
         return record
 
@@ -349,6 +534,10 @@ class SubscriptionStore(object):
         if not path.exists():
             raise SubscriptionStateError("subscription not found: %s" % name)
         record = _record_from_value(_read_json(path), parser=self.parser)
+        # Retire identities before removing the public record.  A crash between
+        # this journal-like publication and unlink is harmless: the old record
+        # remains readable and the ID is conservatively never reused.
+        _retire_node_ids_locked(self.paths, [node.node_id for node in record.nodes])
         try:
             path.unlink()
             flush_directory(path.parent)
@@ -364,8 +553,17 @@ class SubscriptionStore(object):
             return self._remove_locked(name)
 
 
-def build_record(name, subscription_id, parsed, source_url=None, previous=None):
-    # type: (str, str, object, str, Optional[SubscriptionRecord]) -> SubscriptionRecord
+def build_record(
+    name,
+    subscription_id,
+    parsed,
+    source_url=None,
+    previous=None,
+    retain_source_url=True,
+    paths=None,
+    reserved_ids=None,
+):
+    # type: (str, str, object, Optional[str], Optional[SubscriptionRecord], bool, object, object) -> SubscriptionRecord
     """Build a new record while reconciling exact URI identities."""
 
     previous_by_uri = {}
@@ -373,6 +571,10 @@ def build_record(name, subscription_id, parsed, source_url=None, previous=None):
         for node in previous.nodes:
             previous_by_uri.setdefault(node.uri, []).append(node.node_id)
     nodes = []
+    identity_key = _ensure_identity_key_locked(paths) if paths is not None else None
+    reserved = set(reserved_ids or ())
+    if paths is not None:
+        reserved.update(entry["id"] for entry in _read_tombstones_locked(paths))
     occurrences = {}
     for scheme, display, uri in parsed.records:
         if len(display.encode("utf-8")) > _MAXIMUM_DISPLAY_BYTES:
@@ -382,7 +584,27 @@ def build_record(name, subscription_id, parsed, source_url=None, previous=None):
         occurrence = occurrences.get(uri, 0)
         occurrences[uri] = occurrence + 1
         old_ids = previous_by_uri.get(uri, [])
-        node_id = old_ids[occurrence] if occurrence < len(old_ids) else secrets.token_hex(16)
+        if occurrence < len(old_ids):
+            node_id = old_ids[occurrence]
+        elif identity_key is None:
+            node_id = secrets.token_hex(16)
+        else:
+            node_id = None
+            for ordinal in range(17):
+                candidate = _derive_node_id(
+                    identity_key,
+                    scheme,
+                    display,
+                    uri,
+                    occurrence,
+                    ordinal=ordinal,
+                )
+                if candidate not in reserved and all(item.node_id != candidate for item in nodes):
+                    node_id = candidate
+                    break
+            if node_id is None:
+                raise IntegrityError("subscription node identity collision limit exceeded")
+        reserved.add(node_id)
         nodes.append(NodeRecord(node_id, scheme, display, uri, occurrence))
     return SubscriptionRecord(
         name=name,
@@ -392,6 +614,10 @@ def build_record(name, subscription_id, parsed, source_url=None, previous=None):
         enabled=previous.enabled if previous is not None else True,
         updated_at=_now(),
         nodes=tuple(nodes),
-        source_url=source_url if source_url is not None else (previous.source_url if previous else None),
+        source_url=(
+            source_url
+            if source_url is not None
+            else (previous.source_url if previous is not None and retain_source_url else None)
+        ),
         body=parsed.body,
     )

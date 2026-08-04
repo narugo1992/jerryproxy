@@ -11,7 +11,7 @@ from jerryproxy.subscription.storage import build_record
 from jerryproxy.subscription.transport import parse_subscription_body
 
 SS = b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ss\n"
-VMESS = b"vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1IiwibmV0IjoidGNwIiwicG9ydCI6IjQ0MyIsInBzIjoidm1lc3MiLCJ0bHMiOiJ0bHMiLCJ2IjoyfQ==\n"
+VMESS = b"vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1NTUiLCJuZXQiOiJ0Y3AiLCJwb3J0IjoiNDQzIiwicHMiOiJ2bWVzcyIsInRscyI6InRscyIsInYiOjJ9\n"
 
 
 def test_subscription_state_is_private_and_rooted_below_home(tmp_path):
@@ -23,6 +23,9 @@ def test_subscription_state_is_private_and_rooted_below_home(tmp_path):
     state = paths.subscriptions / "main.json"
     assert state.is_file()
     assert state.parent == paths.root / "subscriptions"
+    identity = paths.nodes / "identity.key"
+    assert identity.is_file()
+    assert len(identity.read_bytes()) == 32
     if os.name == "posix":
         assert (state.stat().st_mode & 0o777) == 0o600
         assert (state.parent.stat().st_mode & 0o777) == 0o700
@@ -106,6 +109,24 @@ def test_publication_rejects_a_stale_revision_generation(tmp_path):
     with pytest.raises(SubscriptionStateError, match="changed during update"):
         manager.store.publish(candidate, replace=True, expected_revision="0" * 64)
     assert manager.get("main").revision == original.revision
+
+
+def test_body_replacement_clears_the_retired_bearer_source(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    original = manager.add(
+        "main",
+        "https://provider.example/secret",
+        body=SS,
+        format_hint="uri-lines",
+    )
+    assert original.source_url == "https://provider.example/secret"
+
+    replaced = manager.replace("main", body=VMESS, format_hint="uri-lines")
+
+    assert replaced.source_url is None
+    with pytest.raises(SubscriptionStateError, match="no remote source URL"):
+        manager.refresh("main")
 
 
 def test_subscription_record_repr_does_not_include_bearer_or_uri_material(tmp_path):

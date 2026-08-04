@@ -1,12 +1,18 @@
 import base64
+import io
 import json
 
+import click
+import pytest
 from click.testing import CliRunner
 
+import jerryproxy.cli._common as cli_common
+import jerryproxy.cli.server as server_module
+import jerryproxy.cli.subscription._common as subscription_common
 from jerryproxy.cli import cli
 
 SS = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ss\n"
-VMESS = "vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTU1LTU1NTUtNTU1NTU1NTU1NTU1IiwibmV0IjoidGNwIiwicG9ydCI6IjQ0MyIsInBzIjoidm1lc3MiLCJ0bHMiOiJ0bHMiLCJ2IjoyfQ==\n"
+VMESS = "vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1NTUiLCJuZXQiOiJ0Y3AiLCJwb3J0IjoiNDQzIiwicHMiOiJ2bWVzcyIsInRscyI6InRscyIsInYiOjJ9\n"
 
 
 def _invoke(runner, home, *args, **kwargs):
@@ -100,6 +106,20 @@ def test_add_source_options_are_exclusive_and_json_never_prompts(tmp_path):
     assert "provide --url-env" in no_source.output
 
 
+def test_url_stdin_applies_the_bound_to_content_not_its_line_ending(monkeypatch):
+    class Input(object):
+        def __init__(self, payload):
+            self.buffer = io.BytesIO(payload)
+
+    maximum = 16 * 1024
+    monkeypatch.setattr(subscription_common.sys, "stdin", Input(b"u" * maximum + b"\n"))
+    assert subscription_common.read_url_stdin() == "u" * maximum
+
+    monkeypatch.setattr(subscription_common.sys, "stdin", Input(b"u" * (maximum + 1) + b"\n"))
+    with pytest.raises(click.UsageError, match="16 KiB bound"):
+        subscription_common.read_url_stdin()
+
+
 def test_base64_body_file_is_accepted(tmp_path):
     runner = CliRunner()
     home = tmp_path / "home"
@@ -108,3 +128,486 @@ def test_base64_body_file_is_accepted(tmp_path):
     result = _invoke(runner, home, "subscription", "add", "main", "--file", str(body), "--json")
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["format"] == "base64-uri-lines"
+
+
+def test_subscription_guided_leaf_selects_missing_name(tmp_path, monkeypatch):
+    runner = CliRunner()
+    home = tmp_path / "home"
+    body = tmp_path / "subscription.txt"
+    body.write_text(SS, encoding="ascii")
+    created = _invoke(runner, home, "subscription", "add", "main", "--file", str(body), "--json")
+    assert created.exit_code == 0, created.output
+
+    class Prompt(object):
+        def execute(self):
+            return "main"
+
+    monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
+    monkeypatch.setattr(cli_common.inquirer, "select", lambda **kwargs: Prompt())
+    result = _invoke(runner, home, "subscription", "show")
+
+    assert result.exit_code == 0, result.output
+    assert "Subscription: main" in result.output
+    assert "YWVzLTI1Ni1nY20" not in result.output
+
+
+def test_subscription_group_guided_menu_dispatches_read_only_action(tmp_path, monkeypatch):
+    class Prompt(object):
+        def execute(self):
+            return "list"
+
+    monkeypatch.setattr(cli_common.inquirer, "select", lambda **kwargs: Prompt())
+    monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
+    result = _invoke(CliRunner(), tmp_path / "home", "subscription")
+
+    assert result.exit_code == 0, result.output
+    assert "No subscriptions stored." in result.output
+
+
+def test_subscription_missing_name_is_rejected_for_json_and_noninteractive(tmp_path):
+    runner = CliRunner()
+    home = tmp_path / "home"
+    body = tmp_path / "subscription.txt"
+    body.write_text(SS, encoding="ascii")
+    assert _invoke(runner, home, "subscription", "add", "main", "--file", str(body), "--json").exit_code == 0
+
+    for arguments in (
+        ("show", "--json"),
+        ("refresh", "--json"),
+        ("validate", "--json"),
+        ("remove", "--json", "-y"),
+    ):
+        result = _invoke(runner, home, "subscription", *arguments)
+        assert result.exit_code == 2, result.output
+        assert "NAME is required" in result.output
+
+    add = _invoke(runner, home, "subscription", "add", "--file", str(body), "--json")
+    assert add.exit_code == 2
+    assert "NAME is required" in add.output
+
+
+def test_server_guided_selection_passes_explicit_targets_to_runtime(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setenv("COLUMNS", "200")
+
+    class FakeRuntime(object):
+        def __init__(self, paths, **kwargs):
+            del paths
+            captured["init"] = kwargs
+            self.process = None
+
+        def start(self, subscription_name, node_id, install_missing):
+            captured["start"] = (subscription_name, node_id, install_missing)
+            captured["init"]["log_sink"]("mihomo", "INFO", "connected")
+
+        def public_info(self):
+            return {
+                "listener": {
+                    "address": "127.0.0.1",
+                    "port": 1080,
+                    "kind": "mixed",
+                    "protocol": "http",
+                },
+                "access_file": str(tmp_path / "access.json"),
+                "log_file": str(tmp_path / "runtime.log"),
+            }
+
+        def wait(self):
+            return 0
+
+        def stop(self):
+            captured["stopped"] = True
+
+    selections = iter(["main", "a" * 32])
+    monkeypatch.setattr(server_module, "RuntimeSession", FakeRuntime)
+    monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
+    monkeypatch.setattr(
+        cli_common,
+        "select_subscription",
+        lambda context, message, enabled_only=False: next(selections),
+    )
+    monkeypatch.setattr(
+        cli_common,
+        "select_subscription_node",
+        lambda context, name, message: next(selections),
+    )
+
+    result = _invoke(
+        CliRunner(),
+        tmp_path / "home",
+        "server",
+        "--no-install-missing",
+        "--protocol",
+        "http",
+        "--port",
+        "18080",
+        terminal_width=200,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["start"] == ("main", "a" * 32, False)
+    assert captured["init"]["listener_protocol"] == "http"
+    assert captured["init"]["authenticate"] is False
+    assert captured["init"]["preferred_port"] == 18080
+    assert captured["init"]["strict_port"] is True
+    assert "JerryProxy is ready" in result.output
+    assert "Proxy URL: http://127.0.0.1:1080" in result.output
+    assert "[jerryproxy]" not in result.output
+    compact_output = "".join(result.output.split())
+    assert "exportHTTP_PROXY='http://127.0.0.1:1080'" in compact_output
+    assert "exportHTTPS_PROXY='http://127.0.0.1:1080'" in compact_output
+    assert "exportALL_PROXY='http://127.0.0.1:1080'" in compact_output
+    assert "Access file:" not in result.output
+    assert "Log file:" not in result.output
+    assert "[mihomo]" in result.output
+    assert "connected" in result.output
+    assert "[TCP] live request" not in result.output
+
+
+@pytest.mark.parametrize("width", [72, 80, 100, 120])
+def test_runtime_help_fits_supported_terminal_widths(width):
+    result = CliRunner().invoke(cli, ["server", "--help"], terminal_width=width)
+
+    assert result.exit_code == 0, result.output
+    assert not [line for line in result.output.splitlines() if len(line) > width]
+
+
+def test_server_yes_never_guesses_missing_subscription_or_node(tmp_path):
+    result = _invoke(CliRunner(), tmp_path / "home", "server", "--yes", "--no-install-missing")
+
+    assert result.exit_code == 2, result.output
+    assert "cannot infer a subscription" in result.output
+
+
+def test_server_auth_mode_prints_copyable_proxy_credentials(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+
+    class FakeRuntime(object):
+        def __init__(self, paths, **kwargs):
+            del paths
+            self.process = None
+            self.username = "local-user"
+            self.password = "local-password"
+            assert kwargs["authenticate"] is True
+
+        def start(self, subscription_name, node_id, install_missing):
+            del subscription_name, node_id, install_missing
+
+        def public_info(self):
+            return {
+                "listener": {
+                    "address": "127.0.0.1",
+                    "port": 1080,
+                    "kind": "http",
+                    "protocol": "http",
+                    "authentication": True,
+                },
+                "access_file": str(tmp_path / "access.json"),
+                "log_file": str(tmp_path / "runtime.log"),
+            }
+
+        def wait(self):
+            return 0
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(server_module, "RuntimeSession", FakeRuntime)
+    result = _invoke(
+        CliRunner(),
+        tmp_path / "home",
+        "server",
+        "--subscription",
+        "main",
+        "--node",
+        "a" * 32,
+        "--protocol",
+        "http",
+        "--auth",
+        "--no-install-missing",
+        terminal_width=400,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Authentication is enabled" in result.output
+    compact_output = "".join(result.output.split())
+    assert "username'local-user'andpassword'local-password'" in compact_output
+    assert "exportHTTP_PROXY='http://local-user:local-password@127.0.0.1:1080'" in compact_output
+    assert "exportHTTPS_PROXY='http://local-user:local-password@127.0.0.1:1080'" in compact_output
+    assert "exportALL_PROXY='http://local-user:local-password@127.0.0.1:1080'" in compact_output
+    assert "Accessfile:" not in result.output
+    assert "Logfile:" not in result.output
+
+
+def test_server_jsonl_uses_core_source_and_omits_owner_for_jerryproxy(tmp_path, monkeypatch):
+    class FakeRuntime(object):
+        def __init__(self, paths, **kwargs):
+            del paths
+            self.process = None
+            self._sink = kwargs["log_sink"]
+
+        def start(self, subscription_name, node_id, install_missing):
+            del subscription_name, node_id, install_missing
+            self._sink("jerryproxy", "INFO", "proxy listener ready")
+            self._sink("mihomo", "INFO", "connected")
+            self._sink("mihomo", "INFO", "HTTP request complete")
+
+        def public_info(self):
+            return {
+                "backend": "mihomo",
+                "backend_version": "1.19.29",
+                "listener": {
+                    "address": "127.0.0.1",
+                    "port": 1080,
+                    "kind": "mixed",
+                    "protocol": "mixed",
+                    "authentication": False,
+                },
+                "access_file": str(tmp_path / "private-access.json"),
+                "log_file": str(tmp_path / "private-runtime.log"),
+            }
+
+        def wait(self):
+            return 0
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(server_module, "RuntimeSession", FakeRuntime)
+    result = _invoke(
+        CliRunner(),
+        tmp_path / "home",
+        "server",
+        "--subscription",
+        "main",
+        "--node",
+        "a" * 32,
+        "--log-format",
+        "jsonl",
+        "--no-install-missing",
+    )
+
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    own = [item for item in records if item.get("message") == "proxy listener ready"]
+    backend = [item for item in records if item.get("message") == "connected"]
+    assert own and "source" not in own[0]
+    assert backend and backend[0]["source"] == "mihomo"
+    assert all("stdout" not in item.get("message", "") for item in records)
+    assert all("stderr" not in item.get("message", "") for item in records)
+    assert all("[backend:" not in item.get("message", "") for item in records)
+    ready = [item for item in records if item.get("event") == "session.ready"][0]
+    assert "access_file" not in ready["data"]
+    assert "log_file" not in ready["data"]
+
+
+def test_server_socks5_startup_prints_socks5h_environment_guide(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+
+    class FakeRuntime(object):
+        def __init__(self, paths, **kwargs):
+            del paths
+            self.process = None
+            self.username = None
+            self.password = None
+            assert kwargs["listener_protocol"] == "socks5"
+
+        def start(self, subscription_name, node_id, install_missing):
+            del subscription_name, node_id, install_missing
+
+        def public_info(self):
+            return {
+                "backend": "mihomo",
+                "backend_version": "1.19.29",
+                "listener": {
+                    "address": "127.0.0.1",
+                    "port": 1080,
+                    "kind": "socks5",
+                    "protocol": "socks5",
+                    "authentication": False,
+                },
+                "access_file": str(tmp_path / "access.json"),
+                "log_file": str(tmp_path / "runtime.log"),
+            }
+
+        def wait(self):
+            return 0
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(server_module, "RuntimeSession", FakeRuntime)
+    result = _invoke(
+        CliRunner(),
+        tmp_path / "home",
+        "server",
+        "--subscription",
+        "main",
+        "--node",
+        "a" * 32,
+        "--protocol",
+        "socks5",
+        "--no-install-missing",
+        terminal_width=400,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Proxy URL: socks5h://127.0.0.1:1080" in result.output
+    compact_output = "".join(result.output.split())
+    assert "exportHTTP_PROXY='socks5h://127.0.0.1:1080'" in compact_output
+    assert "exportHTTPS_PROXY='socks5h://127.0.0.1:1080'" in compact_output
+    assert "exportALL_PROXY='socks5h://127.0.0.1:1080'" in compact_output
+    assert "Access file:" not in result.output
+    assert "Log file:" not in result.output
+
+
+def test_server_bind_all_passes_wildcard_listener_and_warns(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setenv("COLUMNS", "200")
+
+    class FakeRuntime(object):
+        def __init__(self, paths, **kwargs):
+            del paths
+            captured.update(kwargs)
+            self.process = None
+
+        def start(self, subscription_name, node_id, install_missing):
+            del subscription_name, node_id, install_missing
+
+        def public_info(self):
+            return {
+                "listener": {
+                    "address": "0.0.0.0",
+                    "port": 1080,
+                    "kind": "http",
+                    "protocol": "http",
+                    "authentication": False,
+                },
+                "access_file": str(tmp_path / "access.json"),
+                "log_file": str(tmp_path / "runtime.log"),
+            }
+
+        def wait(self):
+            return 0
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(server_module, "RuntimeSession", FakeRuntime)
+    result = _invoke(
+        CliRunner(),
+        tmp_path / "home",
+        "server",
+        "--subscription",
+        "main",
+        "--node",
+        "a" * 32,
+        "--protocol",
+        "http",
+        "--bind-all",
+        "--no-install-missing",
+        terminal_width=200,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["bind_address"] == "0.0.0.0"
+    assert "proxy at 0.0.0.0:1080" in result.output
+    assert "exposedonallinterfaces" in "".join(result.output.split())
+
+    json_result = _invoke(
+        CliRunner(),
+        tmp_path / "home-json",
+        "server",
+        "--subscription",
+        "main",
+        "--node",
+        "a" * 32,
+        "--protocol",
+        "http",
+        "--bind-all",
+        "--log-format",
+        "jsonl",
+        "--no-install-missing",
+    )
+    assert json_result.exit_code == 0, json_result.output
+    assert "listener is exposed on all interfaces" in json_result.output
+
+
+def test_guided_port_input_checks_default_and_accepts_entered_value(monkeypatch):
+    monkeypatch.setattr(server_module, "_port_available", lambda port, bind_address="127.0.0.1": port == 19000)
+
+    def reserve(preferred=None, strict=False, bind_address="127.0.0.1"):
+        del preferred, strict, bind_address
+        return 19000
+
+    monkeypatch.setattr(server_module, "reserve_loopback_port", reserve)
+    captured = {}
+
+    def prompt(message, default=None):
+        captured["message"] = message
+        captured["default"] = default
+        return default
+
+    monkeypatch.setattr(cli_common, "prompt_text", prompt)
+
+    assert server_module._select_interactive_port() == (19000, True)
+    assert captured["default"] == "19000"
+    assert "press Enter" in captured["message"]
+
+
+def test_guided_port_input_accepts_auto(monkeypatch):
+    monkeypatch.setattr(server_module, "_port_available", lambda port, bind_address="127.0.0.1": True)
+    monkeypatch.setattr(cli_common, "prompt_text", lambda message, default=None: "auto")
+
+    assert server_module._select_interactive_port() == (None, False)
+
+
+def test_guided_add_source_wizard_discovers_and_completes_environment_names(tmp_path, monkeypatch):
+    captured = {}
+
+    class Prompt(object):
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    class FakeRecord(object):
+        name = "guided"
+        revision = "r"
+        format = "uri-lines"
+        enabled = True
+        node_count = 0
+        nodes = ()
+
+        def public(self, include_nodes=True):
+            del include_nodes
+            return {
+                "name": self.name,
+                "revision": self.revision,
+                "format": self.format,
+                "enabled": True,
+                "node_count": 0,
+            }
+
+    class FakeManager(object):
+        def add(self, name, source_url, body=None, format_hint="auto"):
+            captured.update(name=name, source_url=source_url, body=body, format_hint=format_hint)
+            return FakeRecord()
+
+    monkeypatch.setenv("V2RAY_SUBSCRIPTION", "https://provider.example/sub?token=hidden")
+    monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
+    monkeypatch.setattr(subscription_common, "subscriptions", lambda context: FakeManager())
+    selections = iter(["env", "V2RAY_SUBSCRIPTION"])
+    monkeypatch.setattr(cli_common.inquirer, "select", lambda **kwargs: Prompt(next(selections)))
+
+    result = _invoke(CliRunner(), tmp_path / "home", "subscription", "add", "guided")
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "name": "guided",
+        "source_url": "https://provider.example/sub?token=hidden",
+        "body": None,
+        "format_hint": "auto",
+    }
+    assert "hidden" not in result.output

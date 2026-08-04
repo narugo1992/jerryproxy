@@ -9,8 +9,8 @@ from jerryproxy.errors import SubscriptionFetchError, SubscriptionParseError
 from jerryproxy.subscription.transport import fetch_subscription, parse_subscription_body
 
 SS = b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ss\n"
-VMESS = b"vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1IiwibmV0IjoidGNwIiwicG9ydCI6IjQ0MyIsInBzIjoidm1lc3MiLCJ0bHMiOiJ0bHMiLCJ2IjoyfQ==\n"
-VLESS = b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?security=reality&sni=www.example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&flow=xtls-rprx-vision#vless\n"
+VMESS = b"vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1NTUiLCJuZXQiOiJ0Y3AiLCJwb3J0IjoiNDQzIiwicHMiOiJ2bWVzcyIsInRscyI6InRscyIsInYiOjJ9\n"
+VLESS = b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&flow=xtls-rprx-vision#vless\n"
 
 
 def test_plain_and_base64_uri_lines_are_classified_separately():
@@ -29,6 +29,26 @@ def test_explicit_uri_lines_does_not_decode_a_base64_body():
     encoded = base64.b64encode(SS)
     with pytest.raises(SubscriptionParseError, match="URI lines"):
         parse_subscription_body(encoded, format_hint="uri-lines")
+
+
+def test_uri_record_bound_is_checked_before_protocol_payload_decoding():
+    oversized = b"ss://" + (b"A" * (16 * 1024)) + b"\n"
+    with pytest.raises(SubscriptionParseError, match="URI record exceeds"):
+        parse_subscription_body(oversized, format_hint="uri-lines")
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        b"ss://garbage\n",
+        b"vmess://garbage\n",
+        b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?security=reality&sni=www.example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&flow=xtls-rprx-vision\n",
+        b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?type=bad&security=reality&sni=www.example.com&fp=bad&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&flow=xtls-rprx-vision\n",
+    ),
+)
+def test_protocol_envelopes_reject_malformed_or_unsupported_records(body):
+    with pytest.raises(SubscriptionParseError):
+        parse_subscription_body(body, format_hint="uri-lines")
 
 
 def test_fetch_rejects_private_dns_answers_before_request():
@@ -83,5 +103,32 @@ def test_fetch_pins_the_validated_address_for_the_actual_requests_socket(monkeyp
 
 
 def test_fetch_rejects_a_url_above_the_shared_bound():
-    with pytest.raises(SubscriptionFetchError, match="8192-byte bound"):
-        fetch_subscription("https://provider.example/" + "a" * 8192)
+    with pytest.raises(SubscriptionFetchError, match="16 KiB bound"):
+        fetch_subscription("https://provider.example/" + "a" * (16 * 1024))
+
+
+def test_fetch_rejects_a_premature_declared_length_eof():
+    class Response(object):
+        status_code = 200
+        headers = {"Content-Length": "4"}
+
+        def iter_content(self, chunk_size):
+            del chunk_size
+            return iter((b"abc",))
+
+        def close(self):
+            pass
+
+    class Session(object):
+        trust_env = False
+
+        def get(self, *args, **kwargs):
+            del args, kwargs
+            return Response()
+
+    with pytest.raises(SubscriptionFetchError, match="length did not match"):
+        fetch_subscription(
+            "https://provider.example/sub",
+            session=Session(),
+            resolver=lambda hostname, port, type=None: [(2, 1, 6, "", ("1.1.1.1", port))],
+        )

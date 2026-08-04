@@ -19,7 +19,7 @@ Implemented in the first usable proxy slice
 
 * bounded ``V2RAY_SUBSCRIPTION`` input with credential redaction and private
   home-local revisions;
-* Mihomo 1.19.29 NodeSet projection and authenticated foreground ``server``;
+* Mihomo 1.19.29 NodeSet projection and synchronous foreground ``server``;
 * sanitized ``subscription`` and ``node list`` commands;
 * global health quorum, same-node restart, deterministic alternate sweep, and
   one policy-controlled source refresh.

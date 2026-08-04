@@ -5,6 +5,7 @@ import signal
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -13,11 +14,47 @@ from pathlib import Path
 from ..backend.durable import flush_directory
 from ..errors import RuntimeSessionError
 from ..home import is_path_alias
-from ..subscription.redaction import redact_text
+from ..subscription.redaction import redact_bytes, redact_text, terminal_safe_text
 from .interfaces import RuntimeDriver, RuntimeProjection
 
 QUALIFIED_VERSION = "1.19.29"
 MAXIMUM_LOG_BYTES = 4 * 1024 * 1024
+MAXIMUM_BACKEND_LINE_BYTES = 16 * 1024
+LISTENER_PROTOCOLS = ("mixed", "http", "socks5")
+LISTENER_ADDRESSES = ("127.0.0.1", "0.0.0.0")
+
+
+def _configure_parent_death_signal():  # type: () -> None
+    """Ask Linux to terminate the backend when its supervising process dies."""
+
+    if os.name != "posix" or not hasattr(signal, "SIGTERM"):
+        return
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        prctl = getattr(libc, "prctl", None)
+        if prctl is not None:
+            prctl(1, int(signal.SIGTERM), 0, 0, 0)
+    except (AttributeError, OSError, TypeError):
+        # Platforms without Linux prctl retain the normal process-group cleanup.
+        return
+
+
+def _config_log_level(value):  # type: (str) -> str
+    levels = {
+        "OFF": "silent",
+        "DEBUG": "debug",
+        "INFO": "info",
+        "WARN": "warning",
+        "ERROR": "error",
+        "SILENT": "silent",
+        "WARNING": "warning",
+    }
+    normalized = str(value).upper()
+    if normalized not in levels:
+        raise ValueError("unsupported Mihomo log level")
+    return levels[normalized]
 
 
 def _validate_private_chain(path, boundary=None):
@@ -72,49 +109,84 @@ def _private_bytes(path, payload, boundary=None):  # type: (Path, bytes, object)
                 pass
 
 
-def reserve_loopback_port(preferred=None):  # type: (int) -> int
-    """Reserve and release one loopback TCP port immediately before launch."""
+def reserve_loopback_port(preferred=None, strict=False, bind_address="127.0.0.1"):  # type: (int, bool, str) -> int
+    """Reserve and release one TCP port immediately before launch."""
 
+    if not isinstance(strict, bool):
+        raise ValueError("strict must be a boolean")
+    if bind_address not in LISTENER_ADDRESSES:
+        raise ValueError("unsupported listener bind address")
+    if preferred is not None and (
+        not isinstance(preferred, int)
+        or isinstance(preferred, bool)
+        or not 1 <= preferred <= 65535
+    ):
+        raise ValueError("preferred port is outside the TCP port range")
     candidates = [preferred] if preferred is not None else []
-    candidates.extend(range(17777, 17827))
+    if not strict:
+        candidates.extend(range(17777, 17827))
     for port in candidates:
-        if port is None or not isinstance(port, int) or not 1 <= port <= 65534:
+        if port is None or not isinstance(port, int) or not 1 <= port <= 65535:
             continue
         descriptor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             descriptor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            descriptor.bind(("127.0.0.1", port))
+            descriptor.bind((bind_address, port))
             return port
         except OSError:
             continue
         finally:
             descriptor.close()
+    if preferred is not None and strict:
+        raise RuntimeSessionError("requested listener port is unavailable: %d" % preferred)
     descriptor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        descriptor.bind(("127.0.0.1", 0))
+        descriptor.bind((bind_address, 0))
         return descriptor.getsockname()[1]
     except OSError as error:
-        # A lack of a loopback socket is a terminal launch failure.
-        raise RuntimeSessionError("unable to reserve a loopback listener") from error
+        # A lack of a listener socket is a terminal launch failure.
+        raise RuntimeSessionError("unable to reserve a listener port") from error
     finally:
         descriptor.close()
 
 
-def build_provider_config(provider_path, uri_bytes, port, username, password):
-    # type: (Path, bytes, int, str, str) -> bytes
+def build_provider_config(
+    provider_path,
+    uri_bytes,
+    port,
+    username,
+    password,
+    listener_protocol="mixed",
+    log_level="warning",
+    bind_address="127.0.0.1",
+):
+    # type: (Path, bytes, int, str, str, str, str, str) -> bytes
     """Build a minimal local-file Mihomo config without parsing credentials."""
 
+    if listener_protocol not in LISTENER_PROTOCOLS:
+        raise ValueError("unsupported Mihomo listener protocol")
+    if bind_address not in LISTENER_ADDRESSES:
+        raise ValueError("unsupported listener bind address")
+    if username is not None or password is not None:
+        if username is None or password is None:
+            raise ValueError("proxy authentication requires both username and password")
     # The provider body remains opaque and is parsed by Mihomo 1.19.29.  The
     # generated projection contains no controller or secondary network source.
     escaped_path = str(provider_path).replace("\\", "/").replace("'", "''")
     lines = [
-        "mixed-port: %d" % port,
-        "allow-lan: false",
+        "%s: %d" % (
+            {
+                "mixed": "mixed-port",
+                "http": "port",
+                "socks5": "socks-port",
+            }[listener_protocol],
+            port,
+        ),
+        "bind-address: %s" % bind_address,
+        "allow-lan: %s" % ("true" if bind_address == "0.0.0.0" else "false"),
         "mode: rule",
         "ipv6: false",
-        "log-level: warning",
-        "authentication:",
-        "  - '%s:%s'" % (username, password),
+        "log-level: %s" % _config_log_level(log_level),
         "proxy-providers:",
         "  jerryproxy:",
         "    type: file",
@@ -129,6 +201,11 @@ def build_provider_config(provider_path, uri_bytes, port, username, password):
         "rules:",
         "  - MATCH,jerryproxy",
     ]
+    if username is not None:
+        lines[6:6] = [
+            "authentication:",
+            "  - '%s:%s'" % (username, password),
+        ]
     del uri_bytes
     return ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -143,21 +220,45 @@ class MihomoDriver(RuntimeDriver):
     def name(self):  # type: () -> str
         return "mihomo"
 
-    def projection(self, provider_path, node, port, username, password):
-        # type: (Path, object, int, str, str) -> RuntimeProjection
+    def projection(
+        self,
+        provider_path,
+        node,
+        port,
+        username,
+        password,
+        listener_protocol="mixed",
+        backend_log_level="INFO",
+        bind_address="127.0.0.1",
+    ):
+        # type: (Path, object, int, str, str, str, str, str) -> RuntimeProjection
         uri = node.secret_uri()
         provider = (uri + "\n").encode("utf-8")
-        config = build_provider_config(provider_path, provider, port, username, password)
+        config = build_provider_config(
+            provider_path,
+            provider,
+            port,
+            username,
+            password,
+            listener_protocol=listener_protocol,
+            log_level=backend_log_level,
+            bind_address=bind_address,
+        )
         return RuntimeProjection(config=config, provider=provider)
 
-    def create_process(self, executable, config_path, session_root, log_path, backend_log_level):
-        # type: (Path, Path, Path, Path, str) -> object
+    def create_process(self, executable, config_path, session_root, log_path, backend_log_level, log_sink=None):
+        # type: (Path, Path, Path, Path, str, object) -> object
+        options = {
+            "backend_log_level": backend_log_level,
+        }
+        if log_sink is not None:
+            options["log_sink"] = log_sink
         return self.process_factory(
             executable,
             config_path,
             session_root,
             log_path,
-            backend_log_level=backend_log_level,
+            **options
         )
 
     def wait_ready(self, process, port, timeout):
@@ -215,30 +316,71 @@ def build_environment(executable, session_root):  # type: (Path, Path) -> dict
 
 
 class MihomoProcess(object):
-    """One bounded Mihomo child and its redacted output drain."""
+    """One bounded Mihomo child with one redacted merged output stream."""
 
-    def __init__(self, executable, config_path, session_root, log_path, backend_log_level="WARN"):
+    def __init__(
+        self,
+        executable,
+        config_path,
+        session_root,
+        log_path,
+        backend_log_level="INFO",
+        log_sink=None,
+        backend_name="mihomo",
+    ):
         self.executable = Path(executable)
         self.config_path = Path(config_path)
         self.session_root = Path(session_root)
         self.log_path = Path(log_path)
         self.backend_log_level = backend_log_level
+        self.log_sink = log_sink
+        self.backend_name = str(backend_name)
         self.process = None
         self._threads = []
         self._stop = threading.Event()
         self._drain_errors = []
+        self._log_lock = threading.Lock()
+
+    def set_log_lock(self, log_lock):
+        """Share the session log lock with the foreground runtime owner."""
+
+        if log_lock is None or not hasattr(log_lock, "__enter__"):
+            raise ValueError("log_lock must be a context-manager lock")
+        self._log_lock = log_lock
 
     def _record_drain_error(self, error):
         if len(self._drain_errors) >= 8:
             return
         self._drain_errors.append(redact_text(error)[:1024])
 
-    def _drain(self, stream, label):
+    @staticmethod
+    def _read_chunk(stream, descriptor):
+        if descriptor is not None:
+            return os.read(descriptor, 65536)
+        reader = getattr(stream, "read1", None)
+        if reader is not None:
+            return reader(65536)
+        return stream.read(65536)
+
+    def _write_backend_line(self, payload):
+        """Persist and forward one redacted line from the merged child stream."""
+
+        if self.backend_log_level == "OFF":
+            return
+        # The child stream is deliberately opaque to the process supervisor:
+        # decode only for diagnostics, redact credentials, and make control
+        # characters visible before either persistence or terminal rendering.
+        safe = terminal_safe_text(redact_bytes(payload)).strip()
+        if not safe:
+            return
+        encoded = safe.encode("utf-8")
+        if len(encoded) > MAXIMUM_BACKEND_LINE_BYTES:
+            safe = encoded[:MAXIMUM_BACKEND_LINE_BYTES].decode("utf-8", "ignore") + " [line truncated]"
+        line = ("[%s] %s\n" % (self.backend_name, safe)).encode("utf-8", "replace")
         descriptor = -1
-        written = 0
         try:
-            _private_directory(self.log_path.parent, boundary=self.log_path.parent)
-            if self.backend_log_level != "OFF":
+            with self._log_lock:
+                _private_directory(self.log_path.parent, boundary=self.log_path.parent)
                 if is_path_alias(self.log_path):
                     raise RuntimeSessionError("runtime log path is aliased")
                 flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
@@ -246,50 +388,63 @@ class MihomoProcess(object):
                 status = os.fstat(descriptor)
                 if not stat.S_ISREG(status.st_mode):
                     raise RuntimeSessionError("runtime log path is not a regular file")
-                if status.st_size > MAXIMUM_LOG_BYTES:
+                if os.name == "posix" and stat.S_IMODE(status.st_mode) != 0o600:
+                    raise RuntimeSessionError("runtime log path has unsafe permissions")
+                if status.st_size >= MAXIMUM_LOG_BYTES:
                     raise RuntimeSessionError("runtime log exceeds its size bound")
-                written = status.st_size
+                os.write(descriptor, line[: MAXIMUM_LOG_BYTES - status.st_size])
         except (OSError, RuntimeSessionError, ValueError) as error:
-            # Log publication can fail after launch; retain a bounded diagnostic
-            # but continue draining the child pipe so a verbose backend cannot block.
+            # Log publication can fail after launch; draining must continue.
             self._record_drain_error(error)
+        finally:
             if descriptor != -1:
                 os.close(descriptor)
-                descriptor = -1
+        if self.log_sink is not None:
+            try:
+                self.log_sink(self.backend_name, "INFO", safe)
+            except (OSError, ValueError):
+                # A foreground log sink may close during shutdown.
+                pass
+
+    def _drain(self, stream):
+        stream_descriptor = None
+        try:
+            stream_descriptor = stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            # In-memory test streams do not expose an OS file descriptor.
+            stream_descriptor = None
+        pending = bytearray()
         try:
             while True:
                 try:
-                    chunk = stream.read(65536)
+                    chunk = self._read_chunk(stream, stream_descriptor)
                 except (OSError, ValueError) as error:
                     # A closed child pipe is a bounded teardown condition.
                     self._record_drain_error(error)
                     break
                 if not chunk:
                     break
-                if descriptor == -1 or self.backend_log_level == "OFF":
-                    continue
-                # Backend bytes are never rendered verbatim.  Keep a bounded stream
-                # summary for diagnostics while always draining the pipe.
-                safe = b" ".join(chunk.splitlines()).decode("utf-8", "replace")
-                safe = redact_text(" ".join(safe.split()))[:4096]
-                if safe:
-                    line = ("[backend:%s] %s\n" % (label, safe)).encode("utf-8", "replace")
-                    if written >= MAXIMUM_LOG_BYTES:
-                        self._record_drain_error(RuntimeSessionError("runtime log exceeds its size bound"))
-                        os.close(descriptor)
-                        descriptor = -1
-                        continue
-                    line = line[: MAXIMUM_LOG_BYTES - written]
+                pending.extend(chunk)
+                while True:
                     try:
-                        written += os.write(descriptor, line)
-                    except OSError as error:
-                        # Stop persisting after a write failure but keep draining.
-                        self._record_drain_error(error)
-                        os.close(descriptor)
-                        descriptor = -1
+                        line_end = pending.index(10)
+                    except ValueError:
+                        break
+                    line = bytes(pending[:line_end])
+                    del pending[: line_end + 1]
+                    if line.endswith(b"\r"):
+                        line = line[:-1]
+                    self._write_backend_line(line)
+                # A backend may write a progress/blob line without a newline.
+                # Emit bounded chunks so live diagnostics cannot consume
+                # unbounded memory or wait for EOF, even across pipe reads.
+                while len(pending) > MAXIMUM_BACKEND_LINE_BYTES:
+                    line = bytes(pending[:MAXIMUM_BACKEND_LINE_BYTES])
+                    del pending[:MAXIMUM_BACKEND_LINE_BYTES]
+                    self._write_backend_line(line + b" [line truncated]")
         finally:
-            if descriptor != -1:
-                os.close(descriptor)
+            if pending:
+                self._write_backend_line(bytes(pending))
             try:
                 stream.close()
             except (OSError, ValueError):
@@ -308,13 +463,17 @@ class MihomoProcess(object):
                 "env": env,
                 "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE,
+                # Keep one backend stream so callers never need to reason
+                # about whether a line came from stdout or stderr.
+                "stderr": subprocess.STDOUT,
                 "shell": False,
                 "close_fds": True,
                 "universal_newlines": False,
             }
             if os.name == "posix":
                 options["start_new_session"] = True
+                if sys.platform.startswith("linux"):
+                    options["preexec_fn"] = _configure_parent_death_signal
             elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
                 options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             self.process = subprocess.Popen(
@@ -324,11 +483,10 @@ class MihomoProcess(object):
         except OSError as error:
             # Executable launch failures are terminal runtime errors.
             raise RuntimeSessionError("mihomo backend launch failed") from error
-        for stream, label in ((self.process.stdout, "stdout"), (self.process.stderr, "stderr")):
-            thread = threading.Thread(target=self._drain, args=(stream, label), name="jerryproxy-%s" % label)
-            thread.daemon = True
-            thread.start()
-            self._threads.append(thread)
+        thread = threading.Thread(target=self._drain, args=(self.process.stdout,), name="jerryproxy-backend")
+        thread.daemon = True
+        thread.start()
+        self._threads.append(thread)
         return self.process
 
     def wait_ready(self, port, timeout=5.0):  # type: (int, float) -> None

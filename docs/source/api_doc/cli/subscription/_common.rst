@@ -15,10 +15,28 @@ SOURCE\_ENVIRONMENT
    :no-value:
 
 
+discover\_source\_environments
+-----------------------------------------------------
+
+.. autofunction:: discover_source_environments
+
+
 subscriptions
 -----------------------------------------------------
 
 .. autofunction:: subscriptions
+
+
+require\_name
+-----------------------------------------------------
+
+.. autofunction:: require_name
+
+
+prompt\_name
+-----------------------------------------------------
+
+.. autofunction:: prompt_name
 
 
 confirm\_dangerous\_operation
