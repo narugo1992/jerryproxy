@@ -144,6 +144,25 @@ def test_guardian_parent_identity_requires_same_parent_and_start_token(monkeypat
     assert not guardian_module._parent_identity_matches(42, None)
 
 
+def test_guardian_refuses_to_launch_without_authenticated_parent(tmp_path, monkeypatch):
+    monkeypatch.setattr(guardian_module, "_parent_identity_matches", lambda pid, token: False)
+
+    def unexpected_launch(*args, **kwargs):
+        raise AssertionError("backend must not launch without parent authentication")
+
+    monkeypatch.setattr(guardian_module.subprocess, "Popen", unexpected_launch)
+    result = guardian_module.run(
+        tmp_path / "mihomo",
+        tmp_path / "config.yaml",
+        tmp_path / "guardian.json",
+        tmp_path,
+        parent_pid=42,
+        parent_start_time="started",
+    )
+
+    assert result == 125
+
+
 def test_windows_job_helper_is_inactive_off_windows():
     if os.name == "nt":
         pytest.skip("native Windows Job Object path")
