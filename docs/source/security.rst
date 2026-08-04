@@ -106,13 +106,15 @@ that does not implement them. The command and active manifest are published as
 two separately atomic paths; crash recovery converges their pair under the next
 home lock, but an external observer can see an intermediate pair before then.
 
-Planned runtime invariants:
+Current URI-runtime invariants:
 
 * subscription URLs never appear in argv or displayed logs;
-* generated provider/controller files are owner-only;
-* controllers bind to loopback/private IPC and require a random secret;
-* runtime descriptors validate process creation identity, not PID alone;
-* backend output is redacted before display or persistence;
+* the generated Mihomo provider, access descriptor, and session files are
+  owner-only below ``JERRYPROXY_HOME``;
+* the foreground mixed listener binds to loopback and requires a random secret;
+* backend stdout/stderr are drained separately and redacted before persistence;
+* health recovery uses bounded restart/alternate/refresh steps and preserves
+  the saved node preference;
 * managed downloads enforce time, size, and redirect policy.
 
 JerryProxy does not bundle external backends. Their upstream licenses and

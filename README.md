@@ -5,10 +5,11 @@ switching, and eventually orchestrating multiple external proxy backends. The
 PyPI distribution, Python import, GitHub repository, CLI command, and default
 home directory all use the same name: `jerryproxy`.
 
-> **Work in progress:** the backend version manager is implemented in this
-> repository. Subscription ingestion, proxy runtime generation, authenticated
-> Mihomo control, and the compatibility layer for the historical `v2raycli`
-> command surface are planned but are not yet implemented.
+> **Work in progress:** the first runtime slice is implemented: bounded
+> `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, and VLESS URI
+> lines, sanitized home-local state, and an authenticated Mihomo 1.19.29
+> foreground server with bounded health recovery. Native profiles, other core
+> drivers, and the historical `v2raycli` compatibility layer remain planned.
 
 ## Current status
 
@@ -43,6 +44,11 @@ Implemented now:
 - scoped cleanup for downloads, logs, providers, and generated runtime data;
 - a packaged-CLI self-check with isolated local diagnostics plus bounded,
   integrity-checked availability probes for the three built-in relays;
+- bounded `V2RAY_SUBSCRIPTION` source ingestion with private state below
+  `JERRYPROXY_HOME`, stable sanitized node IDs, and SS/VMess/VLESS URI support;
+- a synchronous Mihomo 1.19.29 foreground server with an authenticated
+  loopback mixed listener, separated backend output, global health quorum,
+  deterministic restart/failover, and one policy-controlled source refresh;
 - two-stage standalone validation that builds Linux in a pinned Python 3.7
   Docker image and executes every downloaded artifact in clean environments;
 - deterministic offline unit tests, Sphinx documentation, packaging checks,
@@ -50,14 +56,11 @@ Implemented now:
 
 Not implemented yet:
 
-- subscription download, bounded inventory, and credential redaction;
-- generated Mihomo provider/listener/controller configuration;
-- `run`, `start`, `stop`, `status`, `list`, `select`, `test`, and `refresh`
-  runtime commands;
-- safe foreground/detached process supervision and runtime descriptors;
-- the legacy `V2RAY_*` environment and option compatibility layer;
-- sing-box/Xray/V2Ray runtime drivers beyond binary installation and
-  activation;
+- native Mihomo/Clash profiles and runtime drivers for sing-box, Xray, and
+  V2Ray;
+- durable measurement/ranking, controller APIs, TUN/LAN integration, and
+  background service wrappers;
+- the historical `v2raycli` option compatibility layer;
 - PyPI publication, signed standalone executables, and Read the Docs hosting.
 
 ## Why JerryProxy exists
@@ -283,9 +286,13 @@ installations.
 ├── bin/             # Active backend links/copies
 ├── downloads/       # Verified release archives
 ├── locks/           # Home-wide jerryproxy.lock
-├── logs/            # Future wrapper/core logs
-├── providers/       # Future private subscription provider files
-└── runtimes/        # Future runtime descriptors and generated configs
+├── logs/            # Redacted JerryProxy/backend stream summaries
+├── subscriptions/  # Private current subscription records
+├── nodes/           # Reserved private node-management namespace
+├── leases/          # Private foreground sessions and generated configs
+├── config/          # Private runtime configuration namespace
+├── runtimes/        # Private backend transaction/recovery namespace
+└── providers/       # Disposable provider projections
 ```
 
 The entire tree is private (`0700`) on POSIX systems. JSON state and secret
@@ -445,25 +452,25 @@ steps receive neither token. The workflow owns only `Relay-Health.md` in the
 initialized `jerryproxy.wiki.git` repository and verifies that the manually
 maintained `Home.md` hash is unchanged before and after publication.
 
-## Planned user experience
+## Foreground user experience
 
-The intended stable workflow is:
+The current synchronous workflow is:
 
 ```shell
-export JERRYPROXY_SUBSCRIPTION='https://provider.example/subscription'
+export V2RAY_SUBSCRIPTION='https://provider.example/subscription'
 
-jerryproxy run
-jerryproxy status
-jerryproxy list
-jerryproxy select 3
-jerryproxy test
-jerryproxy refresh
-jerryproxy stop
+jerryproxy subscription add main --url-env V2RAY_SUBSCRIPTION
+jerryproxy node list main
+jerryproxy server --subscription main --node NODE_ID --install-missing -y
 ```
 
-`run` will ensure a tested backend exists, install the pinned default when
-needed, create private state, load the subscription without exposing its URL,
-and report the loopback HTTP/SOCKS endpoint.
+`server` ensures the exact Mihomo backend exists, creates private state, loads
+the subscription without exposing its URL, reports the authenticated loopback
+HTTP/SOCKS endpoint, and keeps the process in the foreground. Two consecutive
+failed global health quorums trigger one same-node restart, deterministic
+alternate-node attempts, and one optional subscription refresh within the
+configured recovery deadline. Automatic recovery never rewrites the saved node
+preference.
 
 ## Roadmap
 
@@ -475,9 +482,12 @@ and report the loopback HTTP/SOCKS endpoint.
 - [x] Add tested stable-only offline backend catalogs and weekly maintenance.
 - [x] Add guided backend operations and confirmed scoped cleanup/removal.
 - [ ] Add offline archive installation with an explicit digest.
-- [ ] Implement managed subscription fetch and private file providers.
-- [ ] Implement the Mihomo runtime driver and authenticated controller client.
-- [ ] Implement runtime locks, descriptors, foreground/detached operation.
+- [x] Implement managed `V2RAY_SUBSCRIPTION` fetch, private state, and URI
+  inventory for SS/VMess/VLESS.
+- [x] Implement the Mihomo foreground driver, authenticated listener, stream
+  redirection, and bounded health recovery.
+- [ ] Implement durable controller operations, measurements, and service
+  integration.
 - [ ] Preserve documented `v2raycli` inputs through deprecated aliases.
 - [ ] Add native HTTP-provider mode as an explicit alternative.
 - [ ] Add Xray and V2Ray runtime drivers only for concrete compatibility gaps.
