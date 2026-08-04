@@ -35,11 +35,45 @@ READ_TIMEOUT = 10.0
 SUPPORTED_SCHEMES = ("ss", "vmess", "vless")
 _URI_LINE = re.compile(r"^(ss|vmess|vless)://[^\s]+$", re.IGNORECASE)
 _VMESS_PORT = re.compile(r"^\d+$")
+_VMESS_FIELDS = frozenset(
+    (
+        "v",
+        "ps",
+        "add",
+        "address",
+        "port",
+        "id",
+        "aid",
+        "scy",
+        "net",
+        "type",
+        "host",
+        "path",
+        "tls",
+        "sni",
+        "alpn",
+        "fp",
+        "allowInsecure",
+        "security",
+        "serviceName",
+        "mode",
+        "authority",
+        "headerType",
+        "quicSecurity",
+        "key",
+        "seed",
+        "packetEncoding",
+        "encryption",
+    )
+)
+_MAX_JSON_DEPTH = 32
+_MAX_JSON_NODES = 8192
 _REALITY_SHORT_ID = re.compile(r"^[0-9a-fA-F]{0,16}$")
 _REALITY_PUBLIC_KEY = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _REALITY_FINGERPRINTS = frozenset(("chrome", "firefox", "safari", "edge", "ios", "android", "random"))
 _VLESS_NETWORKS = frozenset(("tcp", "grpc", "ws", "http", "h2", "quic", "kcp"))
 _VLESS_SECURITY = frozenset(("none", "tls", "reality", "xtls"))
+_VLESS_QUERY_KEYS = frozenset(("type", "security", "flow", "sni", "fp", "pbk", "sid"))
 
 
 def _reject_duplicate_json_keys(pairs):  # type: (list) -> dict
@@ -420,7 +454,9 @@ def _validate_ss_uri(uri):  # type: (str) -> None
     except UnicodeDecodeError as error:
         # SS method/password envelopes are UTF-8 text by convention.
         raise SubscriptionParseError("ss URI payload is not UTF-8") from error
-    if ":" not in decoded_text:
+    credential_text = decoded_text.rsplit("@", 1)[0]
+    method, separator, password = credential_text.partition(":")
+    if not separator or not method or not password:
         raise SubscriptionParseError("ss URI payload is missing method and password")
     if authority is None:
         if "@" not in decoded_text:
@@ -433,6 +469,27 @@ def _validate_ss_uri(uri):  # type: (str) -> None
         # ValueError is expected for malformed SS authority or port syntax.
         raise SubscriptionParseError("ss URI endpoint is invalid") from error
     _validate_endpoint(parsed.hostname, port, "ss")
+
+
+def _validate_json_shape(value, depth=0):  # type: (object, int) -> int
+    """Bound VMess JSON structure before protocol fields are consumed."""
+
+    if depth > _MAX_JSON_DEPTH:
+        raise SubscriptionParseError("vmess URI JSON exceeds the depth or node bound")
+    nodes = 1
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise SubscriptionParseError("vmess URI JSON contains a non-string key")
+            if isinstance(item, (dict, list)):
+                raise SubscriptionParseError("vmess URI JSON contains a nested field")
+            nodes += _validate_json_shape(item, depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            nodes += _validate_json_shape(item, depth + 1)
+    if nodes > _MAX_JSON_NODES:
+        raise SubscriptionParseError("vmess URI JSON exceeds the depth or node bound")
+    return nodes
 
 
 def _validate_vmess_uri(uri):  # type: (str) -> None
@@ -448,6 +505,10 @@ def _validate_vmess_uri(uri):  # type: (str) -> None
         raise SubscriptionParseError("vmess URI payload is not valid JSON") from error
     if not isinstance(value, dict):
         raise SubscriptionParseError("vmess URI payload is not an object")
+    unknown = set(value).difference(_VMESS_FIELDS)
+    if unknown:
+        raise SubscriptionParseError("vmess URI contains unknown fields")
+    _validate_json_shape(value)
     address = value.get("add") or value.get("address")
     port = value.get("port")
     if isinstance(port, str) and _VMESS_PORT.match(port):
@@ -489,6 +550,8 @@ def _validate_vless_fields(uri):  # type: (str) -> None
         key, separator, value = part.partition("=")
         if not separator or not key or key in query:
             raise SubscriptionParseError("vless URI has an invalid query")
+        if key not in _VLESS_QUERY_KEYS:
+            raise SubscriptionParseError("vless URI contains an unknown query field")
         query[key] = value
     security = query.get("security", "none")
     if security not in _VLESS_SECURITY:
