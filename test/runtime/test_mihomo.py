@@ -13,6 +13,7 @@ from jerryproxy.runtime.mihomo import (
     MAXIMUM_LOG_BYTES,
     MihomoProcess,
     _listener_owned_by_process,
+    _windows_tcp_port,
     build_provider_config,
     reserve_loopback_port,
 )
@@ -331,6 +332,33 @@ def test_linux_readiness_requires_exact_listener_address(tmp_path, bound_address
         assert _listener_owned_by_process(process, listener.getsockname()[1], claimed_address) is expected
     finally:
         listener.close()
+
+
+def test_windows_tcp_port_decodes_the_network_order_low_word():
+    assert _windows_tcp_port(socket.htons(17777)) == 17777
+
+
+def test_macos_lsof_probe_uses_fixed_path_and_exact_wildcard(monkeypatch, tmp_path):
+    executable = tmp_path / "lsof"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'p%s\\nn%s\\n' \"$4\" \"$LPORT\"\n",
+        encoding="ascii",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setattr(mihomo_module, "_MACOS_LSOF_PATHS", (str(executable),))
+    process = type("Process", (), {"pid": 123})()
+    monkeypatch.setattr(
+        mihomo_module.subprocess,
+        "run",
+        lambda argv, **kwargs: type("Result", (), {"stdout": b"p123\nn127.0.0.1:17777\n"})(),
+    )
+    assert mihomo_module._listener_owned_by_macos_process(process, 17777, "0.0.0.0") is False
+    monkeypatch.setattr(
+        mihomo_module.subprocess,
+        "run",
+        lambda argv, **kwargs: type("Result", (), {"stdout": b"p123\nn*:17777\n"})(),
+    )
+    assert mihomo_module._listener_owned_by_macos_process(process, 17777, "0.0.0.0") is True
 
 
 def test_readiness_fails_closed_when_owner_proof_is_unavailable(tmp_path, monkeypatch):

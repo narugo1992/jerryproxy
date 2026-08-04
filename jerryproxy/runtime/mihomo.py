@@ -24,6 +24,7 @@ MAXIMUM_BACKEND_LINE_BYTES = 16 * 1024
 LISTENER_PROTOCOLS = ("mixed", "http", "socks5")
 LISTENER_ADDRESSES = ("127.0.0.1", "0.0.0.0")
 _HTTP_READINESS_STATUSES = frozenset((200, 400, 403, 404, 405, 500, 501, 502, 503, 504))
+_MACOS_LSOF_PATHS = ("/usr/sbin/lsof", "/usr/bin/lsof")
 
 
 def _configure_parent_death_signal():  # type: () -> None
@@ -413,12 +414,21 @@ def _listener_owned_by_macos_process(process, port, address):  # type: (object, 
     pid = getattr(process, "pid", None)
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
+    executable = None
+    for candidate in _MACOS_LSOF_PATHS:
+        path = Path(candidate)
+        if path.is_file() and not is_path_alias(path):
+            executable = candidate
+            break
+    if executable is None:
+        # A PATH-provided lsof is not an ownership primitive: it can be
+        # replaced by the caller and forge a successful readiness result.
+        return None
     try:
-        endpoint = "%d" % port if address == "0.0.0.0" else "%s:%d" % (address, port)
-        selector = "-iTCP:%s" % endpoint if address == "0.0.0.0" else "-iTCP@%s" % endpoint
+        selector = "-iTCP:%d" % port if address == "0.0.0.0" else "-iTCP@%s:%d" % (address, port)
         result = subprocess.run(
             [
-                "lsof",
+                executable,
                 "-nP",
                 "-a",
                 "-p",
@@ -440,7 +450,7 @@ def _listener_owned_by_macos_process(process, port, address):  # type: (object, 
             continue
         endpoint = line[1:].split(None, 1)[0].decode("ascii", "ignore")
         if address == "0.0.0.0":
-            if endpoint.endswith(":%d" % port) or endpoint.endswith(":%d (LISTEN)" % port):
+            if endpoint in ("*:%d" % port, "0.0.0.0:%d" % port):
                 return True
         elif endpoint == "%s:%d" % (address, port):
             return True
@@ -460,9 +470,9 @@ def _listener_owned_by_windows_process(process, port, address):  # type: (object
             _fields_ = [
                 ("state", ctypes.c_ulong),
                 ("local_address", ctypes.c_ulong),
-                ("local_port", ctypes.c_ubyte * 4),
+                ("local_port", ctypes.c_ulong),
                 ("remote_address", ctypes.c_ulong),
-                ("remote_port", ctypes.c_ubyte * 4),
+                ("remote_port", ctypes.c_ulong),
                 ("owning_pid", ctypes.c_ulong),
             ]
 
@@ -492,17 +502,26 @@ def _listener_owned_by_windows_process(process, port, address):  # type: (object
         rows = (Row * count).from_buffer(buffer, ctypes.sizeof(ctypes.c_ulong))
         expected_address = int.from_bytes(socket.inet_aton(address), "little")
         for row in rows:
-            current_port = int.from_bytes(bytes(row.local_port), "big")
+            # Windows stores the TCP port in network byte order inside a
+            # DWORD.  Reading all four bytes as a big-endian integer turns
+            # ordinary ports such as 17777 into a different value.
+            current_port = _windows_tcp_port(row.local_port)
             if (
                 current_port == port
                 and row.owning_pid == pid
-                and (address == "0.0.0.0" or row.local_address == expected_address)
+                and row.local_address == expected_address
             ):
                 return True
         return False
     except (AttributeError, OSError, TypeError, ValueError):
         # Unsupported API variants cannot prove listener ownership.
         return None
+
+
+def _windows_tcp_port(value):  # type: (object) -> int
+    """Decode the network-order low word used by GetExtendedTcpTable."""
+
+    return socket.ntohs(int(value) & 0xFFFF)
 
 
 def _listener_owned_by_process(process, port, address):  # type: (object, int, str) -> object
