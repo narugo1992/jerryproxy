@@ -10,6 +10,7 @@ from tabulate import tabulate
 from ..backend import BackendManager, iter_backends
 from ..home import JerryProxyPaths
 from ..subscription import SubscriptionManager
+from ..subscription.redaction import terminal_safe_text
 
 
 def echo_table(headers, rows):  # type: (list, list) -> None
@@ -129,8 +130,8 @@ def select_subscription(context, message, enabled_only=False):  # type: (click.C
             record.name,
             name="%s - %s, %d node(s)%s"
             % (
-                record.name,
-                record.format,
+                terminal_safe_text(record.name),
+                terminal_safe_text(record.format),
                 record.node_count,
                 " (disabled)" if not record.enabled else "",
             ),
@@ -147,7 +148,12 @@ def select_subscription_node(context, subscription_name, message):  # type: (cli
     choices = [
         Choice(
             node.node_id,
-            name="%s - %s - %s" % (node.node_id, node.scheme.upper(), node.display),
+            name="%s - %s - %s"
+            % (
+                terminal_safe_text(node.node_id),
+                terminal_safe_text(node.scheme.upper()),
+                terminal_safe_text(node.display),
+            ),
         )
         for node in record.nodes
     ]

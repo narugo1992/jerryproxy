@@ -475,9 +475,11 @@ def _validate_vless_fields(uri):  # type: (str) -> None
         # ValueError is expected for malformed URI authority syntax.
         raise SubscriptionParseError("subscription URI is invalid") from error
     _validate_endpoint(hostname, port, "vless")
+    if not username:
+        raise SubscriptionParseError("vless URI id is invalid")
     try:
         uuid.UUID(unquote(username))
-    except (AttributeError, ValueError):
+    except (AttributeError, TypeError, ValueError):
         # VLESS identities are UUIDs in the URI envelope.
         raise SubscriptionParseError("vless URI id is invalid")
     query = dict()

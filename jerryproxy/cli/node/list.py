@@ -5,6 +5,7 @@ import json
 import click
 from tabulate import tabulate
 
+from ...subscription.redaction import terminal_safe_text
 from .. import _common
 
 _HELP = """List sanitized nodes from one subscription or from all current subscriptions.
@@ -32,7 +33,14 @@ def node_list(context, subscription, as_json):
             value = node.public()
             value["subscription"] = record.name
             values.append(value)
-            rows.append([record.name, value["id"], value["scheme"], value["display"]])
+            rows.append(
+                [
+                    terminal_safe_text(record.name),
+                    terminal_safe_text(value["id"]),
+                    terminal_safe_text(value["scheme"]),
+                    terminal_safe_text(value["display"]),
+                ]
+            )
     if as_json:
         click.echo(json.dumps(values, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         return

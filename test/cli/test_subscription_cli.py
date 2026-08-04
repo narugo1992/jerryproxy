@@ -10,6 +10,7 @@ import jerryproxy.cli._common as cli_common
 import jerryproxy.cli.server as server_module
 import jerryproxy.cli.subscription._common as subscription_common
 from jerryproxy.cli import cli
+from jerryproxy.subscription.model import NodeRecord, SubscriptionRecord
 
 SS = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ss\n"
 VMESS = "vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1NTUiLCJuZXQiOiJ0Y3AiLCJwb3J0IjoiNDQzIiwicHMiOiJ2bWVzcyIsInRscyI6InRscyIsInYiOjJ9\n"
@@ -128,6 +129,36 @@ def test_base64_body_file_is_accepted(tmp_path):
     result = _invoke(runner, home, "subscription", "add", "main", "--file", str(body), "--json")
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["format"] == "base64-uri-lines"
+
+
+def test_human_node_output_escapes_terminal_bidi_controls(monkeypatch, tmp_path):
+    node = NodeRecord(
+        node_id="a" * 32,
+        scheme="vless",
+        display="vless://safe\u202e.invalid:443",
+        uri="vless://11111111-1111-4111-8111-111111111111@safe.invalid:443",
+    )
+    record = SubscriptionRecord(
+        name="main",
+        subscription_id="b" * 32,
+        revision="c" * 64,
+        format="uri-lines",
+        enabled=True,
+        updated_at="2026-08-04T00:00:00Z",
+        nodes=(node,),
+    )
+
+    class FakeManager(object):
+        def get(self, name):
+            assert name == "main"
+            return record
+
+    monkeypatch.setattr(cli_common, "subscriptions", lambda context: FakeManager())
+    result = _invoke(CliRunner(), tmp_path / "home", "node", "list", "main")
+
+    assert result.exit_code == 0, result.output
+    assert "\\u202e" in result.output
+    assert "\u202e" not in result.output
 
 
 def test_subscription_guided_leaf_selects_missing_name(tmp_path, monkeypatch):
@@ -652,47 +683,18 @@ def test_guided_add_source_wizard_discovers_and_completes_environment_names(tmp_
     assert "hidden" not in result.output
 
 
-def test_guided_add_source_wizard_rejects_noncanonical_environment(tmp_path, monkeypatch):
-    captured = {}
-
+def test_guided_add_source_wizard_ignores_noncanonical_environment(tmp_path, monkeypatch):
     class Prompt(object):
-        def __init__(self, value):
-            self.value = value
-
         def execute(self):
-            return self.value
+            return "env"
 
-    class FakeRecord(object):
-        name = "custom"
-        revision = "r"
-        format = "uri-lines"
-        enabled = True
-        node_count = 0
-        nodes = ()
-
-        def public(self, include_nodes=True):
-            del include_nodes
-            return {
-                "name": self.name,
-                "revision": self.revision,
-                "format": self.format,
-                "enabled": True,
-                "node_count": 0,
-            }
-
-    class FakeManager(object):
-        def add(self, name, source_url, body=None, format_hint="auto"):
-            captured.update(name=name, source_url=source_url, body=body, format_hint=format_hint)
-            return FakeRecord()
-
+    monkeypatch.delenv("V2RAY_SUBSCRIPTION", raising=False)
     monkeypatch.setenv("CUSTOM_PROXY_SUB_URL", "https://provider.example/sub?token=hidden")
     monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
-    monkeypatch.setattr(subscription_common, "subscriptions", lambda context: FakeManager())
-    selections = iter(["env", "__custom__"])
-    monkeypatch.setattr(cli_common.inquirer, "select", lambda **kwargs: Prompt(next(selections)))
-    monkeypatch.setattr(cli_common, "prompt_text", lambda message, completer=None, default=None: "CUSTOM_PROXY_SUB_URL")
+    monkeypatch.setattr(cli_common.inquirer, "select", lambda **kwargs: Prompt())
 
     result = _invoke(CliRunner(), tmp_path / "home", "subscription", "add", "custom")
 
     assert result.exit_code == 2
-    assert "environment name must be V2RAY_SUBSCRIPTION" in result.output
+    assert "no matching subscription environment variables are set" in result.output
+    assert "provider.example" not in result.output

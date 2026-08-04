@@ -9,6 +9,7 @@ from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
 from tabulate import tabulate
 
+from ...subscription.redaction import terminal_safe_text
 from ...subscription.transport import MAXIMUM_BODY_BYTES
 from .. import _common as cli_common
 
@@ -124,7 +125,7 @@ def emit_record(record, as_json, include_nodes=True):  # type: (object, bool, bo
 
         click.echo(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         return
-    click.echo("Subscription: %s" % record.name)
+    click.echo("Subscription: %s" % terminal_safe_text(record.name))
     click.echo("Revision: %s" % record.revision)
     click.echo("Format: %s" % record.format)
     click.echo("Enabled: %s" % ("yes" if record.enabled else "no"))
@@ -136,7 +137,14 @@ def emit_record(record, as_json, include_nodes=True):  # type: (object, bool, bo
 def emit_nodes(nodes):  # type: (tuple) -> None
     click.echo(
         tabulate(
-            [[node.node_id, node.scheme, node.display] for node in nodes],
+            [
+                [
+                    terminal_safe_text(node.node_id),
+                    terminal_safe_text(node.scheme),
+                    terminal_safe_text(node.display),
+                ]
+                for node in nodes
+            ],
             headers=["NODE", "SCHEME", "ENDPOINT"],
             tablefmt="plain",
             disable_numparse=True,
