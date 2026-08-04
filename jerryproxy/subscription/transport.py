@@ -5,12 +5,10 @@ import binascii
 import copy
 import hashlib
 import ipaddress
-import json
 import re
 import socket
-import uuid
 from dataclasses import dataclass
-from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -34,63 +32,6 @@ CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
 SUPPORTED_SCHEMES = ("ss", "vmess", "vless")
 _URI_LINE = re.compile(r"^(ss|vmess|vless)://[^\s]+$", re.IGNORECASE)
-_VMESS_PORT = re.compile(r"^\d+$")
-_VMESS_FIELDS = frozenset(
-    (
-        "v",
-        "ps",
-        "add",
-        "address",
-        "port",
-        "id",
-        "aid",
-        "scy",
-        "net",
-        "type",
-        "host",
-        "path",
-        "tls",
-        "sni",
-        "alpn",
-        "fp",
-        "allowInsecure",
-        "security",
-        "serviceName",
-        "mode",
-        "authority",
-        "headerType",
-        "quicSecurity",
-        "key",
-        "seed",
-        "packetEncoding",
-        "encryption",
-    )
-)
-_MAX_JSON_DEPTH = 32
-_MAX_JSON_NODES = 8192
-_REALITY_SHORT_ID = re.compile(r"^[0-9a-fA-F]{0,16}$")
-_REALITY_PUBLIC_KEY = re.compile(r"^[A-Za-z0-9_-]{43}$")
-_REALITY_FINGERPRINTS = frozenset(("chrome", "firefox", "safari", "edge", "ios", "android", "random"))
-_VLESS_NETWORKS = frozenset(("tcp", "grpc", "ws", "http", "h2", "quic", "kcp"))
-_VLESS_SECURITY = frozenset(("none", "tls", "reality", "xtls"))
-_VLESS_QUERY_KEYS = frozenset(("type", "security", "flow", "sni", "fp", "pbk", "sid"))
-
-
-def _reject_duplicate_json_keys(pairs):  # type: (list) -> dict
-    """Reject duplicate object members before any VMess value is consumed."""
-
-    value = {}
-    for key, item in pairs:
-        if key in value:
-            raise SubscriptionParseError("subscription JSON contains duplicate keys")
-        value[key] = item
-    return value
-
-
-def _reject_nonfinite_json_constant(value):  # type: (str) -> None
-    """Reject JSON extensions that are not valid interoperable numbers."""
-
-    raise SubscriptionParseError("vmess URI contains a non-standard JSON number: %s" % value)
 
 
 class _PinnedConnectionMixin(object):
@@ -404,181 +345,9 @@ def _looks_like_uri_lines(value):  # type: (bytes) -> bool
 
 
 def _display_for_uri(uri):  # type: (str) -> str
-    scheme = uri.split(":", 1)[0].lower()
-    try:
-        parsed = urlsplit(uri)
-        host = parsed.hostname
-        port = parsed.port
-    except ValueError:
-        host = None
-        port = None
-    # SS short links and VMess links commonly carry the complete credential
-    # envelope in the authority/path.  Without a proven host+port pair, never
-    # echo that opaque value as a display endpoint.
-    if scheme in ("ss", "vmess") and (not host or port is None):
-        return "%s node" % scheme
-    if host:
-        return "%s://%s%s" % (scheme, host, ":%d" % port if port else "")
-    return "%s node" % scheme
-
-
-def _decode_uri_payload(value):  # type: (str) -> bytes
-    """Decode a URL-safe or standard Base64 URI envelope without rendering it."""
-
-    try:
-        compact = unquote(value).encode("ascii")
-    except (UnicodeDecodeError, UnicodeEncodeError) as error:
-        # Non-ASCII URI payloads cannot be valid Base64 envelopes.
-        raise SubscriptionParseError("subscription URI payload is not ASCII Base64") from error
-    compact = b"".join(compact.split())
-    if not compact or len(compact) % 4 == 1:
-        raise SubscriptionParseError("subscription URI payload is invalid Base64")
-    compact += b"=" * ((4 - len(compact) % 4) % 4)
-    try:
-        return base64.b64decode(compact, altchars=b"-_", validate=True)
-    except (binascii.Error, ValueError) as error:
-        # Base64 decoder errors identify malformed protocol envelopes.
-        raise SubscriptionParseError("subscription URI payload is invalid Base64") from error
-
-
-def _validate_endpoint(hostname, port, label):  # type: (str, object, str) -> None
-    if not hostname or port is None or not 1 <= port <= 65535:
-        raise SubscriptionParseError("%s URI is missing a valid endpoint" % label)
-
-
-def _validate_ss_uri(uri):  # type: (str) -> None
-    payload = uri.split("://", 1)[1].split("#", 1)[0]
-    if not payload:
-        raise SubscriptionParseError("ss URI is empty")
-    authority = None
-    encoded = payload
-    if "@" in payload:
-        encoded, authority = payload.rsplit("@", 1)
-    decoded = _decode_uri_payload(encoded)
-    try:
-        decoded_text = decoded.decode("utf-8")
-    except UnicodeDecodeError as error:
-        # SS method/password envelopes are UTF-8 text by convention.
-        raise SubscriptionParseError("ss URI payload is not UTF-8") from error
-    credential_text = decoded_text.rsplit("@", 1)[0]
-    method, separator, password = credential_text.partition(":")
-    if not separator or not method or not password:
-        raise SubscriptionParseError("ss URI payload is missing method and password")
-    if authority is None:
-        if "@" not in decoded_text:
-            raise SubscriptionParseError("ss URI payload is missing its endpoint")
-        _, authority = decoded_text.rsplit("@", 1)
-    try:
-        parsed = urlsplit("ss://%s" % authority)
-        port = parsed.port
-    except ValueError as error:
-        # ValueError is expected for malformed SS authority or port syntax.
-        raise SubscriptionParseError("ss URI endpoint is invalid") from error
-    _validate_endpoint(parsed.hostname, port, "ss")
-
-
-def _validate_json_shape(value, depth=0):  # type: (object, int) -> int
-    """Bound VMess JSON structure before protocol fields are consumed."""
-
-    if depth > _MAX_JSON_DEPTH:
-        raise SubscriptionParseError("vmess URI JSON exceeds the depth or node bound")
-    nodes = 1
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise SubscriptionParseError("vmess URI JSON contains a non-string key")
-            if isinstance(item, (dict, list)):
-                raise SubscriptionParseError("vmess URI JSON contains a nested field")
-            nodes += _validate_json_shape(item, depth + 1)
-    elif isinstance(value, list):
-        for item in value:
-            nodes += _validate_json_shape(item, depth + 1)
-    if nodes > _MAX_JSON_NODES:
-        raise SubscriptionParseError("vmess URI JSON exceeds the depth or node bound")
-    return nodes
-
-
-def _validate_vmess_uri(uri):  # type: (str) -> None
-    payload = uri.split("://", 1)[1].split("#", 1)[0]
-    decoded = _decode_uri_payload(payload)
-    try:
-        value = json.loads(
-            decoded.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_nonfinite_json_constant,
-        )
-    except (UnicodeDecodeError, ValueError, RecursionError) as error:
-        # JSON and UTF-8 errors identify malformed VMess envelopes.
-        raise SubscriptionParseError("vmess URI payload is not valid JSON") from error
-    if not isinstance(value, dict):
-        raise SubscriptionParseError("vmess URI payload is not an object")
-    unknown = set(value).difference(_VMESS_FIELDS)
-    if unknown:
-        raise SubscriptionParseError("vmess URI contains unknown fields")
-    _validate_json_shape(value)
-    address = value.get("add") or value.get("address")
-    port = value.get("port")
-    if isinstance(port, str) and _VMESS_PORT.match(port):
-        port = int(port)
-    if not isinstance(port, int) or isinstance(port, bool):
-        raise SubscriptionParseError("vmess URI port is invalid")
-    _validate_endpoint(address, port, "vmess")
-    identity = value.get("id")
-    try:
-        uuid.UUID(str(identity))
-    except (AttributeError, ValueError):
-        # UUID parsing errors identify malformed VMess identities.
-        raise SubscriptionParseError("vmess URI id is invalid")
-
-
-def _validate_vless_fields(uri):  # type: (str) -> None
-    """Validate the Reality envelope while leaving credentials opaque."""
-
-    try:
-        parsed = urlsplit(uri)
-        username = parsed.username
-        hostname = parsed.hostname
-        port = parsed.port
-    except ValueError as error:
-        # ValueError is expected for malformed URI authority syntax.
-        raise SubscriptionParseError("subscription URI is invalid") from error
-    _validate_endpoint(hostname, port, "vless")
-    if not username:
-        raise SubscriptionParseError("vless URI id is invalid")
-    try:
-        uuid.UUID(unquote(username))
-    except (AttributeError, TypeError, ValueError):
-        # VLESS identities are UUIDs in the URI envelope.
-        raise SubscriptionParseError("vless URI id is invalid")
-    query = dict()
-    for part in parsed.query.split("&") if parsed.query else ():
-        if not part:
-            continue
-        key, separator, value = part.partition("=")
-        if not separator or not key or key in query:
-            raise SubscriptionParseError("vless URI has an invalid query")
-        if key not in _VLESS_QUERY_KEYS:
-            raise SubscriptionParseError("vless URI contains an unknown query field")
-        query[key] = value
-    security = query.get("security", "none")
-    if security not in _VLESS_SECURITY:
-        raise SubscriptionParseError("unsupported vless security")
-    if "type" in query and query["type"] not in _VLESS_NETWORKS:
-        raise SubscriptionParseError("unsupported vless network")
-    if security == "reality":
-        required = ("type", "security", "flow", "sni", "fp", "pbk", "sid")
-        if any(not query.get(key) for key in required):
-            raise SubscriptionParseError("vless Reality URI is missing required fields")
-        if query.get("type") not in _VLESS_NETWORKS:
-            raise SubscriptionParseError("unsupported vless Reality network")
-        if query.get("fp") not in _REALITY_FINGERPRINTS:
-            raise SubscriptionParseError("unsupported vless Reality fingerprint")
-        if not _REALITY_PUBLIC_KEY.match(query["pbk"]):
-            raise SubscriptionParseError("vless Reality public key is invalid")
-        if not _REALITY_SHORT_ID.match(query["sid"]) or len(query["sid"]) % 2:
-            raise SubscriptionParseError("vless Reality short id is invalid")
-        if query.get("flow") not in ("xtls-rprx-vision",):
-            raise SubscriptionParseError("unsupported vless Reality flow")
+    # The complete URI is an opaque backend-owned record.  Never inspect its
+    # authority, query, Base64 envelope, UUID, or protocol options here.
+    return "%s node" % uri.split(":", 1)[0].lower()
 
 
 def _validate_uri_line(line):  # type: (str) -> Tuple[str, str, str]
@@ -587,12 +356,6 @@ def _validate_uri_line(line):  # type: (str) -> Tuple[str, str, str]
     if not _URI_LINE.match(line) or any(ord(char) < 0x20 or ord(char) == 0x7F for char in line):
         raise SubscriptionParseError("subscription contains an invalid URI record")
     scheme = line.split(":", 1)[0].lower()
-    if scheme == "vless":
-        _validate_vless_fields(line)
-    elif scheme == "ss":
-        _validate_ss_uri(line)
-    elif scheme == "vmess":
-        _validate_vmess_uri(line)
     return scheme, _display_for_uri(line), line
 
 
@@ -645,7 +408,7 @@ def _parse_v2ray_subscription_body(body, format_hint="auto"):
 
 
 class V2RaySubscriptionParser(SubscriptionParser):
-    """Parse Base64/plain SS, VMess, and VLESS URI-line containers."""
+    """Classify bounded Base64/plain URI-line containers without parsing nodes."""
 
     @property
     def name(self):  # type: () -> str
@@ -656,10 +419,10 @@ class V2RaySubscriptionParser(SubscriptionParser):
 
 
 class MihomoSubscriptionParser(SubscriptionParser):
-    """Source-pinned Mihomo 1.19.29 adapter over the URI-line parser.
+    """Source-pinned Mihomo 1.19.29 adapter for opaque URI-line records.
 
-    Mihomo consumes the resulting private provider projection; validation and
-    URI semantics remain owned by :class:`V2RaySubscriptionParser`.
+    Mihomo consumes the resulting private provider projection and is the sole
+    authority for SS, VMess, and VLESS URI semantics.
     """
 
     @property

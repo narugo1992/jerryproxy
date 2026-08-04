@@ -63,36 +63,34 @@ def test_field_manifest_is_auditable_and_credential_free():
     manifest = field_disposition_manifest()
     assert manifest == subscription_field_disposition_manifest()
     assert manifest["identity"]["version"] == "1.19.29"
-    assert manifest["protocols"]["ss"]["password"] == "preserve"
-    assert manifest["provider"]["uri"] == "preserve"
-    dispositions = {
-        value
-        for section in (manifest["container"], manifest["protocols"], manifest["provider"])
-        for item in section.values()
-        for value in (item.values() if isinstance(item, dict) else ())
-        if isinstance(value, str)
+    assert manifest["protocols"] == {
+        "ss": "opaque-forwarded-to-mihomo",
+        "vmess": "opaque-forwarded-to-mihomo",
+        "vless": "opaque-forwarded-to-mihomo",
     }
-    assert dispositions <= {"preserve", "replace", "reject"}
+    assert manifest["provider"]["uri"] == "preserve"
+    assert manifest["semantic_authority"]["owner"] == "mihomo"
+    assert manifest["unsafe"]["credential_material"] == "private-only"
     rendered = repr(manifest)
-    assert "password@" not in rendered
+    assert "password" not in rendered
     assert "11111111-1111-1111-1111-111111111111" not in rendered
 
 
 @pytest.mark.parametrize("body", (SS, VMESS, VLESS))
-def test_each_protocol_rejects_a_missing_or_invalid_required_field(body):
+def test_protocol_payloads_are_preserved_without_local_field_schema(body):
     if body.startswith(b"vmess://"):
         payload = body.split(b"://", 1)[1].strip()
         value = base64.b64decode(payload).replace(b'"port":"443"', b'"port":"x"')
-        malformed = b"vmess://" + base64.b64encode(value) + b"\n"
+        opaque = b"vmess://" + base64.b64encode(value) + b"\n"
     elif body.startswith(b"ss://"):
-        malformed = body.replace(
+        opaque = body.replace(
             b"YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw",
             b"YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4x",
         )
     else:
-        malformed = body.replace(b"&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", b"&pbk=bad")
-    with pytest.raises(SubscriptionParseError):
-        parse_subscription_body(malformed, format_hint="uri-lines")
+        opaque = body.replace(b"&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", b"&pbk=bad")
+    parsed = parse_subscription_body(opaque, format_hint="uri-lines")
+    assert parsed.records[0][2] == opaque.decode("ascii").strip()
 
 
 def test_explicit_uri_lines_does_not_decode_a_base64_body():
@@ -110,64 +108,65 @@ def test_uri_record_bound_is_checked_before_protocol_payload_decoding():
 @pytest.mark.parametrize(
     "body",
     (
-        b"ss://garbage\n",
-        b"vmess://garbage\n",
-        b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?security=reality&sni=www.example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&flow=xtls-rprx-vision\n",
-        b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?type=bad&security=reality&sni=www.example.com&fp=bad&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&flow=xtls-rprx-vision\n",
+        b"http://not-a-supported-node\n",
+        b"ss://\n",
+        b"vmess://\n",
+        b"vless://\n",
+        b"ss://ok\x00bad\n",
     ),
 )
-def test_protocol_envelopes_reject_malformed_or_unsupported_records(body):
+def test_uri_container_rejects_only_generic_unsafe_records(body):
     with pytest.raises(SubscriptionParseError):
         parse_subscription_body(body, format_hint="uri-lines")
 
 
-def test_vless_missing_username_is_a_bounded_parse_error():
+def test_vless_shape_is_deferred_to_mihomo():
     body = (
         b"vless://example.invalid:443?type=tcp&security=none&flow=none"
         b"\n"
     )
-    with pytest.raises(SubscriptionParseError, match="vless URI id is invalid"):
-        parse_subscription_body(body, format_hint="uri-lines")
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+    assert parsed.records[0][2] == body.decode("ascii").strip()
 
 
-def test_vless_rejects_unknown_query_fields_before_runtime_projection():
+def test_vless_unknown_query_fields_are_deferred_to_mihomo():
     body = (
         b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?"
         b"type=tcp&security=reality&flow=xtls-rprx-vision&sni=www.example.com&"
         b"fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=00&"
         b"unknown=unexpected\n"
     )
-    with pytest.raises(SubscriptionParseError, match="unknown query field"):
-        parse_subscription_body(body, format_hint="uri-lines")
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+    assert parsed.records[0][2] == body.decode("ascii").strip()
 
 
-def test_ss_rejects_empty_method_or_password_before_runtime_projection():
+def test_ss_credentials_are_opaque_to_the_container_parser():
     for credentials in (b":password", b"aes-128-gcm:"):
         encoded = base64.b64encode(credentials + b"@example.invalid:443").rstrip(b"=")
         body = b"ss://" + encoded + b"\n"
-        with pytest.raises(SubscriptionParseError, match="method and password"):
-            parse_subscription_body(body, format_hint="uri-lines")
+        parsed = parse_subscription_body(body, format_hint="uri-lines")
+        assert parsed.records[0][2] == body.decode("ascii").strip()
 
 
-def test_vmess_rejects_unknown_and_nested_fields_before_runtime_projection():
+def test_vmess_unknown_and_nested_fields_are_deferred_to_mihomo():
     payload = base64.b64decode(VMESS.split(b"://", 1)[1].strip())
     unknown = payload.rstrip(b"}") + b',"unexpected":"value"}'
     nested = payload.rstrip(b"}") + b',"extra":{"nested":true}}'
     for value in (unknown, nested):
         body = b"vmess://" + base64.b64encode(value) + b"\n"
-        with pytest.raises(SubscriptionParseError, match="unknown fields|nested field"):
-            parse_subscription_body(body, format_hint="uri-lines")
+        parsed = parse_subscription_body(body, format_hint="uri-lines")
+        assert parsed.records[0][2] == body.decode("ascii").strip()
 
 
-def test_vmess_rejects_nonstandard_json_numbers_before_runtime_projection():
+def test_vmess_nonstandard_json_numbers_are_deferred_to_mihomo():
     payload = (
         b'{"add":"192.0.2.2","port":443,"id":"55555555-5555-5555-5555-555555555555",'
         b'"aid":NaN}'
     )
     body = b"vmess://" + base64.b64encode(payload) + b"\n"
 
-    with pytest.raises(SubscriptionParseError, match="non-standard JSON number"):
-        parse_subscription_body(body, format_hint="uri-lines")
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+    assert parsed.records[0][2] == body.decode("ascii").strip()
 
 
 def test_fetch_rejects_private_dns_answers_before_request():
