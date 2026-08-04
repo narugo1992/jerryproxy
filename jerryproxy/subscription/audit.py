@@ -1,9 +1,8 @@
 """Credential-free, source-pinned audit metadata for Mihomo NodeSets.
 
-The URI envelope is validated by the bounded adapter, while Mihomo owns the
-provider object and protocol interpretation at runtime.  This manifest records
-the reviewed upstream identity and the disposition vocabulary used by the
-contract; it never contains credential values or a second runtime schema.
+JerryProxy bounds and classifies the outer URI-line container only.  Mihomo
+owns every SS, VMess, and VLESS semantic decision at runtime.  This manifest
+records that ownership boundary without duplicating protocol fields.
 """
 
 from copy import deepcopy
@@ -31,39 +30,9 @@ _FIELD_DISPOSITION_MANIFEST = {
         "mihomo-provider": {"disposition": "preserve"},
     },
     "protocols": {
-        "ss": {
-            "method": "preserve",
-            "password": "preserve",
-            "server": "preserve",
-            "port": "preserve",
-            # URI fragments are local node labels; they are never sent in the
-            # request target and are retained only as opaque source material.
-            "fragment": "preserve",
-        },
-        "vmess": {
-            "add": "preserve",
-            "address": "preserve",
-            "port": "preserve",
-            "id": "preserve",
-            "aid": "preserve",
-            "net": "preserve",
-            "tls": "preserve",
-            "ps": "replace",
-            "fragment": "preserve",
-        },
-        "vless": {
-            "uuid": "preserve",
-            "server": "preserve",
-            "port": "preserve",
-            "type": "preserve",
-            "security": "preserve",
-            "sni": "preserve",
-            "fp": "preserve",
-            "pbk": "preserve",
-            "sid": "preserve",
-            "flow": "preserve",
-            "fragment": "preserve",
-        },
+        "ss": "opaque-forwarded-to-mihomo",
+        "vmess": "opaque-forwarded-to-mihomo",
+        "vless": "opaque-forwarded-to-mihomo",
     },
     "provider": {
         "uri": "preserve",
@@ -73,36 +42,19 @@ _FIELD_DISPOSITION_MANIFEST = {
     "unsafe": {
         "rejected_fields": ["scripts", "hooks", "plugins", "controller", "tun", "listeners"],
         "rejected_protocols": ["ssr", "hysteria", "wireguard"],
-        "credential_paths": ["password", "id", "uuid", "pbk", "sid"],
+        "credential_material": "private-only",
     },
-    "field_universe": {
-        "ss": ["method", "password", "server", "port", "fragment"],
-        "vmess": ["add", "address", "port", "id", "aid", "net", "tls", "ps", "fragment"],
-        "vless": [
-            "uuid",
-            "server",
-            "port",
-            "type",
-            "security",
-            "sni",
-            "fp",
-            "pbk",
-            "sid",
-            "flow",
-            "fragment",
-        ],
-    },
-    "one_field_oracle": {
-        "accepted_dispositions": ["preserve", "replace", "reject"],
-        "unknown_descendant": "reject",
-        "duplicate_key": "reject",
+    "semantic_authority": {
+        "owner": "mihomo",
+        "version": "1.19.29",
+        "unknown_uri_options": "preserve-and-defer",
         "credential_value": "opaque",
     },
 }
 
 
 def field_disposition_manifest():  # type: () -> dict
-    """Return an independent credential-free copy of the field manifest."""
+    """Return an independent credential-free container ownership manifest."""
 
     return deepcopy(_FIELD_DISPOSITION_MANIFEST)
 

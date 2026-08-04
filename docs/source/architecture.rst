@@ -89,9 +89,10 @@ cannot race backend replacement or runtime projection cleanup.
 
 The current protocol slice is implemented behind extension seams. A
 ``SubscriptionParser`` turns one bounded source container into the generic
-``ParsedSubscription`` model; ``V2RaySubscriptionParser`` is the only shipped
-adapter today. ``ProxyNode`` and ``NodeSource`` are the common model contracts
-for both subscription-backed nodes and a future single-node input. A
+``ParsedSubscription`` model; the shipped ``MihomoSubscriptionParser`` keeps
+SS, VMess, and VLESS records opaque and defers their semantics to Mihomo
+1.19.29. ``ProxyNode`` and ``NodeSource`` are the common model contracts for
+both subscription-backed nodes and a future single-node input. A
 ``RuntimeDriver`` owns only backend-specific projection and child lifecycle;
 ``RuntimeSession`` remains responsible for lock ownership, secret-bearing
 state, health policy, failover, and redacted output. Adding a new subscription
