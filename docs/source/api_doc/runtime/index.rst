@@ -9,6 +9,7 @@ jerryproxy.runtime
 .. toctree::
    :maxdepth: 3
 
+   guardian
    health
    interfaces
    mihomo

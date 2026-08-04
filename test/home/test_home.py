@@ -62,6 +62,18 @@ def test_paths_create_single_private_tree(tmp_path):
         assert all((path.stat().st_mode & 0o777) == 0o700 for path in expected)
 
 
+def test_read_only_access_rejects_a_complete_home_with_a_missing_lock(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    paths.ensure()
+    paths.lock_file.unlink()
+
+    with pytest.raises(IntegrityError, match="home is incomplete"):
+        with JerryProxyOperationLock(paths, initialize=False):
+            pass
+
+    assert not paths.lock_file.exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation may require elevated privileges")
 def test_paths_reject_user_managed_directory_aliases(tmp_path):
     root = tmp_path / "home"

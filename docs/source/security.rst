@@ -111,11 +111,16 @@ Current URI-runtime invariants:
 * subscription URLs never appear in argv or displayed logs;
 * the generated Mihomo provider, access descriptor, and session files are
   owner-only below ``JERRYPROXY_HOME``;
-* the foreground listener binds to loopback and is unauthenticated by default;
-  ``server --auth`` explicitly enables generated local credentials;
-* backend process output is drained as one merged stream, decoded only for
-  bounded diagnostics, redacted before persistence or terminal forwarding,
-  and labeled only with the backend name (for example ``[mihomo]``);
+* the public foreground listener binds to ``127.0.0.1`` by default; ``--auth``
+  enables generated per-session local credentials and ``--bind-all`` explicitly
+  selects ``0.0.0.0``;
+* human startup guidance prints the generated local credentials and proxy URL
+  once through the structured log path when authentication is enabled, while
+  JSON output and persistent logs exclude those credentials;
+* backend process stdout/stderr are merged into one bounded live stream;
+  redaction and terminal-safety filtering happen before persistence or
+  forwarding, and only the backend name (for example ``[mihomo]``) is shown,
+  never the child's original stream name;
   JerryProxy-owned records have no owner prefix;
 * health recovery uses bounded restart/alternate/refresh steps and preserves
   the saved node preference;

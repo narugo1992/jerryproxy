@@ -1,5 +1,6 @@
 import io
 import os
+import signal
 import socket
 import sys
 import threading
@@ -81,13 +82,13 @@ def test_backend_drain_forwards_small_live_chunks_before_pipe_closes(tmp_path):
     assert process.log_path.read_text(encoding="utf-8") == "[mihomo] [TCP] live request\n"
 
 
-def test_backend_process_merges_process_output_into_one_named_stream(tmp_path, monkeypatch):
+def test_backend_process_drains_stdout_and_stderr_into_one_named_stream(tmp_path, monkeypatch):
     captured = {}
     events = []
 
     class FakeProcess(object):
         pid = 123
-        stdout = io.BytesIO(b"stdout line\nstderr line\n")
+        stdout = io.BytesIO(b"stdout line\n")
 
         def poll(self):
             return 0
@@ -113,14 +114,118 @@ def test_backend_process_merges_process_output_into_one_named_stream(tmp_path, m
 
     assert captured["stdout"] is mihomo_module.subprocess.PIPE
     assert captured["stderr"] is mihomo_module.subprocess.STDOUT
-    assert events == [
-        ("v2ray", "INFO", "stdout line"),
-        ("v2ray", "INFO", "stderr line"),
-    ]
+    assert events == [("v2ray", "INFO", "stdout line")]
     persisted = process.log_path.read_text(encoding="utf-8")
-    assert persisted == "[v2ray] stdout line\n[v2ray] stderr line\n"
+    assert persisted == "[v2ray] stdout line\n"
+    assert "stderr line" not in persisted
     assert "[backend:stdout]" not in persisted
     assert "[backend:stderr]" not in persisted
+
+
+def test_linux_process_identity_rejects_reused_or_unknown_pid():
+    if not sys.platform.startswith("linux"):
+        pytest.skip("procfs identity is Linux-specific")
+    pid = os.getpid()
+    start_time = mihomo_module._linux_process_start_time(pid)
+    assert start_time is not None
+    assert mihomo_module._linux_process_identity_matches(pid, start_time)
+    assert not mihomo_module._linux_process_identity_matches(pid, start_time + 1)
+    assert not mihomo_module._linux_process_identity_matches(pid, None)
+
+
+def test_windows_job_helper_is_inactive_off_windows():
+    if os.name == "nt":
+        pytest.skip("native Windows Job Object path")
+    assert mihomo_module._windows_create_job() is None
+    assert not mihomo_module._windows_assign_job(None, None)
+
+
+def test_guardian_malformed_metadata_aborts_before_reraising(tmp_path, monkeypatch):
+    process = MihomoProcess(
+        tmp_path / "mihomo",
+        tmp_path / "config.yaml",
+        tmp_path,
+        tmp_path / "runtime.log",
+    )
+    process.process = type("Child", (), {"poll": lambda self: None})()
+    aborted = []
+    monkeypatch.setattr(process, "_abort_start", lambda: aborted.append(True))
+    monkeypatch.setattr(mihomo_module, "_read_private_metadata", lambda path, maximum: b"{")
+
+    with pytest.raises(RuntimeSessionError, match="identity could not be read"):
+        process._load_guardian_identity(timeout=0.01)
+    assert aborted == [True]
+
+
+def test_guardian_owns_backend_and_forwards_redacted_output(tmp_path):
+    if os.name != "posix":
+        pytest.skip("POSIX guardian fixture")
+    executable = tmp_path / "backend-fixture"
+    executable.write_text(
+        "#!%s\n"
+        "import sys, time\n"
+        "sys.stdout.write('raw stdout secret\\n'); sys.stdout.flush()\n"
+        "sys.stderr.write('raw stderr secret\\n'); sys.stderr.flush()\n"
+        "time.sleep(30)\n" % sys.executable,
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    config = tmp_path / "config.yaml"
+    config.write_text("fixture\n", encoding="ascii")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    events = []
+    process = MihomoProcess(
+        executable,
+        config,
+        tmp_path,
+        logs / "runtime.log",
+        log_sink=lambda *event: events.append(event),
+    )
+    process.start()
+    try:
+        assert process.backend_pid and process.backend_pid != process.process.pid
+        assert mihomo_module._linux_process_parent(process.backend_pid) == process.process.pid
+        for thread in process._threads:
+            thread.join(1.0)
+        assert any("raw stdout secret" in item[2] for item in events)
+        assert any("raw stderr secret" in item[2] for item in events)
+    finally:
+        process.stop(timeout=1.0)
+    persisted = (logs / "runtime.log").read_text(encoding="ascii")
+    assert "[mihomo] raw stdout secret\n" in persisted
+    assert "[mihomo] raw stderr secret\n" in persisted
+    assert process.process.poll() is not None
+
+
+def test_guardian_crash_cleanup_kills_backend_grandchildren(tmp_path):
+    if not sys.platform.startswith("linux"):
+        pytest.skip("Linux process-group census fixture")
+    executable = tmp_path / "forking-backend"
+    executable.write_text(
+        "#!%s\n"
+        "import os, time\n"
+        "if os.fork() == 0:\n"
+        "    time.sleep(30)\n"
+        "else:\n"
+        "    time.sleep(30)\n" % sys.executable,
+        encoding="ascii",
+    )
+    executable.chmod(0o700)
+    config = tmp_path / "config.yaml"
+    config.write_text("fixture\n", encoding="ascii")
+    process = MihomoProcess(executable, config, tmp_path, tmp_path / "runtime.log")
+    process.start()
+    try:
+        assert process.backend_pid is not None
+        assert mihomo_module._linux_process_group_members(process._backend_pgid, process._backend_sid)
+        os.kill(process.process.pid, signal.SIGKILL)
+        process.process.wait(timeout=2.0)
+        process.stop(timeout=0.5)
+        assert not mihomo_module._linux_process_group_members(process._backend_pgid, process._backend_sid)
+    finally:
+        if process.process is not None and process.process.poll() is None:
+            process.stop(timeout=1.0)
 
 
 def test_backend_drain_forwards_redacted_core_lines_and_flushes_partial_line(tmp_path):
@@ -140,11 +245,13 @@ def test_backend_drain_forwards_redacted_core_lines_and_flushes_partial_line(tmp
         )
     )
 
-    assert [event[0:2] for event in events] == [("xray", "INFO"), ("xray", "INFO")]
-    assert events[0][2] == "connected vless://example.test:443"
-    assert events[1][2] == "partial"
+    assert [event[0:3] for event in events] == [
+        ("xray", "INFO", "connected vless://example.test:443"),
+        ("xray", "INFO", "partial"),
+    ]
     persisted = process.log_path.read_text(encoding="utf-8")
-    assert "[xray] connected" in persisted
+    assert "[xray] connected vless://example.test:443\n" in persisted
+    assert "[xray] partial\n" in persisted
     assert "11111111-1111-1111-1111-111111111111" not in persisted
     assert "secret" not in persisted
 
@@ -419,7 +526,7 @@ def test_provider_config_rejects_an_unapproved_bind_address(tmp_path):
             tmp_path / "provider.txt",
             b"ss://opaque\n",
             17777,
-            None,
-            None,
+            "user",
+            "password",
             bind_address="192.0.2.1",
         )

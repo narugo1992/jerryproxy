@@ -6,6 +6,14 @@ import pytest
 
 import jerryproxy.subscription.transport as transport_module
 from jerryproxy.errors import SubscriptionFetchError, SubscriptionParseError
+from jerryproxy.home import JerryProxyPaths
+from jerryproxy.subscription import (
+    MihomoSubscriptionParser,
+    field_disposition_manifest,
+    mihomo_parser_identity,
+    subscription_field_disposition_manifest,
+)
+from jerryproxy.subscription.manager import SubscriptionManager
 from jerryproxy.subscription.transport import fetch_subscription, parse_subscription_body
 
 SS = b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ss\n"
@@ -23,6 +31,67 @@ def test_plain_and_base64_uri_lines_are_classified_separately():
     assert [item[0] for item in plain.records] == ["ss", "vmess", "vless"]
     assert plain.records[0][1] == "ss node"
     assert plain.records[1][1] == "vmess node"
+
+
+def test_mihomo_parser_is_source_pinned_but_reuses_uri_semantics():
+    parser = MihomoSubscriptionParser()
+    assert parser.name == "mihomo-1.19.29-v2ray-uri-lines"
+    assert parser.identity == {
+        "backend": "mihomo",
+        "version": "1.19.29",
+        "release_tag": "v1.19.29",
+        "repository": "MetaCubeX/mihomo",
+        "tag_commit": "e26714a181ac0e2fa803453c0a8e9a9ce94e31cb",
+        "source_tree": "2487680d2def055568f3b50fcc61f931d70f6fa6",
+        "parser_root": "config",
+        "parser_root_tree": "650275c2bf3a465d2194d4b503e7049f9a452d0b",
+        "parser_source_sha256": "cee079176a47ab45327972d72685ee8b816359f898079f6c8d83d026a6481afb",
+        "source": "v2ray-uri-lines",
+    }
+    assert parser.parse(SS, format_hint="uri-lines").records[0][0] == "ss"
+    assert mihomo_parser_identity() == parser.identity
+
+
+def test_subscription_manager_uses_mihomo_adapter_by_default(tmp_path):
+    manager = SubscriptionManager(JerryProxyPaths(tmp_path / ".jerryproxy"))
+    assert manager.parser.name == "mihomo-1.19.29-v2ray-uri-lines"
+    assert manager.parser.identity["tag_commit"].startswith("e26714a1")
+
+
+def test_field_manifest_is_auditable_and_credential_free():
+    manifest = field_disposition_manifest()
+    assert manifest == subscription_field_disposition_manifest()
+    assert manifest["identity"]["version"] == "1.19.29"
+    assert manifest["protocols"]["ss"]["password"] == "preserve"
+    assert manifest["provider"]["uri"] == "preserve"
+    dispositions = {
+        value
+        for section in (manifest["container"], manifest["protocols"], manifest["provider"])
+        for item in section.values()
+        for value in (item.values() if isinstance(item, dict) else ())
+        if isinstance(value, str)
+    }
+    assert dispositions <= {"preserve", "replace", "reject"}
+    rendered = repr(manifest)
+    assert "password@" not in rendered
+    assert "11111111-1111-1111-1111-111111111111" not in rendered
+
+
+@pytest.mark.parametrize("body", (SS, VMESS, VLESS))
+def test_each_protocol_rejects_a_missing_or_invalid_required_field(body):
+    if body.startswith(b"vmess://"):
+        payload = body.split(b"://", 1)[1].strip()
+        value = base64.b64decode(payload).replace(b'"port":"443"', b'"port":"x"')
+        malformed = b"vmess://" + base64.b64encode(value) + b"\n"
+    elif body.startswith(b"ss://"):
+        malformed = body.replace(
+            b"YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw",
+            b"YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4x",
+        )
+    else:
+        malformed = body.replace(b"&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", b"&pbk=bad")
+    with pytest.raises(SubscriptionParseError):
+        parse_subscription_body(malformed, format_hint="uri-lines")
 
 
 def test_explicit_uri_lines_does_not_decode_a_base64_body():

@@ -24,6 +24,24 @@ All mutable state defaults to ``~/.jerryproxy``. Override it explicitly:
 The CLI source is platform-independent. Backend availability is separately
 determined from exact upstream release assets for the current OS and CPU.
 
+Foreground server defaults
+--------------------------
+
+The synchronous ``server`` command runs the selected Mihomo node in the
+foreground and publishes an open listener on ``127.0.0.1`` by default. Use
+``--auth`` for generated local credentials and ``--bind-all`` to select
+``0.0.0.0``. Human startup guidance prints one copyable proxy URL and, when
+enabled, the local credentials, and assigns the same URL to ``HTTP_PROXY``,
+``HTTPS_PROXY``, and ``ALL_PROXY`` (a SOCKS5 listener uses the ``socks5h``
+scheme). Backend stdout/stderr are merged into one bounded live stream, redacted,
+and logged under the backend name, without stdout/stderr labels. The default
+``--backend-log-level`` is ``INFO``.
+
+If the exact qualified Mihomo release is missing, backend installation is
+enabled by default. In a guided TTY the confirmation defaults to **Yes**, so
+pressing Enter proceeds. Use ``-y/--yes`` for a complete non-interactive
+invocation, or ``--no-install-missing`` to require a preinstalled backend.
+
 Packaged CLI self-check
 -----------------------
 

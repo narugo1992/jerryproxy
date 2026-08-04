@@ -9,6 +9,7 @@ jerryproxy.subscription
 .. toctree::
    :maxdepth: 3
 
+   audit
    interfaces
    manager
    model

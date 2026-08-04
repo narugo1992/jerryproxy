@@ -27,8 +27,8 @@ from ..lock import JerryProxyOperationLock
 from .interfaces import SubscriptionParser
 from .model import NodeRecord, SubscriptionRecord
 from .transport import (
-    DEFAULT_SUBSCRIPTION_PARSER,
     MAXIMUM_BODY_BYTES,
+    MIHOMO_SUBSCRIPTION_PARSER,
     source_digest,
     validate_source_url,
 )
@@ -651,7 +651,7 @@ def _record_from_value(value, parser=None):  # type: (dict, Optional[Subscriptio
             # State URL validation must not reclassify malformed private state
             # as a network transport error.
             raise SubscriptionStateError("subscription source URL is invalid") from error
-    parser = parser or DEFAULT_SUBSCRIPTION_PARSER
+    parser = parser or MIHOMO_SUBSCRIPTION_PARSER
     try:
         parsed = parser.parse(
             body,
@@ -816,7 +816,7 @@ class SubscriptionStore(object):
 
     def __init__(self, paths, parser=None):  # type: (JerryProxyPaths, Optional[SubscriptionParser]) -> None
         self.paths = paths
-        self.parser = parser or DEFAULT_SUBSCRIPTION_PARSER
+        self.parser = parser or MIHOMO_SUBSCRIPTION_PARSER
         if not isinstance(self.parser, SubscriptionParser):
             raise TypeError("parser must implement SubscriptionParser")
 

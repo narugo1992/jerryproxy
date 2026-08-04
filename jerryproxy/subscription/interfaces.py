@@ -41,6 +41,12 @@ class SubscriptionParser(object, metaclass=ABCMeta):
     def name(self):  # type: () -> str
         """Return the parser's stable implementation name."""
 
+    @property
+    def identity(self):  # type: () -> dict
+        """Return credential-free parser provenance metadata."""
+
+        return {"source": self.name}
+
     @abstractmethod
     def parse(self, body, format_hint="auto"):  # type: (bytes, str) -> object
         """Classify bounded bytes into a :class:`ParsedSubscription`."""

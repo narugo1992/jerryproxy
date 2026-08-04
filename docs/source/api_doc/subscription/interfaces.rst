@@ -24,4 +24,4 @@ SubscriptionParser
 -----------------------------------------------------
 
 .. autoclass:: SubscriptionParser
-   :members: name,parse
+   :members: name,identity,parse

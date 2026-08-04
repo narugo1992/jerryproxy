@@ -23,14 +23,15 @@ The canonical technical identifiers are all `jerryproxy`:
 The backend version manager, official release resolution, verified downloads,
 safe extraction, manifests, active-link switching, bounded
 `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS/VMess/VLESS URI lines, and a
-Mihomo `1.19.29` foreground session now exist. The listener is loopback-only
-and open by default; authentication is explicit opt-in. The session keeps
+Mihomo `1.19.29` foreground session now exist. The public server listener is
+open on `127.0.0.1` by default, with optional generated local credentials via
+`--auth`; `--bind-all` explicitly selects `0.0.0.0`. The session keeps
 subscription state below `JERRYPROXY_HOME`, probes the global health quorum,
-restarts the current node once, sweeps deterministic alternates, and may refresh
-the retained source once without rewriting the saved preference. Native profiles,
-the other runtime cores, controller, measurement/ranking system, and historical
-`v2raycli` compatibility remain planned. README and docs must keep that boundary
-truthful.
+restarts the current node once, sweeps deterministic alternates, and may
+refresh the retained source once without rewriting the saved preference.
+Native profiles, the other runtime cores, controller, measurement/ranking
+system, and historical `v2raycli` compatibility remain planned. README and docs
+must keep that boundary truthful.
 
 ## Engineering discipline
 
@@ -209,6 +210,10 @@ authentication, extraction, process, or permission errors to warnings.
 - Keep complete backend commands deterministic for automation. Missing targets
   may enter guided `InquirerPy` selection, while established no-argument
   read-only commands retain their all-backend meaning.
+- The foreground `server` command automatically installs a missing exact
+  Mihomo backend by default. In guided mode the destructive bootstrap prompt
+  defaults to Yes (press Enter to continue); `-y/--yes` accepts it without a
+  prompt and `--no-install-missing` disables bootstrap.
 - Keep the public backend command surface to `list`, `install`, `current`,
   `use`, `which`, `verify`, `uninstall`, and `clean`. Catalog discovery uses
   `list known [NAME] [VERSION]`; `known` is a reserved first query token, not a
@@ -292,9 +297,10 @@ authentication, extraction, process, or permission errors to warnings.
 - Subscription URLs are bearer credentials. Never print them or pass them on a
   command line. Redact URL userinfo, queries, fragments, UUIDs, passwords,
   public keys, and short IDs from captured backend output.
-- The local proxy listener is loopback-only and has no authentication by
-  default. `server --auth` is explicit opt-in; its one-time human startup
-  guide may print the generated local username, password, and proxy URL, while
+- The local proxy listener is loopback-only at `127.0.0.1` and has no
+  authentication by default. `server --auth` opts into generated per-session
+  credentials; `server --bind-all` explicitly enables `0.0.0.0`. The one-time
+  human startup guide may print local credentials and the proxy URL, while
   JSON output and persistent JerryProxy/backend logs must not contain those
   credentials. Controller endpoints still use a random private secret.
 - Controller endpoints bind to loopback or private local IPC and use a random
@@ -327,9 +333,11 @@ authentication, extraction, process, or permission errors to warnings.
   single-node input must implement `NodeSource` rather than create a second
   runtime selection path.
 - `jerryproxy.runtime` owns the current Mihomo projection, loopback listener,
-  one merged named backend output stream, connectivity quorum, and the
-  bounded foreground recovery policy. Future runtime drivers own other cores,
-  native profiles, and backend control APIs.
+  one merged named backend output stream, connectivity quorum, and the bounded
+  foreground recovery policy. Backend stdout/stderr are drained, decoded into
+  bounded redacted lines, and forwarded/persisted according to the configured
+  backend log level. Future runtime drivers own other cores, native profiles,
+  and backend control APIs.
 - `jerryproxy.runtime.interfaces` owns the `RuntimeDriver` and
   `RuntimeProjection` contracts. Drivers own backend config syntax and child
   lifecycle; `RuntimeSession` owns the home-wide lock, private publication,
@@ -542,7 +550,7 @@ force regeneration and fail when tracked or untracked generated output differs.
   needs documentation before stable release.
 - Foreground `server` startup guidance is emitted through the same structured
   JerryProxy log path as runtime events. Human mode uses Rich styling to make
-  the proxy URL, environment variables, endpoint, and explicit authentication
+  the proxy URL, environment variables, endpoint, and generated authentication
   details conspicuous; it must not use ad-hoc direct printing for those lines.
   Human startup prints one readiness summary, one proxy URL, and a compact
   multi-line shell guide. `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` must
@@ -554,9 +562,10 @@ force regeneration and fail when tracked or untracked generated output differs.
   its lines do not repeat a log prefix, while runtime events remain one record
   per event. JerryProxy-owned records have no owner prefix; backend records use
   the backend name (`[mihomo]`, `[v2ray]`, and so on) and merge stdout/stderr
-  into that one owner stream. Backend lines are decoded only for bounded
-  diagnostics, redacted for credentials, made terminal-safe, and forwarded
-  live; `OFF` drains without forwarding or persisting backend content.
+  into that one owner stream without exposing the child's original stream name.
+  Backend verbosity defaults to `INFO`; backend lines are bounded, redacted,
+  terminal-safe, persisted, and forwarded live. `OFF` drains without
+  forwarding or persisting backend content.
 - Generated Python API pages are part of the English Sphinx toctree and must
   remain reproducible through `make rst_auto`.
 - Do not use copied Tom and Jerry artwork. Any mouse/cheese visual identity

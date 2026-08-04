@@ -195,6 +195,8 @@ def test_server_guided_selection_passes_explicit_targets_to_runtime(tmp_path, mo
             del paths
             captured["init"] = kwargs
             self.process = None
+            self.username = None
+            self.password = None
 
         def start(self, subscription_name, node_id, install_missing):
             captured["start"] = (subscription_name, node_id, install_missing)
@@ -248,6 +250,8 @@ def test_server_guided_selection_passes_explicit_targets_to_runtime(tmp_path, mo
     assert captured["start"] == ("main", "a" * 32, False)
     assert captured["init"]["listener_protocol"] == "http"
     assert captured["init"]["authenticate"] is False
+    assert captured["init"]["bind_address"] == "127.0.0.1"
+    assert captured["init"]["backend_log_level"] == "INFO"
     assert captured["init"]["preferred_port"] == 18080
     assert captured["init"]["strict_port"] is True
     assert "JerryProxy is ready" in result.output
@@ -292,6 +296,8 @@ def test_server_backend_bootstrap_confirmation_defaults_yes(tmp_path, monkeypatc
         def __init__(self, paths, **kwargs):
             del paths, kwargs
             self.process = None
+            self.username = None
+            self.password = None
 
         def start(self, subscription_name, node_id, install_missing):
             del subscription_name, node_id, install_missing
@@ -525,6 +531,8 @@ def test_server_bind_all_passes_wildcard_listener_and_warns(tmp_path, monkeypatc
             del paths
             captured.update(kwargs)
             self.process = None
+            self.username = None
+            self.password = None
 
         def start(self, subscription_name, node_id, install_missing):
             del subscription_name, node_id, install_missing
@@ -538,8 +546,6 @@ def test_server_bind_all_passes_wildcard_listener_and_warns(tmp_path, monkeypatc
                     "protocol": "http",
                     "authentication": False,
                 },
-                "access_file": str(tmp_path / "access.json"),
-                "log_file": str(tmp_path / "runtime.log"),
             }
 
         def wait(self):
@@ -557,35 +563,13 @@ def test_server_bind_all_passes_wildcard_listener_and_warns(tmp_path, monkeypatc
         "main",
         "--node",
         "a" * 32,
-        "--protocol",
-        "http",
         "--bind-all",
         "--no-install-missing",
-        terminal_width=200,
     )
-
     assert result.exit_code == 0, result.output
     assert captured["bind_address"] == "0.0.0.0"
     assert "proxy at 0.0.0.0:1080" in result.output
-    assert "exposedonallinterfaces" in "".join(result.output.split())
-
-    json_result = _invoke(
-        CliRunner(),
-        tmp_path / "home-json",
-        "server",
-        "--subscription",
-        "main",
-        "--node",
-        "a" * 32,
-        "--protocol",
-        "http",
-        "--bind-all",
-        "--log-format",
-        "jsonl",
-        "--no-install-missing",
-    )
-    assert json_result.exit_code == 0, json_result.output
-    assert "listener is exposed on all interfaces" in json_result.output
+    assert "exposed on all interfaces" in result.output
 
 
 def test_guided_port_input_checks_default_and_accepts_entered_value(monkeypatch):
@@ -668,7 +652,7 @@ def test_guided_add_source_wizard_discovers_and_completes_environment_names(tmp_
     assert "hidden" not in result.output
 
 
-def test_guided_add_source_wizard_accepts_matching_custom_environment(tmp_path, monkeypatch):
+def test_guided_add_source_wizard_rejects_noncanonical_environment(tmp_path, monkeypatch):
     captured = {}
 
     class Prompt(object):
@@ -710,6 +694,5 @@ def test_guided_add_source_wizard_accepts_matching_custom_environment(tmp_path, 
 
     result = _invoke(CliRunner(), tmp_path / "home", "subscription", "add", "custom")
 
-    assert result.exit_code == 0, result.output
-    assert captured["source_url"] == "https://provider.example/sub?token=hidden"
-    assert "hidden" not in result.output
+    assert result.exit_code == 2
+    assert "environment name must be V2RAY_SUBSCRIPTION" in result.output

@@ -151,7 +151,7 @@ def test_runtime_start_keeps_subscription_and_node_state_below_home(tmp_path):
     assert runtime.node.node_id == record.nodes[0].node_id
     access = runtime.access_path.read_text(encoding="ascii")
     assert '"authentication":false' in access
-    assert '"username":null' in access
+    assert runtime.username is None and runtime.password is None
     assert "authentication:" not in runtime.config_path.read_text(encoding="utf-8")
     runtime.stop()
     assert not runtime.session_root.exists()
