@@ -130,6 +130,35 @@ def test_vless_missing_username_is_a_bounded_parse_error():
         parse_subscription_body(body, format_hint="uri-lines")
 
 
+def test_vless_rejects_unknown_query_fields_before_runtime_projection():
+    body = (
+        b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?"
+        b"type=tcp&security=reality&flow=xtls-rprx-vision&sni=www.example.com&"
+        b"fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=00&"
+        b"unknown=unexpected\n"
+    )
+    with pytest.raises(SubscriptionParseError, match="unknown query field"):
+        parse_subscription_body(body, format_hint="uri-lines")
+
+
+def test_ss_rejects_empty_method_or_password_before_runtime_projection():
+    for credentials in (b":password", b"aes-128-gcm:"):
+        encoded = base64.b64encode(credentials + b"@example.invalid:443").rstrip(b"=")
+        body = b"ss://" + encoded + b"\n"
+        with pytest.raises(SubscriptionParseError, match="method and password"):
+            parse_subscription_body(body, format_hint="uri-lines")
+
+
+def test_vmess_rejects_unknown_and_nested_fields_before_runtime_projection():
+    payload = base64.b64decode(VMESS.split(b"://", 1)[1].strip())
+    unknown = payload.rstrip(b"}") + b',"unexpected":"value"}'
+    nested = payload.rstrip(b"}") + b',"extra":{"nested":true}}'
+    for value in (unknown, nested):
+        body = b"vmess://" + base64.b64encode(value) + b"\n"
+        with pytest.raises(SubscriptionParseError, match="unknown fields|nested field"):
+            parse_subscription_body(body, format_hint="uri-lines")
+
+
 def test_fetch_rejects_private_dns_answers_before_request():
     class Session(object):
         def get(self, *args, **kwargs):
