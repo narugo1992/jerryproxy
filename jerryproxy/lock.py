@@ -162,19 +162,27 @@ class JerryProxyOperationLock(object):
             raise JerryProxyBusyError(
                 "JerryProxy operation already in progress for home: %s" % self.paths.root
             ) from error
-        with stack:
-            if self.initialize:
-                self.paths._ensure_layout_locked()
-            else:
-                self._validate_existing_lock()
-                if not self.paths._validate_existing_layout():
-                    raise FileNotFoundError("JerryProxy home has no existing managed state")
-            from .backend.recovery import recover_backend_transactions
+        entered = False
+        try:
+            with stack:
+                if self.initialize:
+                    self.paths._ensure_layout_locked()
+                else:
+                    self._validate_existing_lock()
+                    if not self.paths._validate_existing_layout():
+                        raise FileNotFoundError("JerryProxy home has no existing managed state")
+                from .backend.recovery import recover_backend_transactions
 
-            recover_backend_transactions(self.paths, self.platform_info)
-            if not self.paths._validate_existing_layout():
-                raise FileNotFoundError("JerryProxy home changed during transaction recovery")
-            self._exit_stack = stack.pop_all()
+                recover_backend_transactions(self.paths, self.platform_info)
+                if not self.paths._validate_existing_layout():
+                    raise FileNotFoundError("JerryProxy home changed during transaction recovery")
+                self._exit_stack = stack.pop_all()
+                entered = True
+        finally:
+            if not entered:
+                # Legacy Windows filelock removes its marker when the local
+                # stack releases after an exception from __enter__.
+                self._restore_marker_after_release()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):

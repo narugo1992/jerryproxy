@@ -174,6 +174,24 @@ def test_layout_failure_releases_acquired_filelock(tmp_path, monkeypatch):
         assert replacement.backends.is_dir()
 
 
+def test_lock_enter_failure_runs_marker_cleanup_after_stack_release(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path)
+    restored = []
+
+    def fail_layout():
+        raise PermissionError("layout unavailable")
+
+    operation = JerryProxyOperationLock(paths)
+    monkeypatch.setattr(paths, "_ensure_layout_locked", fail_layout)
+    monkeypatch.setattr(operation, "_restore_marker_after_release", lambda: restored.append(True))
+
+    with pytest.raises(PermissionError, match="layout unavailable"):
+        with operation:
+            pass
+
+    assert restored == [True]
+
+
 def test_filelock_status_is_observable():
     status = filelock_status()
 
