@@ -19,6 +19,7 @@ class NodeRecord(ProxyNode):
     display: str
     uri: str = field(repr=False)
     occurrence: int = 0
+    fingerprint: str = field(default="", repr=False)
 
     def public(self):  # type: () -> dict
         """Return the credential-free node representation."""
