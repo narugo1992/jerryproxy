@@ -159,6 +159,17 @@ def test_vmess_rejects_unknown_and_nested_fields_before_runtime_projection():
             parse_subscription_body(body, format_hint="uri-lines")
 
 
+def test_vmess_rejects_nonstandard_json_numbers_before_runtime_projection():
+    payload = (
+        b'{"add":"192.0.2.2","port":443,"id":"55555555-5555-5555-5555-555555555555",'
+        b'"aid":NaN}'
+    )
+    body = b"vmess://" + base64.b64encode(payload) + b"\n"
+
+    with pytest.raises(SubscriptionParseError, match="non-standard JSON number"):
+        parse_subscription_body(body, format_hint="uri-lines")
+
+
 def test_fetch_rejects_private_dns_answers_before_request():
     class Session(object):
         def get(self, *args, **kwargs):

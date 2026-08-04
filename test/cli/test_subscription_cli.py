@@ -121,6 +121,44 @@ def test_url_stdin_applies_the_bound_to_content_not_its_line_ending(monkeypatch)
         subscription_common.read_url_stdin()
 
 
+def test_file_source_uses_bounded_stream_reads(tmp_path, monkeypatch):
+    body = tmp_path / "subscription.txt"
+    body.write_bytes(SS.encode("ascii"))
+
+    def fail_unbounded_read(path):
+        del path
+        raise AssertionError("file source must not use Path.read_bytes")
+
+    monkeypatch.setattr(subscription_common.Path, "read_bytes", fail_unbounded_read)
+    source_kind, source_url, source_body = subscription_common.read_source(
+        None, body, False, False, interactive=False
+    )
+
+    assert source_kind == "body"
+    assert source_url is None
+    assert source_body == SS.encode("ascii")
+
+
+def test_file_source_rejects_sparse_body_over_the_bound(tmp_path):
+    body = tmp_path / "oversized-subscription.bin"
+    with body.open("wb") as handle:
+        handle.truncate(subscription_common.MAXIMUM_BODY_BYTES + 1)
+
+    result = _invoke(
+        CliRunner(),
+        tmp_path / "home",
+        "subscription",
+        "add",
+        "main",
+        "--file",
+        str(body),
+        "--json",
+    )
+
+    assert result.exit_code == 2
+    assert "8 MiB" in result.output
+
+
 def test_base64_body_file_is_accepted(tmp_path):
     runner = CliRunner()
     home = tmp_path / "home"
