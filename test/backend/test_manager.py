@@ -4155,17 +4155,17 @@ def test_inventory_rejects_a_missing_existing_lock_file_without_recreating_it(tm
     assert not manager.paths.lock_file.exists()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows filelock removes its lock file")
-def test_inventory_accepts_a_complete_windows_layout_without_a_persistent_lock_file(tmp_path):
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific persistent lock contract")
+def test_inventory_rejects_a_complete_windows_layout_without_a_persistent_lock_file(tmp_path):
     manager = manager_for(tmp_path)
     manager.paths.ensure()
     if manager.paths.lock_file.exists():
         manager.paths.lock_file.unlink()
 
-    inventory = manager.inventory()
+    with pytest.raises(IntegrityError, match="home is incomplete"):
+        manager.inventory()
 
-    assert inventory.installed == ()
-    assert inventory.active == ()
+    assert not manager.paths.lock_file.exists()
 
 
 def test_clean_download_cache_by_version_backend_and_all(tmp_path):

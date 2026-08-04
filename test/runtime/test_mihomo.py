@@ -189,7 +189,7 @@ def test_guardian_owns_backend_and_forwards_redacted_output(tmp_path, monkeypatc
     process.start()
     try:
         assert process.backend_pid and process.backend_pid != process.process.pid
-        assert mihomo_module._linux_process_parent(process.backend_pid) == process.process.pid
+        assert mihomo_module._posix_process_parent(process.backend_pid) == process.process.pid
         for thread in process._threads:
             thread.join(1.0)
         assert any("raw stdout secret" in item[2] for item in events)
