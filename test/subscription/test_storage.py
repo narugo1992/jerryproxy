@@ -316,6 +316,12 @@ def test_remote_worker_start_has_a_bounded_deadline(tmp_path, monkeypatch):
     monkeypatch.setattr(manager_module, "_FETCH_STOP_SECONDS", 0.05)
     with pytest.raises(SubscriptionFetchError, match="startup (failed|deadline)"):
         manager._fetch_remote("https://provider.example/sub", False, "uri-lines")
+    cleanup_deadline = time.monotonic() + max(
+        1.0,
+        manager_module._FETCH_LATE_CLEANUP_SECONDS + manager_module._FETCH_STOP_SECONDS,
+    )
+    while time.monotonic() < cleanup_deadline and tuple(paths.runtimes.glob(".subscription-fetch-*")):
+        time.sleep(0.01)
     assert not tuple(paths.runtimes.glob(".subscription-fetch-*"))
 
 
