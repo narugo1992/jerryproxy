@@ -289,8 +289,8 @@ def test_guardian_terminates_child_when_metadata_publication_fails(tmp_path, mon
         lambda value, hard=False: setattr(value, "terminated", hard),
     )
     monkeypatch.setattr(guardian_module, "_start_time", lambda pid: 1)
-    monkeypatch.setattr(guardian_module.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(guardian_module.os, "getsid", lambda pid: pid)
+    monkeypatch.setattr(guardian_module.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(guardian_module.os, "getsid", lambda pid: pid, raising=False)
     assert guardian_module.run(tmp_path / "mihomo", tmp_path / "config", tmp_path / "meta", tmp_path) == 127
     assert child.terminated is True
 
@@ -308,8 +308,8 @@ def test_guardian_publishes_identity_and_returns_child_status(tmp_path, monkeypa
 
     monkeypatch.setattr(guardian_module.subprocess, "Popen", lambda *args, **kwargs: Child())
     monkeypatch.setattr(guardian_module, "_start_time", lambda pid: 99)
-    monkeypatch.setattr(guardian_module.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(guardian_module.os, "getsid", lambda pid: pid)
+    monkeypatch.setattr(guardian_module.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(guardian_module.os, "getsid", lambda pid: pid, raising=False)
     metadata = tmp_path / "guardian.json"
     assert guardian_module.run(tmp_path / "mihomo", tmp_path / "config", metadata, tmp_path) == 7
     value = json.loads(metadata.read_text(encoding="ascii"))
@@ -340,8 +340,8 @@ def test_guardian_stops_child_when_parent_identity_changes(tmp_path, monkeypatch
     monkeypatch.setattr(guardian_module.subprocess, "Popen", lambda *args, **kwargs: child)
     monkeypatch.setattr(guardian_module, "_parent_identity_matches", lambda *args: next(identity))
     monkeypatch.setattr(guardian_module, "_start_time", lambda pid: 99)
-    monkeypatch.setattr(guardian_module.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(guardian_module.os, "getsid", lambda pid: pid)
+    monkeypatch.setattr(guardian_module.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(guardian_module.os, "getsid", lambda pid: pid, raising=False)
     terminated = []
     monkeypatch.setattr(guardian_module, "_terminate_child_group", lambda value, hard=False: terminated.append(hard))
     result = guardian_module.run(
@@ -370,6 +370,8 @@ def test_mihomo_rejects_invalid_log_lock_and_readiness_settings(tmp_path):
 
 
 def test_mihomo_start_reports_guardian_launch_failure(tmp_path, monkeypatch):
+    if sys.platform == "darwin":
+        monkeypatch.setattr(mihomo_module, "_posix_process_start_time", lambda pid: "test-start")
     process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
 
     def fail_launch(*args, **kwargs):
@@ -383,6 +385,8 @@ def test_mihomo_start_reports_guardian_launch_failure(tmp_path, monkeypatch):
 
 
 def test_mihomo_start_cleans_authorization_gate_after_preexec_failure(tmp_path, monkeypatch):
+    if sys.platform == "darwin":
+        monkeypatch.setattr(mihomo_module, "_posix_process_start_time", lambda pid: "test-start")
     class FailingPopen(object):
         def __init__(self, *args, **kwargs):
             del args, kwargs
@@ -397,6 +401,8 @@ def test_mihomo_start_cleans_authorization_gate_after_preexec_failure(tmp_path, 
 
 
 def test_mihomo_start_authorizes_real_popen_shape_and_drains_child(tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("POSIX process-group launch shape")
     captured = {}
 
     class FakePopen(object):
@@ -416,6 +422,7 @@ def test_mihomo_start_authorizes_real_popen_shape_and_drains_child(tmp_path, mon
     monkeypatch.setattr(mihomo_module.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(mihomo_module, "_linux_optional_pidfd_open", lambda pid: None)
     monkeypatch.setattr(mihomo_module, "_linux_process_start_time", lambda pid: 1)
+    monkeypatch.setattr(mihomo_module, "_posix_process_start_time", lambda pid: 1)
     monkeypatch.setattr(MihomoProcess, "_load_guardian_identity", lambda self, timeout=5.0: None)
     process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
     monkeypatch.setattr(process, "_release_start_gate", lambda: captured.setdefault("authorized", True))
@@ -539,6 +546,8 @@ def test_mihomo_driver_projects_secret_node_and_delegates_lifecycle(tmp_path):
 
 
 def test_mihomo_stop_terminates_authorized_group_and_cleans_metadata(tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("POSIX process-group termination")
     class Child(object):
         pid = 456
 
