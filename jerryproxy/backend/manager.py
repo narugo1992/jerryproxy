@@ -122,6 +122,27 @@ class BackendManager(object):
         relay_pattern=None,
     ):
         # type: (str, Optional[str], bool, Optional[str], Optional[str], Optional[str]) -> InstalledBackend
+        with JerryProxyOperationLock(self.paths, platform_info=self.platform_info):
+            return self._install_locked(
+                name,
+                version=version,
+                activate=activate,
+                relay=relay,
+                relay_url=relay_url,
+                relay_pattern=relay_pattern,
+            )
+
+    def _install_locked(
+        self,
+        name,
+        version=None,
+        activate=True,
+        relay=None,
+        relay_url=None,
+        relay_pattern=None,
+    ):
+        """Install while the caller owns the home-wide operation lock."""
+
         spec = get_backend(name)
         asset = self.resolve_artifact(spec.name, version)
         sources = build_download_sources(
@@ -131,33 +152,32 @@ class BackendManager(object):
             relay_pattern=relay_pattern,
         )
         normalized_version = asset.version
-        with JerryProxyOperationLock(self.paths, platform_info=self.platform_info):
-            download_directory = self.paths.downloads / spec.name / normalized_version
-            self._reject_backend_alias(self.paths.downloads, spec.name, download_directory)
-            ensure_private_directory(download_directory)
-            archive = download_directory / asset.name
-            if archive.exists() and sha256_file(archive) != asset.sha256:
-                archive.unlink()
-            if not archive.exists():
-                self.downloader.download_sources(
-                    sources,
-                    archive,
-                    asset.sha256,
-                    expected_size=asset.size,
-                )
-            installed = self._install_from_archive_locked(
-                spec.name,
-                normalized_version,
+        download_directory = self.paths.downloads / spec.name / normalized_version
+        self._reject_backend_alias(self.paths.downloads, spec.name, download_directory)
+        ensure_private_directory(download_directory)
+        archive = download_directory / asset.name
+        if archive.exists() and sha256_file(archive) != asset.sha256:
+            archive.unlink()
+        if not archive.exists():
+            self.downloader.download_sources(
+                sources,
                 archive,
-                expected_sha256=asset.sha256,
+                asset.sha256,
                 expected_size=asset.size,
-                asset_name=asset.name,
-                source_url=asset.url,
-                asset_platform=asset.platform,
-                archive_executable=asset.executable,
             )
-            if activate:
-                self._switch_locked(spec.name, normalized_version)
+        installed = self._install_from_archive_locked(
+            spec.name,
+            normalized_version,
+            archive,
+            expected_sha256=asset.sha256,
+            expected_size=asset.size,
+            asset_name=asset.name,
+            source_url=asset.url,
+            asset_platform=asset.platform,
+            archive_executable=asset.executable,
+        )
+        if activate:
+            self._switch_locked(spec.name, normalized_version)
         return installed
 
     def _probe_installed(self, installed):  # type: (InstalledBackend) -> None
@@ -473,16 +493,22 @@ class BackendManager(object):
                 if normalized_version is None:
                     raise BackendNotInstalledError("%s has no current version" % spec.name)
                 raise BackendNotInstalledError("%s %s is not installed" % (spec.name, normalized_version))
-            if version is None:
-                current = self._current_locked(spec.name)
-                if current is None:
-                    raise BackendNotInstalledError("%s has no current version" % spec.name)
-                installed = self._get_installed_locked(current.name, current.version)
-                self._verify_installed_executable(installed)
-                return current
-            installed = self._get_installed_locked(spec.name, normalized_version)
+            return self._which_locked(spec.name, normalized_version)
+
+    def _which_locked(self, name, version=None):
+        """Return a verified selection while the home lock is already held."""
+
+        spec = get_backend(name)
+        if version is None:
+            current = self._current_locked(spec.name)
+            if current is None:
+                raise BackendNotInstalledError("%s has no current version" % spec.name)
+            installed = self._get_installed_locked(current.name, current.version)
             self._verify_installed_executable(installed)
-            return installed
+            return current
+        installed = self._get_installed_locked(spec.name, version)
+        self._verify_installed_executable(installed)
+        return installed
 
     def use(self, name, version):  # type: (str, str) -> ActiveBackend
         """Activate one exact already installed backend version."""

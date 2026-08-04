@@ -14,20 +14,22 @@ Complete in the initial scaffold
   clean-runner validation;
 * deterministic tests, package, docs, and CI definitions.
 
-Required before the first usable proxy alpha
+Implemented in the first usable proxy slice
 --------------------------------------------
 
-* managed subscription input and credential redaction;
-* Mihomo config generation and authenticated controller integration;
-* foreground ``run`` plus detached ``start``/``stop``/``status``;
-* node list/select/test/refresh commands;
-* legacy ``V2RAY_*`` and existing option migration;
-* signed release artifacts and publication policy.
+* bounded ``V2RAY_SUBSCRIPTION`` input with credential redaction and private
+  home-local revisions;
+* Mihomo 1.19.29 NodeSet projection and authenticated foreground ``server``;
+* sanitized ``subscription`` and ``node list`` commands;
+* global health quorum, same-node restart, deterministic alternate sweep, and
+  one policy-controlled source refresh.
 
 Later compatibility work
 ------------------------
 
+* native Mihomo/Clash profiles and a controller/measurement API;
 * Xray runtime driver for strict/new Xray-family cases;
 * V2Ray legacy runtime driver;
 * trusted configurable mirrors and explicit offline archives;
 * signed standalone executables and PyPI Trusted Publishing.
+* signed release artifacts and publication policy.

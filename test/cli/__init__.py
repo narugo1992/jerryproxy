@@ -1,0 +1,1 @@
+"""Public CLI behavior tests."""

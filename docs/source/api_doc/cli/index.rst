@@ -12,7 +12,10 @@ jerryproxy.cli
    backend/index
    doctor
    home
+   node/index
    self_check
+   server
+   subscription/index
 
 CONTEXT\_SETTINGS
 -----------------------------------------------------

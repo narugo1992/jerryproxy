@@ -170,19 +170,21 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     assert result.exit_code == 0
     assert "Runtime: Python" in result.output
     assert "System:" in result.output
-    assert "[1/20] Python runtime: OK" in result.output
-    assert "[7/20] packaged backend catalog: OK" in result.output
-    assert "[8/20] catalog platform selection: OK" in result.output
-    assert "[9/20] filelock compatibility:" in result.output
-    assert "[10/20] backend inventory: OK" in result.output
-    assert "[11/20] isolated backend lifecycle: OK" in result.output
-    assert "[12/20] recovery install rollback: OK" in result.output
-    assert "[13/20] recovery activation rollback: OK" in result.output
-    assert "[14/20] recovery activation rollforward: OK" in result.output
-    assert "[15/20] recovery removal rollback: OK" in result.output
-    assert "[16/20] recovery removal rollforward: OK" in result.output
-    assert "[19/20] relay gh.geekertao.top: OK" in result.output
-    assert "[20/20] delayed process cleanup: OK" in result.output
+    assert "[1/22] Python runtime: OK" in result.output
+    assert "[7/22] packaged backend catalog: OK" in result.output
+    assert "[8/22] catalog platform selection: OK" in result.output
+    assert "[9/22] subscription parser: OK" in result.output
+    assert "[10/22] runtime projection: OK" in result.output
+    assert "[11/22] filelock compatibility:" in result.output
+    assert "[12/22] backend inventory: OK" in result.output
+    assert "[13/22] isolated backend lifecycle: OK" in result.output
+    assert "[14/22] recovery install rollback: OK" in result.output
+    assert "[15/22] recovery activation rollback: OK" in result.output
+    assert "[16/22] recovery activation rollforward: OK" in result.output
+    assert "[17/22] recovery removal rollback: OK" in result.output
+    assert "[18/22] recovery removal rollforward: OK" in result.output
+    assert "[21/22] relay gh.geekertao.top: OK" in result.output
+    assert "[22/22] delayed process cleanup: OK" in result.output
     assert "0 FAIL, 0 ERR" in result.output
     expected_skips = 0 if os.name == "posix" else 1
     assert "%d SKIP" % expected_skips in result.output
