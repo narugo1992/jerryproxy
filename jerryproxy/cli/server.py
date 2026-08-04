@@ -105,6 +105,8 @@ Interactive forms:
   jerryproxy server
     Select an enabled subscription and node through InquirerPy.
     Confirm backend bootstrap when Mihomo is not installed.
+    The confirmation defaults to Yes; press Enter to proceed.
+    JerryProxy then installs and launches the verified backend.
   jerryproxy server --subscription NAME
     Select NAME's node when running in a real TTY.
 
@@ -180,7 +182,7 @@ when `--auth` is enabled.
     "--install-missing/--no-install-missing",
     default=True,
     show_default=True,
-    help="Bootstrap the exact backend when absent.",
+    help="Bootstrap the exact backend when absent; the guided confirmation defaults to Yes.",
 )
 @click.option("--log-level", type=click.Choice(["DEBUG", "INFO", "WARN", "ERROR"]), default="INFO", show_default=True)
 @click.option(
@@ -308,6 +310,7 @@ def server_command(
             if not _common.confirm_dangerous_operation(
                 "Install verified Mihomo %s and run it in the foreground?" % backend_version,
                 yes,
+                default=True,
             ):
                 raise click.ClickException("backend bootstrap cancelled")
     rich_handler = None
