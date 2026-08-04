@@ -9,7 +9,10 @@ from ..errors import JerryProxyError
 from .backend import backend_group
 from .doctor import doctor_command
 from .home import home_command
+from .node import node_group
 from .self_check import self_check_command
+from .server import server_command
+from .subscription import subscription_group
 
 #: Click context settings used by the root command.
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -34,6 +37,9 @@ cli.add_command(home_command)
 cli.add_command(doctor_command)
 cli.add_command(self_check_command)
 cli.add_command(backend_group)
+cli.add_command(subscription_group)
+cli.add_command(node_group)
+cli.add_command(server_command)
 
 
 def main():  # type: () -> int

@@ -101,3 +101,33 @@ RemovalCleanupError
 -----------------------------------------------------
 
 .. autoclass:: RemovalCleanupError
+
+
+SubscriptionError
+-----------------------------------------------------
+
+.. autoclass:: SubscriptionError
+
+
+SubscriptionFetchError
+-----------------------------------------------------
+
+.. autoclass:: SubscriptionFetchError
+
+
+SubscriptionParseError
+-----------------------------------------------------
+
+.. autoclass:: SubscriptionParseError
+
+
+SubscriptionStateError
+-----------------------------------------------------
+
+.. autoclass:: SubscriptionStateError
+
+
+RuntimeSessionError
+-----------------------------------------------------
+
+.. autoclass:: RuntimeSessionError

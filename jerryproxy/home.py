@@ -82,6 +82,30 @@ class JerryProxyPaths(object):
         return self.root / "active"
 
     @property
+    def subscriptions(self):  # type: () -> Path
+        """Private subscription records (created only by subscription mutations)."""
+
+        return self.root / "subscriptions"
+
+    @property
+    def nodes(self):  # type: () -> Path
+        """Private node identity state for subscription reconciliation."""
+
+        return self.root / "nodes"
+
+    @property
+    def leases(self):  # type: () -> Path
+        """Private foreground runtime lease directories."""
+
+        return self.root / "leases"
+
+    @property
+    def config(self):  # type: () -> Path
+        """Private runtime configuration namespace."""
+
+        return self.root / "config"
+
+    @property
     def lock_file(self):  # type: () -> Path
         return self.locks / "jerryproxy.lock"
 
@@ -117,6 +141,10 @@ class JerryProxyPaths(object):
             self.runtimes,
             self.logs,
             self.active,
+            self.subscriptions,
+            self.nodes,
+            self.leases,
+            self.config,
         )
 
     @staticmethod

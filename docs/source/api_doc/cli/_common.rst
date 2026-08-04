@@ -26,6 +26,12 @@ manager
 .. autofunction:: manager
 
 
+subscriptions
+-----------------------------------------------------
+
+.. autofunction:: subscriptions
+
+
 confirm\_dangerous\_operation
 -----------------------------------------------------
 

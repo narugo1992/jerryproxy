@@ -21,9 +21,15 @@ The canonical technical identifiers are all `jerryproxy`:
 ## Current WIP boundary
 
 The backend version manager, official release resolution, verified downloads,
-safe extraction, manifests, and active-link switching exist. Proxy runtime,
-subscription, controller, and historical `v2raycli` compatibility features are
-planned. README and docs must keep that boundary truthful.
+safe extraction, manifests, active-link switching, bounded
+`V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS/VMess/VLESS URI lines, and a
+Mihomo `1.19.29` authenticated foreground session now exist. The session keeps
+subscription state below `JERRYPROXY_HOME`, probes the global health quorum,
+restarts the current node once, sweeps deterministic alternates, and may refresh
+the retained source once without rewriting the saved preference. Native profiles,
+the other runtime cores, controller, measurement/ranking system, and historical
+`v2raycli` compatibility remain planned. README and docs must keep that boundary
+truthful.
 
 ## Engineering discipline
 
@@ -111,9 +117,13 @@ authentication, extraction, process, or permission errors to warnings.
   catalog URL rather than the effective relay URL.
 - Keep `urllib3` below 2 while Python 3.7/OpenSSL 1.1.0 standalone build
   compatibility remains a target; use the latest patched 1.26 release floor.
-- Serialize all managed-state reads and mutations for one logical home through
-  the upstream `filelock.FileLock` at `<home>/locks/jerryproxy.lock`, using the
-  public API only and a default timeout of zero.
+- Serialize every managed-state read and mutation for one logical home through
+  the same home-wide upstream `filelock.FileLock` at
+  `<home>/locks/jerryproxy.lock`, using the public API only and a default
+  timeout of zero. The lock is a JerryProxy-home boundary, not a backend-local
+  lock: backend installation, subscription fetch/publication, node inventory,
+  runtime lease/config publication, health recovery, cleanup, and read-only
+  inventory all contend on this one path.
 - Never add PID/UUID owner metadata, inspect lock contents, infer stale
   ownership from the path, delete the lock file on release, access `filelock`
   private state, or implement a second platform lock.
@@ -121,6 +131,12 @@ authentication, extraction, process, or permission errors to warnings.
   validation, download, hashing, extraction, publication, probing, and optional
   activation. Composed operations must call private locked helpers instead of
   recursively acquiring a second lock.
+- A foreground `RuntimeSession` owns this same home-wide lock from subscription
+  selection through lease/config/access publication, backend launch, health and
+  recovery, log draining, and final child/artifact cleanup. It must release the
+  lock only after no child and no secret-bearing runtime path remain. Runtime
+  code uses private locked manager/store helpers; it must not reacquire a second
+  `FileLock` while the session is active.
 - Read operations use the same home-wide lock. CLI list, doctor, and self-check
   must consume one `BackendInventory` snapshot for installed and active state.
   A completely absent or empty home has no managed state to lock and must
@@ -278,9 +294,24 @@ authentication, extraction, process, or permission errors to warnings.
   and removal.
 - `jerryproxy.lock`: direct home-wide `filelock` integration and compatibility
   status. It must not grow a second lock implementation.
-- Future runtime drivers own generated configuration and backend control APIs.
-- Future subscription management may fetch and inventory containers, but must
-  not normalize protocol-specific credentials/settings into a second core.
+- `jerryproxy.subscription` owns bounded source transport, URI classification,
+  private revision publication, and sanitized node inventory. It must not
+  normalize protocol-specific credentials/settings into a second core.
+- `jerryproxy.subscription.interfaces` owns the stable `ProxyNode`,
+  `NodeSource`, and `SubscriptionParser` contracts. A subscription parser is
+  an injected adapter; adding a new container must not add protocol branches to
+  the runtime session or duplicate credential-bearing node models. A future
+  single-node input must implement `NodeSource` rather than create a second
+  runtime selection path.
+- `jerryproxy.runtime` owns the current Mihomo projection, authenticated
+  loopback listener, backend stream separation, connectivity quorum, and the
+  bounded foreground recovery policy. Future runtime drivers own other cores,
+  native profiles, and backend control APIs.
+- `jerryproxy.runtime.interfaces` owns the `RuntimeDriver` and
+  `RuntimeProjection` contracts. Drivers own backend config syntax and child
+  lifecycle; `RuntimeSession` owns the home-wide lock, private publication,
+  credentials, health/recovery policy, and sanitized output. No driver may
+  acquire a second home lock.
 - Relay-health target configuration lives in the maintainer Gist, not in this
   repository or package. `make relay_health_sync` downloads one ignored local
   JSON file. The tool must pin the reviewed official probe asset and constrain
@@ -327,6 +358,11 @@ private branch coverage or replace the normal test matrix.
   APIs where practical. Run mutating probes only in private temporary homes,
   use local synthetic backend archives, disable backend execution, perform no
   upstream backend download, and leave the configured user home untouched.
+- Interface contracts must have at least one behavior test: parser injection
+  must cover publication and reload through the same adapter, node sources must
+  expose only the sanitized public view plus an explicit runtime secret URI
+  boundary, and a runtime driver must be replaceable without changing session
+  lock ownership or recovery semantics.
 - Recovery diagnostics must use spawned child processes that terminate through
   a real hard exit after durable transaction milestones. The parent must
   reacquire the normal home-wide lock and verify rollback or rollforward,

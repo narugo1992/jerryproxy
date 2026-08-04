@@ -113,7 +113,7 @@ def test_self_check_validates_an_empty_private_home(tmp_path, monkeypatch):
     permission_skip = int(os.name != "posix")
     lock_warning = int(status.level == "WARN")
     expected = "Summary: %d OK, %d WARN, %d SKIP, 0 FAIL, 0 ERR" % (
-        20 - permission_skip - lock_warning,
+        22 - permission_skip - lock_warning,
         lock_warning,
         permission_skip,
     )
@@ -2693,7 +2693,7 @@ def test_relay_warnings_keep_the_full_self_check_exit_code_zero(tmp_path):
     permission_skip = int(os.name != "posix")
     lock_warning = int(status.level == "WARN")
     expected = "Summary: %d OK, %d WARN, %d SKIP, 0 FAIL, 0 ERR" % (
-        17 - permission_skip - lock_warning,
+        19 - permission_skip - lock_warning,
         3 + lock_warning,
         permission_skip,
     )

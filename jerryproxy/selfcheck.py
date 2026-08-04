@@ -39,6 +39,9 @@ from .errors import (
 )
 from .home import JerryProxyPaths
 from .lock import JerryProxyOperationLock, filelock_status
+from .runtime.health import DEFAULT_HEALTH_TARGETS, RecoveryPolicy
+from .runtime.mihomo import build_provider_config
+from .subscription import parse_subscription_body
 from .utils.fs import atomic_write_json, read_json
 
 _ANSI_BOLD = "\033[1m"
@@ -184,6 +187,10 @@ def _directory_paths(paths):
         paths.logs,
         paths.locks,
         paths.active,
+        paths.subscriptions,
+        paths.nodes,
+        paths.leases,
+        paths.config,
     )
 
 
@@ -336,6 +343,52 @@ def _check_backend_catalog_selection():
             "catalog has no verified stable %s asset for: %s" % (platform_info.key, ", ".join(missing))
         )
     return CheckResult.ok("4/4 backends have verified stable %s assets" % platform_info.key)
+
+
+def _check_subscription_parser():
+    """Exercise the packaged URI classifier without reading private state."""
+
+    fixture = (
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ss\n"
+        b"vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1IiwibmV0IjoidGNwIiwicG9ydCI6IjQ0MyIsInBzIjoidm1lc3MiLCJ2IjoyfQ==\n"
+        b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?security=reality&sni=www.example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&flow=xtls-rprx-vision#vless\n"
+    )
+    try:
+        parsed = parse_subscription_body(fixture, format_hint="uri-lines")
+    except (ValueError, JerryProxyError) as error:
+        # The product parser is an installed-resource capability, not a unit
+        # test proxy; a malformed packaged fixture is a diagnostic error.
+        return _error_result(error)
+    schemes = tuple(item[0] for item in parsed.records)
+    if schemes != ("ss", "vmess", "vless"):
+        return CheckResult.fail("subscription parser classified an unexpected scheme set")
+    if any("@" in item[1] or "=" in item[1] for item in parsed.records):
+        return CheckResult.fail("subscription parser produced a credential-shaped display")
+    return CheckResult.ok("Base64/plain URI parser accepted SS, VMess, and VLESS safely")
+
+
+def _check_runtime_projection():
+    """Exercise the Mihomo projection API in a private temporary directory."""
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="jerryproxy-runtime-self-check-") as temporary:
+            root = Path(temporary)
+            provider = root / "xdg-config" / "mihomo" / "provider.txt"
+            config = root / "config.yaml"
+            provider.parent.mkdir(mode=0o700, parents=True)
+            provider.write_bytes(b"ss://opaque\n")
+            payload = build_provider_config(provider, b"ss://opaque\n", 17777, "user", "password")
+            config.write_bytes(payload)
+            text = payload.decode("utf-8")
+            if "MATCH,jerryproxy" not in text or "allow-lan: false" not in text:
+                return CheckResult.fail("Mihomo projection lacks the loopback-only rule")
+    except (OSError, UnicodeError, RuntimeError, ValueError) as error:
+        # Temporary projection and encoding failures are diagnostic errors.
+        return _error_result(error)
+    policy = RecoveryPolicy()
+    if len(DEFAULT_HEALTH_TARGETS) != 3 or policy.alternate_delays != (4.0, 8.0):
+        return CheckResult.fail("runtime health/recovery policy is incomplete")
+    return CheckResult.ok("Mihomo projection and bounded health recovery policy are usable")
 
 
 def _check_filelock():
@@ -1477,6 +1530,8 @@ def build_checks(paths, relay_session_factory=None):
         ("backend registry", _check_backend_registry),
         ("packaged backend catalog", _check_backend_catalog),
         ("catalog platform selection", _check_backend_catalog_selection),
+        ("subscription parser", _check_subscription_parser),
+        ("runtime projection", _check_runtime_projection),
         ("filelock compatibility", _check_filelock),
         ("backend inventory", lambda: _check_backend_inventory(paths)),
         ("isolated backend lifecycle", _check_isolated_backend_lifecycle),
