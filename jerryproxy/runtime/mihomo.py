@@ -1,5 +1,6 @@
 """Mihomo 1.19.29 foreground projection for an opaque NodeSet."""
 
+import base64
 import os
 import signal
 import socket
@@ -22,6 +23,7 @@ MAXIMUM_LOG_BYTES = 4 * 1024 * 1024
 MAXIMUM_BACKEND_LINE_BYTES = 16 * 1024
 LISTENER_PROTOCOLS = ("mixed", "http", "socks5")
 LISTENER_ADDRESSES = ("127.0.0.1", "0.0.0.0")
+_HTTP_READINESS_STATUSES = frozenset((200, 400, 403, 404, 405, 500, 501, 502, 503, 504))
 
 
 def _configure_parent_death_signal():  # type: () -> None
@@ -301,7 +303,7 @@ def build_environment(executable, session_root):  # type: (Path, Path) -> dict
         "TZ": "UTC",
     }
     if os.name == "nt":
-        system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        system_root = _windows_system_root()
         if not system_root:
             raise RuntimeSessionError("SystemRoot is unavailable for the backend environment")
         values.update(
@@ -313,6 +315,204 @@ def build_environment(executable, session_root):  # type: (Path, Path) -> dict
             }
         )
     return values
+
+
+def _windows_system_root():  # type: () -> str
+    """Read the Windows directory from the native API, not ambient variables."""
+
+    try:
+        import ctypes
+
+        get_directory = ctypes.windll.kernel32.GetWindowsDirectoryW
+        get_directory.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        get_directory.restype = ctypes.c_uint32
+        capacity = 260
+        while capacity <= 32768:
+            buffer = ctypes.create_unicode_buffer(capacity)
+            length = int(get_directory(buffer, capacity))
+            if length == 0:
+                return ""
+            if length < capacity:
+                return buffer.value
+            capacity *= 2
+    except (AttributeError, OSError, TypeError, ValueError):
+        # A native Windows API failure leaves the child environment unusable.
+        return ""
+    return ""
+
+
+def _linux_listener_inodes(port, address):  # type: (int, str) -> object
+    """Return LISTEN socket inodes for one IPv4 port from procfs."""
+
+    try:
+        expected_address = "%08X" % int.from_bytes(socket.inet_aton(address), "little")
+    except (OSError, ValueError):
+        return set()
+    result = set()
+    # JerryProxy currently publishes only IPv4 listener addresses.  Do not let
+    # an unrelated IPv6 socket owned by the same PID satisfy an IPv4 probe.
+    for table_name in ("tcp",):
+        table = Path("/proc/net/%s" % table_name)
+        if not table.is_file():
+            continue
+        try:
+            lines = table.read_text(encoding="ascii").splitlines()[1:]
+        except (OSError, UnicodeError):
+            # Procfs may disappear while a process is being reaped.
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) <= 9 or fields[3] != "0A":
+                continue
+            endpoint = fields[1].split(":", 1)
+            if len(endpoint) != 2:
+                continue
+            try:
+                current_port = int(endpoint[1], 16)
+            except ValueError:
+                continue
+            if current_port != port:
+                continue
+            if endpoint[0].upper() != expected_address:
+                continue
+            result.add(fields[9])
+    return result
+
+
+def _linux_process_socket_inodes(pid):  # type: (int) -> object
+    root = Path("/proc/%d/fd" % pid)
+    if not root.is_dir():
+        return None
+    try:
+        entries = tuple(root.iterdir())
+    except OSError:
+        return None
+    result = set()
+    for entry in entries:
+        try:
+            target = os.readlink(str(entry))
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target.endswith("]"):
+            result.add(target[8:-1])
+    return result
+
+
+def _listener_owned_by_linux_process(process, port, address):  # type: (object, int, str) -> object
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    listener_inodes = _linux_listener_inodes(port, address)
+    process_inodes = _linux_process_socket_inodes(pid)
+    if process_inodes is None:
+        return None
+    return bool(listener_inodes.intersection(process_inodes))
+
+
+def _listener_owned_by_macos_process(process, port, address):  # type: (object, int, str) -> object
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        endpoint = "%d" % port if address == "0.0.0.0" else "%s:%d" % (address, port)
+        selector = "-iTCP:%s" % endpoint if address == "0.0.0.0" else "-iTCP@%s" % endpoint
+        result = subprocess.run(
+            [
+                "lsof",
+                "-nP",
+                "-a",
+                "-p",
+                str(pid),
+                selector,
+                "-sTCP:LISTEN",
+                "-Fpn",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=0.5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # macOS installations without lsof cannot prove listener ownership.
+        return None
+    for line in result.stdout.splitlines():
+        if not line.startswith(b"n"):
+            continue
+        endpoint = line[1:].split(None, 1)[0].decode("ascii", "ignore")
+        if address == "0.0.0.0":
+            if endpoint.endswith(":%d" % port) or endpoint.endswith(":%d (LISTEN)" % port):
+                return True
+        elif endpoint == "%s:%d" % (address, port):
+            return True
+    return False
+
+
+def _listener_owned_by_windows_process(process, port, address):  # type: (object, int, str) -> object
+    """Use GetExtendedTcpTable when the native Windows API is available."""
+
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        import ctypes
+
+        class Row(ctypes.Structure):
+            _fields_ = [
+                ("state", ctypes.c_ulong),
+                ("local_address", ctypes.c_ulong),
+                ("local_port", ctypes.c_ubyte * 4),
+                ("remote_address", ctypes.c_ulong),
+                ("remote_port", ctypes.c_ubyte * 4),
+                ("owning_pid", ctypes.c_ulong),
+            ]
+
+        get_table = ctypes.windll.iphlpapi.GetExtendedTcpTable
+        get_table.restype = ctypes.c_ulong
+        get_table.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.c_bool,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        size = ctypes.c_ulong(0)
+        family_ipv4 = 2
+        table_owner_pid_listener = 2
+        error = int(get_table(None, ctypes.byref(size), False, family_ipv4, table_owner_pid_listener, 0))
+        if error not in (0, 122) or size.value <= ctypes.sizeof(ctypes.c_ulong):
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        error = int(
+            get_table(buffer, ctypes.byref(size), False, family_ipv4, table_owner_pid_listener, 0)
+        )
+        if error != 0:
+            return None
+        count = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ulong)).contents.value
+        rows = (Row * count).from_buffer(buffer, ctypes.sizeof(ctypes.c_ulong))
+        expected_address = int.from_bytes(socket.inet_aton(address), "little")
+        for row in rows:
+            current_port = int.from_bytes(bytes(row.local_port), "big")
+            if (
+                current_port == port
+                and row.owning_pid == pid
+                and (address == "0.0.0.0" or row.local_address == expected_address)
+            ):
+                return True
+        return False
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Unsupported API variants cannot prove listener ownership.
+        return None
+
+
+def _listener_owned_by_process(process, port, address):  # type: (object, int, str) -> object
+    if sys.platform.startswith("linux"):
+        return _listener_owned_by_linux_process(process, port, address)
+    if sys.platform == "darwin":
+        return _listener_owned_by_macos_process(process, port, address)
+    if os.name == "nt":
+        return _listener_owned_by_windows_process(process, port, address)
+    return None
 
 
 class MihomoProcess(object):
@@ -340,6 +540,10 @@ class MihomoProcess(object):
         self._stop = threading.Event()
         self._drain_errors = []
         self._log_lock = threading.Lock()
+        self._readiness_username = None
+        self._readiness_password = None
+        self._readiness_protocol = "mixed"
+        self._readiness_address = "127.0.0.1"
 
     def set_log_lock(self, log_lock):
         """Share the session log lock with the foreground runtime owner."""
@@ -347,6 +551,18 @@ class MihomoProcess(object):
         if log_lock is None or not hasattr(log_lock, "__enter__"):
             raise ValueError("log_lock must be a context-manager lock")
         self._log_lock = log_lock
+
+    def set_readiness_challenge(self, username, password, protocol, address):
+        """Set the private protocol challenge used to reject port substitutes."""
+
+        if protocol not in LISTENER_PROTOCOLS or address not in LISTENER_ADDRESSES:
+            raise ValueError("invalid listener readiness challenge")
+        if (username is None) != (password is None):
+            raise ValueError("readiness credentials must be supplied together")
+        self._readiness_username = username
+        self._readiness_password = password
+        self._readiness_protocol = protocol
+        self._readiness_address = address
 
     def _record_drain_error(self, error):
         if len(self._drain_errors) >= 8:
@@ -414,6 +630,7 @@ class MihomoProcess(object):
             # In-memory test streams do not expose an OS file descriptor.
             stream_descriptor = None
         pending = bytearray()
+        pending_line_truncated = False
         try:
             while True:
                 try:
@@ -434,6 +651,9 @@ class MihomoProcess(object):
                     del pending[: line_end + 1]
                     if line.endswith(b"\r"):
                         line = line[:-1]
+                    if pending_line_truncated:
+                        line += b" [line truncated]"
+                        pending_line_truncated = False
                     self._write_backend_line(line)
                 # A backend may write a progress/blob line without a newline.
                 # Emit bounded chunks so live diagnostics cannot consume
@@ -442,9 +662,13 @@ class MihomoProcess(object):
                     line = bytes(pending[:MAXIMUM_BACKEND_LINE_BYTES])
                     del pending[:MAXIMUM_BACKEND_LINE_BYTES]
                     self._write_backend_line(line + b" [line truncated]")
+                    pending_line_truncated = True
         finally:
             if pending:
-                self._write_backend_line(bytes(pending))
+                line = bytes(pending)
+                if pending_line_truncated:
+                    line += b" [line truncated]"
+                self._write_backend_line(line)
             try:
                 stream.close()
             except (OSError, ValueError):
@@ -489,6 +713,63 @@ class MihomoProcess(object):
         self._threads.append(thread)
         return self.process
 
+    @staticmethod
+    def _read_exact(stream, size):
+        value = bytearray()
+        while len(value) < size:
+            chunk = stream.recv(size - len(value))
+            if not chunk:
+                raise RuntimeSessionError("listener closed during readiness challenge")
+            value.extend(chunk)
+        return bytes(value)
+
+    def _challenge_listener(self, port):
+        timeout = 0.3
+        with socket.create_connection((self._readiness_address, port), timeout=timeout) as stream:
+            stream.settimeout(timeout)
+            if self._readiness_protocol == "socks5":
+                method = b"\x02" if self._readiness_username is not None else b"\x00"
+                stream.sendall(b"\x05\x01" + method)
+                response = self._read_exact(stream, 2)
+                if response[0] != 5 or response[1] != method[0]:
+                    raise RuntimeSessionError("listener failed the SOCKS5 readiness challenge")
+                if method == b"\x02":
+                    username = self._readiness_username.encode("ascii")
+                    password = self._readiness_password.encode("ascii")
+                    if len(username) > 255 or len(password) > 255:
+                        raise RuntimeSessionError("listener credentials exceed SOCKS5 limits")
+                    stream.sendall(b"\x01" + bytes((len(username),)) + username + bytes((len(password),)) + password)
+                    auth_response = self._read_exact(stream, 2)
+                    if auth_response != b"\x01\x00":
+                        raise RuntimeSessionError("listener rejected the SOCKS5 readiness credentials")
+                return
+            request = [
+                b"CONNECT 127.0.0.1:1 HTTP/1.1",
+                b"Host: 127.0.0.1:1",
+                b"Proxy-Connection: close",
+            ]
+            if self._readiness_username is not None:
+                credentials = (self._readiness_username + ":" + self._readiness_password).encode("ascii")
+                request.append(b"Proxy-Authorization: Basic " + base64.b64encode(credentials))
+            stream.sendall(b"\r\n".join(request) + b"\r\n\r\n")
+            first_line = self._read_exact(stream, 1)
+            while not first_line.endswith(b"\r\n"):
+                first_line += self._read_exact(stream, 1)
+                if len(first_line) > 256:
+                    raise RuntimeSessionError("listener returned an invalid HTTP readiness response")
+            parts = first_line[:-2].split(None, 2)
+            if len(parts) < 2 or not parts[0].startswith(b"HTTP/") or len(parts[1]) != 3:
+                raise RuntimeSessionError("listener returned an invalid HTTP readiness response")
+            if parts[1] == b"407":
+                raise RuntimeSessionError("listener rejected the HTTP readiness credentials")
+            try:
+                status = int(parts[1])
+            except ValueError as error:
+                # The status line is backend-controlled protocol output.
+                raise RuntimeSessionError("listener returned an invalid HTTP readiness response") from error
+            if status not in _HTTP_READINESS_STATUSES:
+                raise RuntimeSessionError("listener returned an unexpected HTTP readiness status")
+
     def wait_ready(self, port, timeout=5.0):  # type: (int, float) -> None
         if timeout <= 0:
             raise RuntimeSessionError("mihomo readiness deadline exhausted")
@@ -499,9 +780,14 @@ class MihomoProcess(object):
             if self.process.poll() is not None:
                 raise RuntimeSessionError("mihomo backend exited before readiness")
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                    return
+                self._challenge_listener(port)
+                ownership = _listener_owned_by_process(self.process, port, self._readiness_address)
+                if ownership is not True:
+                    raise RuntimeSessionError("cannot prove listener ownership by the Mihomo process")
+                return
             except OSError:
+                time.sleep(0.05)
+            except RuntimeSessionError:
                 time.sleep(0.05)
         raise RuntimeSessionError("mihomo listener did not become ready")
 

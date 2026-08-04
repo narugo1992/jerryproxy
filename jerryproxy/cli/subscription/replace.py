@@ -25,9 +25,9 @@ the environment value remains hidden and other names are rejected.
 @click.option(
     "--url-env",
     "url_env",
-    type=click.Choice([_common.SOURCE_ENVIRONMENT]),
-    metavar="V2RAY_SUBSCRIPTION",
-    help="Read a subscription URL from the exact V2RAY_SUBSCRIPTION environment variable.",
+    type=str,
+    metavar="ENVIRONMENT",
+    help="Read a subscription URL from a present matching environment variable (value hidden).",
 )
 @click.option("--url-stdin", is_flag=True, help="Read one bounded URL from stdin.")
 @click.option(
