@@ -7,6 +7,7 @@ from tabulate import tabulate
 
 from ..backend import BackendManager, iter_backends
 from ..home import JerryProxyPaths
+from ..subscription import SubscriptionManager
 
 
 def echo_table(headers, rows):  # type: (list, list) -> None
@@ -21,6 +22,12 @@ def paths(context):  # type: (click.Context) -> JerryProxyPaths
 
 def manager(context):  # type: (click.Context) -> BackendManager
     return BackendManager(paths(context))
+
+
+def subscriptions(context):  # type: (click.Context) -> SubscriptionManager
+    """Return the public subscription manager for the selected home."""
+
+    return SubscriptionManager(paths(context))
 
 
 def confirm_dangerous_operation(message, assume_yes):  # type: (str, bool) -> bool
@@ -129,4 +136,3 @@ def format_size(size):  # type: (int) -> str
         if value < 1024.0 or suffix == "GiB":
             return "%.1f %s" % (value, suffix)
         value /= 1024.0
-

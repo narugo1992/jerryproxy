@@ -5,9 +5,11 @@ import pytest
 
 import jerryproxy.lock as lock_module
 from jerryproxy.backend.installation import InstallTransaction
+from jerryproxy.backend.manager import BackendManager
 from jerryproxy.errors import JerryProxyBusyError
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.lock import JerryProxyOperationLock, filelock_status
+from jerryproxy.subscription import SubscriptionManager
 
 
 def _hold_lock(root, ready, release):
@@ -35,6 +37,25 @@ def test_global_lock_is_exclusive_across_processes(tmp_path):
         with pytest.raises(JerryProxyBusyError, match="JerryProxy operation already in progress"):
             with JerryProxyOperationLock(JerryProxyPaths(tmp_path)):
                 pass
+    finally:
+        release.set()
+        process.join(10)
+    assert process.exitcode == 0
+
+
+def test_home_lock_serializes_backend_and_subscription_domains(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(target=_hold_lock, args=(str(tmp_path), ready, release))
+    process.start()
+    try:
+        assert ready.wait(10)
+        paths = JerryProxyPaths(tmp_path)
+        with pytest.raises(JerryProxyBusyError):
+            SubscriptionManager(paths).add("main", None, body=b"ss://invalid", format_hint="uri-lines")
+        with pytest.raises(JerryProxyBusyError):
+            BackendManager(paths).inventory()
     finally:
         release.set()
         process.join(10)

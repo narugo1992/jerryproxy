@@ -68,3 +68,23 @@ class CleanupScopeError(JerryProxyError):
 
 class RemovalCleanupError(JerryProxyError):
     """Raised when removal committed but its private quarantine remains."""
+
+
+class SubscriptionError(JerryProxyError):
+    """Base class for subscription ingestion and runtime-source failures."""
+
+
+class SubscriptionFetchError(SubscriptionError):
+    """Raised when a subscription source cannot be fetched safely."""
+
+
+class SubscriptionParseError(SubscriptionError):
+    """Raised when a subscription body is malformed or unsupported."""
+
+
+class SubscriptionStateError(SubscriptionError):
+    """Raised when persisted subscription state is invalid or incomplete."""
+
+
+class RuntimeSessionError(JerryProxyError):
+    """Raised when a foreground backend session cannot start or stop safely."""

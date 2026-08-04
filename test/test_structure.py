@@ -36,6 +36,7 @@ def test_cli_implementation_mirrors_the_public_command_tree():
         "doctor.py",
         "home.py",
         "self_check.py",
+        "server.py",
     }
     assert {path.name for path in (cli_root / "backend").glob("*.py")} == {
         "__init__.py",
@@ -47,6 +48,21 @@ def test_cli_implementation_mirrors_the_public_command_tree():
         "use.py",
         "verify.py",
         "which.py",
+    }
+    assert {path.name for path in (cli_root / "subscription").glob("*.py")} == {
+        "__init__.py",
+        "_common.py",
+        "add.py",
+        "list.py",
+        "refresh.py",
+        "remove.py",
+        "replace.py",
+        "show.py",
+        "validate.py",
+    }
+    assert {path.name for path in (cli_root / "node").glob("*.py")} == {
+        "__init__.py",
+        "list.py",
     }
 
     cli_framework_imports = []
@@ -75,6 +91,9 @@ def test_cli_implementation_mirrors_the_public_command_tree():
         "doctor": "jerryproxy.cli.doctor",
         "home": "jerryproxy.cli.home",
         "self-check": "jerryproxy.cli.self_check",
+        "subscription": "jerryproxy.cli.subscription",
+        "node": "jerryproxy.cli.node",
+        "server": "jerryproxy.cli.server",
     }
     assert set(cli.commands) == set(expected_root_modules)
     assert cli.callback.__module__ == "jerryproxy.cli"
@@ -103,6 +122,17 @@ def test_cli_implementation_mirrors_the_public_command_tree():
         name: command.callback.__module__
         for name, command in backend_group.commands.items()
     } == expected_backend_modules
+
+    assert set(cli.commands["subscription"].commands) == {
+        "add",
+        "replace",
+        "list",
+        "show",
+        "refresh",
+        "validate",
+        "remove",
+    }
+    assert set(cli.commands["node"].commands) == {"list"}
 
 
 def test_backend_catalog_resource_reads_stay_inside_the_data_module():
