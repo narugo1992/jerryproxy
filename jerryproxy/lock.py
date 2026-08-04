@@ -1,5 +1,6 @@
 """Home-wide process locking through the upstream filelock package."""
 
+import inspect
 import os
 import re
 import sys
@@ -80,19 +81,18 @@ class JerryProxyOperationLock(object):
     def _new_file_lock(self):  # type: () -> FileLock
         """Create the upstream lock, preserving its marker when supported."""
 
-        try:
-            lock = FileLock(
-                str(self.paths.lock_file),
-                timeout=self.timeout,
-                mode=0o600,
-                preserve_lock_file=True,
-            )
-        except TypeError:
+        parameters = inspect.signature(FileLock).parameters
+        if "preserve_lock_file" not in parameters:
             # Python 3.7-3.9 use the legacy filelock API without the public
             # marker-preservation option; restore its marker after release.
             self._restore_lock_marker = True
-            lock = FileLock(str(self.paths.lock_file), timeout=self.timeout, mode=0o600)
-        return lock
+            return FileLock(str(self.paths.lock_file), timeout=self.timeout, mode=0o600)
+        return FileLock(
+            str(self.paths.lock_file),
+            timeout=self.timeout,
+            mode=0o600,
+            preserve_lock_file=True,
+        )
 
     def _restore_marker_after_release(self):  # type: () -> None
         """Recreate a legacy Windows marker without replacing an existing path."""

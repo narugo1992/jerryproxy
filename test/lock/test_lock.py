@@ -204,6 +204,24 @@ def test_legacy_windows_marker_restoration_retries_exclusive_create(tmp_path, mo
     assert paths.lock_file.is_file()
 
 
+def test_legacy_filelock_is_detected_before_constructor_call(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path)
+    operation = JerryProxyOperationLock(paths)
+
+    class LegacyFileLock(object):
+        def __init__(self, lock_file, timeout=-1, mode=-1):
+            self.lock_file = lock_file
+            self.timeout = timeout
+            self.mode = mode
+
+    monkeypatch.setattr(lock_module, "FileLock", LegacyFileLock)
+
+    lock = operation._new_file_lock()
+
+    assert isinstance(lock, LegacyFileLock)
+    assert operation._restore_lock_marker is True
+
+
 @pytest.mark.parametrize(
     ("python_version", "filelock_version", "message"),
     [
