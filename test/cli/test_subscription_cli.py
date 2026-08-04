@@ -280,6 +280,60 @@ def test_server_yes_never_guesses_missing_subscription_or_node(tmp_path):
     assert "cannot infer a subscription" in result.output
 
 
+def test_server_backend_bootstrap_confirmation_defaults_yes(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeManager(object):
+        def which(self, name, version):
+            del name, version
+            raise server_module.BackendNotInstalledError("missing")
+
+    class FakeRuntime(object):
+        def __init__(self, paths, **kwargs):
+            del paths, kwargs
+            self.process = None
+
+        def start(self, subscription_name, node_id, install_missing):
+            del subscription_name, node_id, install_missing
+
+        def public_info(self):
+            return {
+                "listener": {"address": "127.0.0.1", "port": 1080, "protocol": "mixed"},
+            }
+
+        def wait(self):
+            return 0
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(server_module._common, "manager", lambda context: FakeManager())
+    monkeypatch.setattr(server_module, "RuntimeSession", FakeRuntime)
+    monkeypatch.setattr(
+        server_module._common,
+        "confirm_dangerous_operation",
+        lambda message, assume_yes, default=False: captured.update(
+            message=message, assume_yes=assume_yes, default=default
+        )
+        or True,
+    )
+
+    result = _invoke(
+        CliRunner(),
+        tmp_path / "home",
+        "server",
+        "--subscription",
+        "main",
+        "--node",
+        "a" * 32,
+        "--port",
+        "18080",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["default"] is True
+
+
 def test_server_auth_mode_prints_copyable_proxy_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("COLUMNS", "200")
 
