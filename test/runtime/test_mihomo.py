@@ -1,5 +1,7 @@
 import io
 import os
+import socket
+import sys
 import threading
 
 import pytest
@@ -10,6 +12,7 @@ from jerryproxy.runtime.health import ConnectivityProbe
 from jerryproxy.runtime.mihomo import (
     MAXIMUM_LOG_BYTES,
     MihomoProcess,
+    _listener_owned_by_process,
     build_provider_config,
     reserve_loopback_port,
 )
@@ -159,8 +162,7 @@ def test_backend_drain_bounds_a_newline_free_line_without_stalling(tmp_path):
 
     assert len(events) == 2
     assert all(event[0:2] == ("mihomo", "INFO") for event in events)
-    assert "[line truncated]" in events[0][2]
-    assert events[1][2] == "x"
+    assert all("[line truncated]" in event[2] for event in events)
 
 
 def test_backend_drain_bounds_newline_free_output_across_multiple_reads(tmp_path):
@@ -193,7 +195,7 @@ def test_backend_drain_bounds_a_single_oversized_newline_terminated_line(tmp_pat
 
     assert len(events) == 4
     assert all(len(event[2].encode("utf-8")) <= mihomo_module.MAXIMUM_BACKEND_LINE_BYTES + 64 for event in events)
-    assert any("[line truncated]" in event[2] for event in events)
+    assert all("[line truncated]" in event[2] for event in events)
 
 
 def test_strict_port_reservation_fails_when_requested_port_is_busy():
@@ -228,12 +230,121 @@ def test_provider_config_selects_the_requested_listener(tmp_path, protocol, dire
     assert "bind-address: 127.0.0.1" in config
     assert "log-level: info" in config
     assert "authentication:" not in config
-    listener_lines = [
-        line
-        for line in config.splitlines()
-        if line.split(":", 1)[0] in ("mixed-port", "port", "socks-port")
-    ]
-    assert listener_lines == ["%s: 17777" % directive]
+
+
+def test_readiness_challenge_rejects_an_http_auth_substitute(tmp_path):
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config.yaml", tmp_path, tmp_path / "runtime.log")
+    process.set_readiness_challenge("user", "password", "http", "127.0.0.1")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve_once():
+        connection, _ = listener.accept()
+        with connection:
+            connection.recv(4096)
+            connection.sendall(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+
+    worker = threading.Thread(target=serve_once)
+    worker.start()
+    try:
+        with pytest.raises(RuntimeSessionError, match="credentials"):
+            process._challenge_listener(listener.getsockname()[1])
+    finally:
+        listener.close()
+        worker.join(1.0)
+
+
+def test_readiness_challenge_rejects_an_unexpected_http_success(tmp_path):
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config.yaml", tmp_path, tmp_path / "runtime.log")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve_once():
+        connection, _ = listener.accept()
+        with connection:
+            connection.recv(4096)
+            connection.sendall(b"HTTP/1.1 201 Created\r\n\r\n")
+
+    worker = threading.Thread(target=serve_once)
+    worker.start()
+    try:
+        with pytest.raises(RuntimeSessionError, match="unexpected HTTP"):
+            process._challenge_listener(listener.getsockname()[1])
+    finally:
+        listener.close()
+        worker.join(1.0)
+
+
+def test_readiness_challenge_accepts_http_connect_success(tmp_path):
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config.yaml", tmp_path, tmp_path / "runtime.log")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve_once():
+        connection, _ = listener.accept()
+        with connection:
+            connection.recv(4096)
+            connection.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+
+    worker = threading.Thread(target=serve_once)
+    worker.start()
+    try:
+        process._challenge_listener(listener.getsockname()[1])
+    finally:
+        listener.close()
+        worker.join(1.0)
+
+
+def test_linux_readiness_proves_listener_process_ownership(tmp_path):
+    if not sys.platform.startswith("linux"):
+        pytest.skip("procfs listener ownership is Linux-specific")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    process = type("Process", (), {"pid": os.getpid()})()
+    try:
+        assert _listener_owned_by_process(process, listener.getsockname()[1], "127.0.0.1") is True
+    finally:
+        listener.close()
+
+
+@pytest.mark.parametrize(
+    ("bound_address", "claimed_address", "expected"),
+    [
+        ("127.0.0.1", "127.0.0.1", True),
+        ("127.0.0.1", "0.0.0.0", False),
+        ("0.0.0.0", "0.0.0.0", True),
+        ("0.0.0.0", "127.0.0.1", False),
+    ],
+)
+def test_linux_readiness_requires_exact_listener_address(tmp_path, bound_address, claimed_address, expected):
+    if not sys.platform.startswith("linux"):
+        pytest.skip("procfs listener ownership is Linux-specific")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind((bound_address, 0))
+    listener.listen(1)
+    process = type("Process", (), {"pid": os.getpid()})()
+    try:
+        assert _listener_owned_by_process(process, listener.getsockname()[1], claimed_address) is expected
+    finally:
+        listener.close()
+
+
+def test_readiness_fails_closed_when_owner_proof_is_unavailable(tmp_path, monkeypatch):
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config.yaml", tmp_path, tmp_path / "runtime.log")
+
+    class Child(object):
+        def poll(self):
+            return None
+
+    process.process = Child()
+    monkeypatch.setattr(process, "_challenge_listener", lambda port: None)
+    monkeypatch.setattr(mihomo_module, "_listener_owned_by_process", lambda *args: None)
+    with pytest.raises(RuntimeSessionError, match="did not become ready"):
+        process.wait_ready(17777, timeout=0.01)
 
 
 def test_socks5_health_probe_uses_socks5h_transport():

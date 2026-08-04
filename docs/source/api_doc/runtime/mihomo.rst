@@ -52,7 +52,7 @@ MihomoProcess
 -----------------------------------------------------
 
 .. autoclass:: MihomoProcess
-   :members: __init__,set_log_lock,start,wait_ready,stop
+   :members: __init__,set_log_lock,set_readiness_challenge,start,wait_ready,stop
 
 
 reserve\_loopback\_port

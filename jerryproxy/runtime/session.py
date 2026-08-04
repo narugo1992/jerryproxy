@@ -395,6 +395,14 @@ class RuntimeSession(object):
             set_log_lock = getattr(self.process, "set_log_lock", None)
             if set_log_lock is not None:
                 set_log_lock(self._log_file_lock)
+            set_readiness_challenge = getattr(self.process, "set_readiness_challenge", None)
+            if set_readiness_challenge is not None:
+                set_readiness_challenge(
+                    self.username,
+                    self.password,
+                    self.listener_protocol,
+                    self.bind_address,
+                )
             self.process.start()
             if deadline is not None:
                 remaining = deadline.remaining()

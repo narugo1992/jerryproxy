@@ -1,24 +1,45 @@
 """Private source and output helpers for subscription commands."""
 
 import os
+import re
 import sys
 from pathlib import Path
 
 import click
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
+from prompt_toolkit.completion import WordCompleter
 from tabulate import tabulate
 
 from ...subscription.transport import MAXIMUM_BODY_BYTES
 from .. import _common as cli_common
 
 SOURCE_ENVIRONMENT = "V2RAY_SUBSCRIPTION"
+_SOURCE_ENVIRONMENT_PATTERN = re.compile(
+    r"(?i)^(?:(?:v2ray|xray|mihomo|clash|sing(?:[-_]?box)?|proxy).*(?:sub|subscription|url|link|config|profile)|.*(?:sub|subscription).*(?:url|link|config|profile).*)$"
+)
 
 
 def discover_source_environments():  # type: () -> tuple
-    """Return the exact supported environment name when it is present."""
+    """Return matching current environment names without exposing values."""
 
-    return (SOURCE_ENVIRONMENT,) if os.environ.get(SOURCE_ENVIRONMENT) else ()
+    names = []
+    for name in os.environ:
+        if name == SOURCE_ENVIRONMENT or _SOURCE_ENVIRONMENT_PATTERN.match(name):
+            names.append(name)
+    return tuple(sorted(set(names)))
+
+
+def _validate_environment_name(name):  # type: (str) -> str
+    """Accept only a present, nonempty, subscription-shaped environment."""
+
+    if not isinstance(name, str) or not name or (
+        name != SOURCE_ENVIRONMENT and not _SOURCE_ENVIRONMENT_PATTERN.match(name)
+    ):
+        raise click.UsageError("environment name is not a supported subscription variable")
+    if not os.environ.get(name):
+        raise click.UsageError("environment variable %s is missing or empty" % name)
+    return name
 
 
 def subscriptions(context):  # type: (click.Context) -> object
@@ -54,13 +75,23 @@ def prompt_name(name, as_json, operation):  # type: (object, bool, str) -> str
 def _prompt_environment():  # type: () -> str
     names = discover_source_environments()
     if not names:
-        raise click.UsageError("V2RAY_SUBSCRIPTION is missing or empty")
-    choices = [Choice(SOURCE_ENVIRONMENT, name="%s (set; value hidden)" % SOURCE_ENVIRONMENT)]
+        raise click.UsageError("no matching subscription environment variables are set")
+    choices = [
+        Choice(
+            name,
+            name="%s (%s)" % (name, "set; value hidden" if os.environ.get(name) else "empty"),
+        )
+        for name in names
+    ]
+    choices.append(Choice("__custom__", name="Type another matching environment name"))
     selected = str(cli_common.select("Select a subscription environment:", choices))
-    value = os.environ.get(selected)
-    if not value:
-        raise click.UsageError("environment variable %s is missing or empty" % selected)
-    return value
+    if selected == "__custom__":
+        selected = cli_common.prompt_text(
+            "Environment variable name:",
+            completer=WordCompleter(list(names), ignore_case=False),
+        )
+    selected = _validate_environment_name(selected)
+    return os.environ[selected]
 
 
 def _prompt_source():  # type: () -> tuple
@@ -169,11 +200,8 @@ def read_source(url_env, file_path, body_stdin, url_stdin, interactive=True):
     if selected > 1:
         raise click.UsageError("source options are mutually exclusive")
     if url_env:
-        if str(url_env) != SOURCE_ENVIRONMENT:
-            raise click.UsageError("--url-env accepts only V2RAY_SUBSCRIPTION")
-        value = os.environ.get(str(url_env))
-        if not value:
-            raise click.UsageError("environment variable %s is missing or empty" % url_env)
+        selected = _validate_environment_name(str(url_env))
+        value = os.environ[selected]
         return "url", value, None
     if url_stdin:
         return "url", read_url_stdin(), None
