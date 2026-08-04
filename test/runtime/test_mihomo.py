@@ -86,6 +86,7 @@ def test_backend_drain_forwards_small_live_chunks_before_pipe_closes(tmp_path):
 def test_backend_process_drains_stdout_and_stderr_into_one_named_stream(tmp_path, monkeypatch):
     captured = {}
     events = []
+    monkeypatch.setattr(mihomo_module, "_posix_process_start_time", lambda pid: "test-start")
 
     class FakeProcess(object):
         pid = 123
