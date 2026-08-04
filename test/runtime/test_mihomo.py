@@ -157,9 +157,13 @@ def test_guardian_malformed_metadata_aborts_before_reraising(tmp_path, monkeypat
     assert aborted == [True]
 
 
-def test_guardian_owns_backend_and_forwards_redacted_output(tmp_path):
+def test_guardian_owns_backend_and_forwards_redacted_output(tmp_path, monkeypatch):
     if os.name != "posix":
         pytest.skip("POSIX guardian fixture")
+    if sys.platform.startswith("linux"):
+        # Exercise the Python 3.7/old-kernel fallback that relies on the
+        # authenticated guardian process group instead of pidfd APIs.
+        monkeypatch.setattr(mihomo_module, "_linux_optional_pidfd_open", lambda pid: None)
     executable = tmp_path / "backend-fixture"
     executable.write_text(
         "#!%s\n"

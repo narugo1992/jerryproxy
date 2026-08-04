@@ -27,6 +27,14 @@ def _configure_parent_death_signal():
         libc = ctypes.CDLL(None)
         prctl = getattr(libc, "prctl", None)
         if prctl is not None:
+            prctl.argtypes = [
+                ctypes.c_int,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+            ]
+            prctl.restype = ctypes.c_int
             prctl(1, int(signal.SIGTERM), 0, 0, 0)
     except (AttributeError, OSError, TypeError):
         # A platform without prctl still has the parent's bounded group cleanup.
@@ -47,6 +55,17 @@ def _start_time(pid):
         try:
             result = subprocess.run(
                 ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=0.5,
+            )
+            token = result.stdout.decode("ascii", "strict").strip()
+            if token:
+                return token
+            # Some macOS ps builds require the selector before the format.
+            result = subprocess.run(
+                ["/bin/ps", "-p", str(pid), "-o", "lstart="],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 check=False,

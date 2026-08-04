@@ -3,6 +3,7 @@ import socketserver
 import threading
 
 import pytest
+import requests
 
 import jerryproxy.subscription.transport as transport_module
 from jerryproxy.errors import SubscriptionFetchError, SubscriptionParseError
@@ -120,6 +121,15 @@ def test_protocol_envelopes_reject_malformed_or_unsupported_records(body):
         parse_subscription_body(body, format_hint="uri-lines")
 
 
+def test_vless_missing_username_is_a_bounded_parse_error():
+    body = (
+        b"vless://example.invalid:443?type=tcp&security=none&flow=none"
+        b"\n"
+    )
+    with pytest.raises(SubscriptionParseError, match="vless URI id is invalid"):
+        parse_subscription_body(body, format_hint="uri-lines")
+
+
 def test_fetch_rejects_private_dns_answers_before_request():
     class Session(object):
         def get(self, *args, **kwargs):
@@ -201,3 +211,94 @@ def test_fetch_rejects_a_premature_declared_length_eof():
             session=Session(),
             resolver=lambda hostname, port, type=None: [(2, 1, 6, "", ("1.1.1.1", port))],
         )
+
+
+class _TransportResponse(object):
+    def __init__(self, status_code=200, headers=None, chunks=()):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._chunks = tuple(chunks)
+        self.closed = False
+
+    def iter_content(self, chunk_size):
+        del chunk_size
+        return iter(self._chunks)
+
+    def close(self):
+        self.closed = True
+
+
+class _TransportSession(object):
+    def __init__(self, response=None, error=None):
+        self.trust_env = True
+        self.proxies = {"https": "http://proxy.invalid"}
+        self.cookies = {"session": "secret"}
+        self.auth = ("user", "password")
+        self.headers = {"X-Test": "preserve"}
+        self.cert = "client.pem"
+        self.response = response
+        self.error = error
+        self.calls = 0
+
+    def get(self, *args, **kwargs):
+        del args, kwargs
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+def _public_source_resolver(hostname, port, type=None):
+    del hostname, type
+    return [(2, 1, 6, "", ("1.1.1.1", port))]
+
+
+def test_fetch_redirect_policy_and_session_state_restore():
+    response = _TransportResponse(status_code=302, headers={"Location": "http://provider.example/next"})
+    session = _TransportSession(response=response)
+    with pytest.raises(SubscriptionFetchError, match="HTTPS"):
+        fetch_subscription(
+            "https://provider.example/sub",
+            session=session,
+            resolver=_public_source_resolver,
+        )
+    assert session.calls == 1
+    assert session.trust_env is True
+    assert session.proxies == {"https": "http://proxy.invalid"}
+    assert session.cookies == {"session": "secret"}
+    assert session.auth == ("user", "password")
+    assert session.headers == {"X-Test": "preserve"}
+    assert session.cert == "client.pem"
+    assert response.closed is True
+
+
+@pytest.mark.parametrize(
+    "response, message",
+    (
+        (_TransportResponse(status_code=503), "HTTP 503"),
+        (_TransportResponse(headers={"Content-Length": "not-a-number"}), "length is invalid"),
+        (_TransportResponse(headers={"Content-Length": "4"}, chunks=(b"abc",)), "length did not match"),
+    ),
+)
+def test_fetch_rejects_http_and_length_failures(response, message):
+    session = _TransportSession(response=response)
+    with pytest.raises(SubscriptionFetchError, match=message):
+        fetch_subscription(
+            "https://provider.example/sub",
+            session=session,
+            resolver=_public_source_resolver,
+        )
+    assert response.closed is True
+
+
+def test_fetch_wraps_request_timeout_and_restores_state():
+    session = _TransportSession(error=requests.exceptions.Timeout("timed out"))
+    with pytest.raises(SubscriptionFetchError, match="timed out"):
+        fetch_subscription(
+            "https://provider.example/sub",
+            session=session,
+            resolver=_public_source_resolver,
+        )
+    assert session.trust_env is True
+    assert session.proxies == {"https": "http://proxy.invalid"}
+    assert session.cookies == {"session": "secret"}

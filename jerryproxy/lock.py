@@ -74,6 +74,45 @@ class JerryProxyOperationLock(object):
         self.initialize = initialize
         self.platform_info = platform_info
         self._exit_stack = None
+        self._restore_lock_marker = False
+
+    def _new_file_lock(self):  # type: () -> FileLock
+        """Create the upstream lock, preserving its marker when supported."""
+
+        try:
+            lock = FileLock(
+                str(self.paths.lock_file),
+                timeout=self.timeout,
+                mode=0o600,
+                preserve_lock_file=True,
+            )
+        except TypeError:
+            # Python 3.7-3.9 use the legacy filelock API without the public
+            # marker-preservation option; restore its marker after release.
+            self._restore_lock_marker = True
+            lock = FileLock(str(self.paths.lock_file), timeout=self.timeout, mode=0o600)
+        return lock
+
+    def _restore_marker_after_release(self):  # type: () -> None
+        """Recreate a legacy Windows marker without replacing an existing path."""
+
+        if not self._restore_lock_marker or os.name != "nt":
+            return
+        from .home import is_path_alias
+
+        if os.path.lexists(str(self.paths.lock_file)):
+            if is_path_alias(self.paths.lock_file):
+                raise OSError("managed JerryProxy lock file became an alias")
+            return
+        descriptor = -1
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            descriptor = os.open(str(self.paths.lock_file), flags, 0o600)
+        except FileExistsError:
+            return
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
 
     def _validate_existing_lock(self):  # type: () -> None
         from .home import is_path_alias
@@ -96,7 +135,7 @@ class JerryProxyOperationLock(object):
             if not self.paths._validate_existing_layout():
                 raise FileNotFoundError("JerryProxy home has no existing managed state")
             self._validate_existing_lock()
-        lock = FileLock(str(self.paths.lock_file), timeout=self.timeout, mode=0o600)
+        lock = self._new_file_lock()
         stack = ExitStack()
         try:
             stack.enter_context(lock.acquire())
@@ -122,6 +161,9 @@ class JerryProxyOperationLock(object):
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self._exit_stack is not None:
-            self._exit_stack.close()
+            try:
+                self._exit_stack.close()
+            finally:
+                self._restore_marker_after_release()
             self._exit_stack = None
         return False

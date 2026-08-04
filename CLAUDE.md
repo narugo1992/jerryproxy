@@ -232,8 +232,9 @@ authentication, extraction, process, or permission errors to warnings.
 - Human `list [NAME]` output is compact by default; executable and active-link
   paths require `--paths`. Read-only `list`, `current`, `which`, and `verify`
   commands keep stdout deterministic and support documented JSON output.
-- Public destructive vocabulary is `uninstall --deactivate --cache` and `clean
-  --cache`; do not expose `remove`, `--force`, or `--downloads`. Internal state
+- Public destructive vocabulary is `uninstall NAME [VERSION|-A] [--deactivate]
+  [--cache]` and `clean [NAME [VERSION]] [--cache|--logs|--providers|--runtimes
+  |-A]`; do not expose `remove`, `--force`, or `--downloads`. Internal state
   directories may retain the `downloads` name.
 
 ## CLI structure and maintenance
@@ -261,12 +262,13 @@ authentication, extraction, process, or permission errors to warnings.
   target. Help text and tests must document and verify both modes.
 - Source-ingestion commands must make the source method explicit in guided
   mode: offer matching environment variables, direct secret input, a bounded
-  file source, and bounded stdin where the command supports them. Discover
-  environment names from the current process using narrow subscription-related
-  keyword patterns, show names and set/hidden status only, and provide
-  completion for custom environment-name input. Never print or log the bearer
-  value. Review every new CLI interaction for discoverability, safe defaults,
-  compact labels, keyboard flow, and parity between guided and explicit forms.
+  file source, and bounded stdin where the command supports them. The initial
+  Issue #15 URI slice has one canonical environment name,
+  `V2RAY_SUBSCRIPTION`; it must show only that present variable and reject
+  other names until a later source adapter freezes its own contract. Never
+  print or log the bearer value. Review every new CLI interaction for
+  discoverability, safe defaults, compact labels, keyboard flow, and parity
+  between guided and explicit forms.
 - Keep private cross-command helpers inside `jerryproxy/cli/` in clearly private
   modules such as `_common.py` and `_completion.py`. Leaf modules own their
   command-specific behavior; do not recreate a monolithic dispatcher or expose

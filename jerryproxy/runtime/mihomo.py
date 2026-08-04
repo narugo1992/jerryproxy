@@ -39,6 +39,14 @@ def _configure_parent_death_signal():  # type: () -> None
         libc = ctypes.CDLL(None)
         prctl = getattr(libc, "prctl", None)
         if prctl is not None:
+            prctl.argtypes = [
+                ctypes.c_int,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+            ]
+            prctl.restype = ctypes.c_int
             prctl(1, int(signal.SIGTERM), 0, 0, 0)
     except (AttributeError, OSError, TypeError):
         # Platforms without Linux prctl retain the normal process-group cleanup.
@@ -661,17 +669,27 @@ def _macos_process_info(pid):  # type: (int) -> object
         return None
     try:
         result = subprocess.run(
-            ["/bin/ps", "-o", "ppid=,pgid=,sid=,lstart=", "-p", str(pid)],
+            ["/bin/ps", "-o", "ppid=", "-p", str(pid)],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
             timeout=0.5,
         )
-        fields = result.stdout.decode("ascii", "strict").strip().split(None, 3)
-        if len(fields) != 4:
+        ppid = int(result.stdout.decode("ascii", "strict").strip())
+        pgid = os.getpgid(pid)
+        sid = os.getsid(pid)
+        result = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=0.5,
+        )
+        start_token = result.stdout.decode("ascii", "strict").strip()
+        if not start_token:
             return None
-        return int(fields[0]), int(fields[1]), int(fields[2]), fields[3]
-    except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
+        return ppid, pgid, sid, start_token
+    except (AttributeError, OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
         # A missing or blocked system process table cannot authenticate a child.
         return None
 
@@ -902,6 +920,42 @@ def _linux_process_identity_matches(pid, start_time):  # type: (int, object) -> 
     if start_time is None:
         return False
     return _linux_process_start_time(pid) == start_time
+
+
+def _linux_pidfd_open(pid):  # type: (int) -> int
+    """Open a Linux pidfd on Python versions with or without ``os.pidfd_open``."""
+
+    opener = getattr(os, "pidfd_open", None)
+    if opener is not None:
+        return int(opener(pid))
+    # Python 3.7-3.8 do not expose os.pidfd_open.  Use the stable Linux
+    # syscall number when the host kernel supports pidfds; callers may fall
+    # back to the authenticated process-group boundary when it does not.
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        syscall = libc.syscall
+        syscall.restype = ctypes.c_long
+        result = syscall(434, int(pid), 0)
+        if result < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return int(result)
+    except (AttributeError, OSError, TypeError, ValueError):
+        raise OSError("pidfd_open is unavailable")
+
+
+def _linux_optional_pidfd_open(pid):  # type: (int) -> object
+    """Return a pidfd when available, otherwise use group identity cleanup."""
+
+    try:
+        return _linux_pidfd_open(pid)
+    except OSError:
+        # Older kernels, including some Python 3.7 deployment hosts, do not
+        # implement pidfds.  Guardian start-time and process-group checks are
+        # still required before any fallback signal is sent.
+        return None
 
 
 def _linux_pidfd_send_signal(pidfd, signum):  # type: (int, int) -> None
@@ -1154,7 +1208,7 @@ class MihomoProcess(object):
                 os.close(gate_read)
                 raise RuntimeSessionError("mihomo guardian authorization setup failed") from error
         try:
-            if os.name == "nt":
+            if os.name == "nt" and real_popen:
                 self._windows_job = _windows_create_job()
                 if self._windows_job is None:
                     raise RuntimeSessionError("mihomo Windows Job containment is unavailable")
@@ -1217,7 +1271,7 @@ class MihomoProcess(object):
                     os.close(gate_read)
                 except OSError:
                     pass
-        if os.name == "nt":
+        if os.name == "nt" and real_popen:
             process_handle = getattr(self.process, "_handle", None)
             if process_handle is None or not _windows_assign_job(self._windows_job, process_handle):
                 self._windows_abort_start()
@@ -1225,20 +1279,16 @@ class MihomoProcess(object):
         popen_type = getattr(subprocess, "Popen")
         if isinstance(popen_type, type) and isinstance(self.process, popen_type):
             if sys.platform.startswith("linux"):
-                pidfd_open = getattr(os, "pidfd_open", None)
-                if pidfd_open is None:
-                    self._abort_start()
-                    raise RuntimeSessionError("Linux pidfd containment is unavailable")
-                try:
-                    self._pidfd = pidfd_open(self.process.pid)
-                except OSError as error:
-                    self._abort_start()
-                    raise RuntimeSessionError("Linux pidfd containment is unavailable") from error
-                try:
-                    _linux_pidfd_send_signal(self._pidfd, 0)
-                except OSError:
-                    self._abort_start()
-                    raise RuntimeSessionError("Linux pidfd signaling is unavailable")
+                self._pidfd = _linux_optional_pidfd_open(self.process.pid)
+                if self._pidfd is not None:
+                    try:
+                        _linux_pidfd_send_signal(self._pidfd, 0)
+                    except OSError:
+                        try:
+                            os.close(self._pidfd)
+                        except OSError:
+                            pass
+                        self._pidfd = None
                 self._linux_start_time = _linux_process_start_time(self.process.pid)
                 if self._linux_start_time is None:
                     self._abort_start()
@@ -1251,11 +1301,7 @@ class MihomoProcess(object):
         if isinstance(popen_type, type) and isinstance(self.process, popen_type):
             self._load_guardian_identity(timeout=5.0)
             if sys.platform.startswith("linux"):
-                try:
-                    self._backend_pidfd = pidfd_open(self.backend_pid)
-                except OSError as error:
-                    self._abort_start()
-                    raise RuntimeSessionError("Linux backend pidfd containment is unavailable") from error
+                self._backend_pidfd = _linux_optional_pidfd_open(self.backend_pid)
         stream = getattr(self.process, "stdout", None)
         if stream is not None:
             thread = threading.Thread(
@@ -1476,9 +1522,9 @@ class MihomoProcess(object):
 
         if os.name == "posix":
             if sys.platform.startswith("linux") and guardian_alive:
-                if self._pidfd is None or not _linux_process_identity_matches(process.pid, self._linux_start_time):
+                if self._pidfd is not None and not _linux_process_identity_matches(process.pid, self._linux_start_time):
                     note("guardian process identity is unavailable")
-                else:
+                elif self._pidfd is not None:
                     try:
                         _linux_pidfd_send_signal(self._pidfd, signal.SIGTERM)
                     except OSError as error:
