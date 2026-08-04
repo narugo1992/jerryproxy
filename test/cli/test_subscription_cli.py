@@ -331,7 +331,8 @@ def test_server_backend_bootstrap_confirmation_defaults_yes(tmp_path, monkeypatc
             self.password = None
 
         def start(self, subscription_name, node_id, install_missing):
-            del subscription_name, node_id, install_missing
+            del subscription_name, node_id
+            captured["install_missing"] = install_missing
 
         def public_info(self):
             return {
@@ -369,6 +370,7 @@ def test_server_backend_bootstrap_confirmation_defaults_yes(tmp_path, monkeypatc
 
     assert result.exit_code == 0, result.output
     assert captured["default"] is True
+    assert captured["install_missing"] is True
 
 
 def test_server_auth_mode_prints_copyable_proxy_credentials(tmp_path, monkeypatch):

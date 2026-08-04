@@ -92,13 +92,17 @@ never printed as one unredacted blob.
 Forms:
   jerryproxy server
   jerryproxy server --subscription NAME --node NODE_ID
-  jerryproxy server --subscription NAME --node NODE_ID
-    --install-missing -y
+  jerryproxy server --subscription NAME --node NODE_ID -y
 
 `--relay auto` is the default when the exact Mihomo release is missing. Relay
 options affect only backend bootstrap and never subscription fetching. Health
 and recovery waits use the bounded built-in policy and a failed recovery exits
 after cleanup.
+
+Backend bootstrap is enabled by default, so a missing qualified Mihomo release
+is installed automatically after the confirmation below. Use
+`--no-install-missing` to require a preinstalled backend; use `-y/--yes` to
+accept the default Yes confirmation without a prompt.
 
 \b
 Interactive forms:

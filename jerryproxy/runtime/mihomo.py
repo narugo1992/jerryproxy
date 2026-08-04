@@ -35,22 +35,28 @@ def _configure_parent_death_signal():  # type: () -> None
         return
     try:
         import ctypes
-
-        libc = ctypes.CDLL(None)
-        prctl = getattr(libc, "prctl", None)
-        if prctl is not None:
-            prctl.argtypes = [
-                ctypes.c_int,
-                ctypes.c_ulong,
-                ctypes.c_ulong,
-                ctypes.c_ulong,
-                ctypes.c_ulong,
-            ]
-            prctl.restype = ctypes.c_int
-            prctl(1, int(signal.SIGTERM), 0, 0, 0)
+        libc = ctypes.CDLL(None, use_errno=True)
     except (AttributeError, OSError, TypeError):
         # Platforms without Linux prctl retain the normal process-group cleanup.
         return
+    prctl = getattr(libc, "prctl", None)
+    if prctl is None:
+        # Platforms without Linux prctl retain the normal process-group cleanup.
+        return
+    prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    prctl.restype = ctypes.c_int
+    result = prctl(1, int(signal.SIGTERM), 0, 0, 0)
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number:
+            raise OSError(error_number, os.strerror(error_number))
+        raise OSError("prctl(PR_SET_PDEATHSIG) failed")
 
 
 def _config_log_level(value):  # type: (str) -> str
@@ -1273,7 +1279,7 @@ class MihomoProcess(object):
                     ]
                 )
             self.process = subprocess.Popen(arguments, **options)
-        except OSError as error:
+        except (OSError, subprocess.SubprocessError) as error:
             self._cancel_start_gate()
             _windows_close_job(self._windows_job)
             self._windows_job = None

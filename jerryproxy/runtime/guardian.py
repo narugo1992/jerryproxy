@@ -23,22 +23,28 @@ def _configure_parent_death_signal():
         return
     try:
         import ctypes
-
-        libc = ctypes.CDLL(None)
-        prctl = getattr(libc, "prctl", None)
-        if prctl is not None:
-            prctl.argtypes = [
-                ctypes.c_int,
-                ctypes.c_ulong,
-                ctypes.c_ulong,
-                ctypes.c_ulong,
-                ctypes.c_ulong,
-            ]
-            prctl.restype = ctypes.c_int
-            prctl(1, int(signal.SIGTERM), 0, 0, 0)
+        libc = ctypes.CDLL(None, use_errno=True)
     except (AttributeError, OSError, TypeError):
         # A platform without prctl still has the parent's bounded group cleanup.
         return
+    prctl = getattr(libc, "prctl", None)
+    if prctl is None:
+        # A platform without prctl still has the parent's bounded group cleanup.
+        return
+    prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    prctl.restype = ctypes.c_int
+    result = prctl(1, int(signal.SIGTERM), 0, 0, 0)
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number:
+            raise OSError(error_number, os.strerror(error_number))
+        raise OSError("prctl(PR_SET_PDEATHSIG) failed")
 
 
 def _start_time(pid):
@@ -235,7 +241,9 @@ def run(
     old_int = None
     try:
         child = subprocess.Popen([str(executable), "-f", str(config_path)], **options)
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
+        # A pre-exec parent-death setup failure must not leave an unowned child.
+        _terminate_child_group(child, hard=True)
         return 127
 
     def _shutdown(signum, frame):
@@ -304,7 +312,12 @@ def main(argv=None):
     parser.add_argument("--parent-pid", type=int)
     parser.add_argument("--parent-start-time")
     args = parser.parse_args(argv)
-    _configure_parent_death_signal()
+    try:
+        _configure_parent_death_signal()
+    except OSError:
+        # Do not launch a backend when the guardian cannot install its parent
+        # death boundary; the caller observes the bounded nonzero exit.
+        return 127
     return int(
         run(
             args.executable,

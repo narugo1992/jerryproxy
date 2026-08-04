@@ -77,7 +77,7 @@ class ConnectivityProbe(object):
         clock=None,
         protocol="http",
     ):
-        self.targets = tuple(targets or DEFAULT_HEALTH_TARGETS)
+        self.targets = tuple(DEFAULT_HEALTH_TARGETS if targets is None else targets)
         if not self.targets:
             raise ValueError("at least one health target is required")
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
