@@ -7,9 +7,11 @@ home directory all use the same name: `jerryproxy`.
 
 > **Work in progress:** the first runtime slice is implemented: bounded
 > `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, and VLESS URI
-> lines, sanitized home-local state, and an authenticated Mihomo 1.19.29
-> foreground server with bounded health recovery. Native profiles, other core
-> drivers, and the historical `v2raycli` compatibility layer remain planned.
+> lines, sanitized home-local state, and a synchronous Mihomo 1.19.29
+> foreground server with bounded health diagnostics. The listener is open on
+> loopback by default; `--auth` is an explicit opt-in. Native profiles, other
+> core drivers, and the historical `v2raycli` compatibility layer remain
+> planned.
 
 ## Current status
 
@@ -46,9 +48,10 @@ Implemented now:
   integrity-checked availability probes for the three built-in relays;
 - bounded `V2RAY_SUBSCRIPTION` source ingestion with private state below
   `JERRYPROXY_HOME`, stable sanitized node IDs, and SS/VMess/VLESS URI support;
-- a synchronous Mihomo 1.19.29 foreground server with an authenticated
-  loopback mixed listener, separated backend output, global health quorum,
-  deterministic restart/failover, and one policy-controlled source refresh;
+- a synchronous Mihomo 1.19.29 foreground server with an unauthenticated
+  loopback listener by default, optional local authentication, one merged
+  live redacted backend output stream labeled by core name (for example
+  `[mihomo]`) with no stdout/stderr split, and bounded health diagnostics;
 - two-stage standalone validation that builds Linux in a pinned Python 3.7
   Docker image and executes every downloaded artifact in clean environments;
 - deterministic offline unit tests, Sphinx documentation, packaging checks,
@@ -465,8 +468,8 @@ jerryproxy server --subscription main --node NODE_ID --install-missing -y
 ```
 
 `server` ensures the exact Mihomo backend exists, creates private state, loads
-the subscription without exposing its URL, reports the authenticated loopback
-HTTP/SOCKS endpoint, and keeps the process in the foreground. Two consecutive
+the subscription without exposing its URL, reports the loopback HTTP/SOCKS
+endpoint, and keeps the process in the foreground. Two consecutive
 failed global health quorums trigger one same-node restart, deterministic
 alternate-node attempts, and one optional subscription refresh within the
 configured recovery deadline. Automatic recovery never rewrites the saved node
@@ -484,8 +487,8 @@ preference.
 - [ ] Add offline archive installation with an explicit digest.
 - [x] Implement managed `V2RAY_SUBSCRIPTION` fetch, private state, and URI
   inventory for SS/VMess/VLESS.
-- [x] Implement the Mihomo foreground driver, authenticated listener, stream
-  redirection, and bounded health recovery.
+- [x] Implement the Mihomo foreground driver, loopback listener, merged named
+  backend stream, and bounded health recovery.
 - [ ] Implement durable controller operations, measurements, and service
   integration.
 - [ ] Preserve documented `v2raycli` inputs through deprecated aliases.

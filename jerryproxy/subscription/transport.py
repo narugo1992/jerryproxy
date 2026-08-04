@@ -2,12 +2,15 @@
 
 import base64
 import binascii
+import copy
 import hashlib
 import ipaddress
+import json
 import re
 import socket
+import uuid
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -22,13 +25,31 @@ from .interfaces import SubscriptionParser
 from .model import ParsedSubscription
 
 MAXIMUM_BODY_BYTES = 8 * 1024 * 1024
-MAXIMUM_URL_BYTES = 8192
+MAXIMUM_URL_BYTES = 16 * 1024
+MAXIMUM_URI_BYTES = 16 * 1024
 MAXIMUM_RECORDS = 4096
-MAXIMUM_REDIRECTS = 5
+MAXIMUM_REDIRECTS = 3
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
 SUPPORTED_SCHEMES = ("ss", "vmess", "vless")
 _URI_LINE = re.compile(r"^(ss|vmess|vless)://[^\s]+$", re.IGNORECASE)
+_VMESS_PORT = re.compile(r"^\d+$")
+_REALITY_SHORT_ID = re.compile(r"^[0-9a-fA-F]{0,16}$")
+_REALITY_PUBLIC_KEY = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_REALITY_FINGERPRINTS = frozenset(("chrome", "firefox", "safari", "edge", "ios", "android", "random"))
+_VLESS_NETWORKS = frozenset(("tcp", "grpc", "ws", "http", "h2", "quic", "kcp"))
+_VLESS_SECURITY = frozenset(("none", "tls", "reality", "xtls"))
+
+
+def _reject_duplicate_json_keys(pairs):  # type: (list) -> dict
+    """Reject duplicate object members before any VMess value is consumed."""
+
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise SubscriptionParseError("subscription JSON contains duplicate keys")
+        value[key] = item
+    return value
 
 
 class _PinnedConnectionMixin(object):
@@ -127,7 +148,7 @@ def validate_source_url(value, allow_http=False):  # type: (str, bool) -> str
     if not isinstance(value, str) or not value or any(ord(char) <= 32 for char in value):
         raise SubscriptionFetchError("subscription URL is invalid")
     if len(value.encode("utf-8")) > MAXIMUM_URL_BYTES:
-        raise SubscriptionFetchError("subscription URL exceeds the 8192-byte bound")
+        raise SubscriptionFetchError("subscription URL exceeds the 16 KiB bound")
     try:
         parsed = urlsplit(value)
         hostname = parsed.hostname
@@ -211,13 +232,30 @@ def fetch_subscription(
     request_timeout = timeout or (CONNECT_TIMEOUT, READ_TIMEOUT)
     current = validate_source_url(url, allow_http=allow_http)
     client = session or requests.Session()
+    original_client_state = {}
+    for attribute in ("trust_env", "proxies", "cookies", "auth", "headers", "cert"):
+        if hasattr(client, attribute):
+            value = getattr(client, attribute)
+            if attribute in ("proxies", "headers"):
+                value = dict(value)
+            elif attribute == "cookies" and hasattr(value, "copy"):
+                value = copy.copy(value)
+            original_client_state[attribute] = value
     if hasattr(client, "trust_env"):
         client.trust_env = False
+    if hasattr(client, "proxies"):
+        client.proxies = {}
+    if hasattr(client, "cookies"):
+        client.cookies.clear()
+    if hasattr(client, "auth"):
+        client.auth = None
+    if hasattr(client, "headers"):
+        client.headers = {"User-Agent": "JerryProxy-subscription/0.1"}
+    if hasattr(client, "cert"):
+        client.cert = None
     pinned_adapter = None
     original_adapters = None
     if isinstance(client, requests.Session):
-        if getattr(client, "proxies", None):
-            raise SubscriptionFetchError("subscription transport does not use ambient proxies")
         pinned_adapter = _PinnedHTTPAdapter(())
         original_adapters = (client.get_adapter("http://"), client.get_adapter("https://"))
         client.mount("http://", pinned_adapter)
@@ -236,6 +274,8 @@ def fetch_subscription(
             )
             if pinned_adapter is not None:
                 pinned_adapter.update(addresses)
+            if hasattr(client, "cookies"):
+                client.cookies.clear()
             try:
                 response = client.get(
                     current,
@@ -243,6 +283,7 @@ def fetch_subscription(
                     stream=True,
                     timeout=request_timeout,
                     headers={"User-Agent": "JerryProxy-subscription/0.1"},
+                    proxies={},
                 )
             except requests.exceptions.Timeout as error:
                 # Requests timeout is a bounded source transport failure.
@@ -280,6 +321,8 @@ def fetch_subscription(
                 except requests.exceptions.RequestException as error:
                     # Streaming failures are source transport failures.
                     raise SubscriptionFetchError("subscription source stream failed") from error
+                if content_length is not None and total != declared:
+                    raise SubscriptionFetchError("subscription source length did not match its declaration")
                 return FetchedSubscription(b"".join(chunks), current)
             finally:
                 response.close()
@@ -290,6 +333,12 @@ def fetch_subscription(
             client.mount("https://", original_adapters[1])
         if pinned_adapter is not None:
             pinned_adapter.close()
+        for attribute, value in original_client_state.items():
+            if attribute == "cookies" and hasattr(client, "cookies"):
+                client.cookies.clear()
+                client.cookies.update(value)
+            else:
+                setattr(client, attribute, value)
 
 
 def _decode_base64(value):  # type: (bytes) -> bytes
@@ -332,16 +381,104 @@ def _display_for_uri(uri):  # type: (str) -> str
     return "%s node" % scheme
 
 
+def _decode_uri_payload(value):  # type: (str) -> bytes
+    """Decode a URL-safe or standard Base64 URI envelope without rendering it."""
+
+    try:
+        compact = unquote(value).encode("ascii")
+    except (UnicodeDecodeError, UnicodeEncodeError) as error:
+        # Non-ASCII URI payloads cannot be valid Base64 envelopes.
+        raise SubscriptionParseError("subscription URI payload is not ASCII Base64") from error
+    compact = b"".join(compact.split())
+    if not compact or len(compact) % 4 == 1:
+        raise SubscriptionParseError("subscription URI payload is invalid Base64")
+    compact += b"=" * ((4 - len(compact) % 4) % 4)
+    try:
+        return base64.b64decode(compact, altchars=b"-_", validate=True)
+    except (binascii.Error, ValueError) as error:
+        # Base64 decoder errors identify malformed protocol envelopes.
+        raise SubscriptionParseError("subscription URI payload is invalid Base64") from error
+
+
+def _validate_endpoint(hostname, port, label):  # type: (str, object, str) -> None
+    if not hostname or port is None or not 1 <= port <= 65535:
+        raise SubscriptionParseError("%s URI is missing a valid endpoint" % label)
+
+
+def _validate_ss_uri(uri):  # type: (str) -> None
+    payload = uri.split("://", 1)[1].split("#", 1)[0]
+    if not payload:
+        raise SubscriptionParseError("ss URI is empty")
+    authority = None
+    encoded = payload
+    if "@" in payload:
+        encoded, authority = payload.rsplit("@", 1)
+    decoded = _decode_uri_payload(encoded)
+    try:
+        decoded_text = decoded.decode("utf-8")
+    except UnicodeDecodeError as error:
+        # SS method/password envelopes are UTF-8 text by convention.
+        raise SubscriptionParseError("ss URI payload is not UTF-8") from error
+    if ":" not in decoded_text:
+        raise SubscriptionParseError("ss URI payload is missing method and password")
+    if authority is None:
+        if "@" not in decoded_text:
+            raise SubscriptionParseError("ss URI payload is missing its endpoint")
+        _, authority = decoded_text.rsplit("@", 1)
+    try:
+        parsed = urlsplit("ss://%s" % authority)
+        port = parsed.port
+    except ValueError as error:
+        # ValueError is expected for malformed SS authority or port syntax.
+        raise SubscriptionParseError("ss URI endpoint is invalid") from error
+    _validate_endpoint(parsed.hostname, port, "ss")
+
+
+def _validate_vmess_uri(uri):  # type: (str) -> None
+    payload = uri.split("://", 1)[1].split("#", 1)[0]
+    decoded = _decode_uri_payload(payload)
+    try:
+        value = json.loads(
+            decoded.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        # JSON and UTF-8 errors identify malformed VMess envelopes.
+        raise SubscriptionParseError("vmess URI payload is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise SubscriptionParseError("vmess URI payload is not an object")
+    address = value.get("add") or value.get("address")
+    port = value.get("port")
+    if isinstance(port, str) and _VMESS_PORT.match(port):
+        port = int(port)
+    if not isinstance(port, int) or isinstance(port, bool):
+        raise SubscriptionParseError("vmess URI port is invalid")
+    _validate_endpoint(address, port, "vmess")
+    identity = value.get("id")
+    try:
+        uuid.UUID(str(identity))
+    except (AttributeError, ValueError):
+        # UUID parsing errors identify malformed VMess identities.
+        raise SubscriptionParseError("vmess URI id is invalid")
+
+
 def _validate_vless_fields(uri):  # type: (str) -> None
     """Validate the Reality envelope while leaving credentials opaque."""
 
     try:
         parsed = urlsplit(uri)
+        username = parsed.username
+        hostname = parsed.hostname
+        port = parsed.port
     except ValueError as error:
         # ValueError is expected for malformed URI authority syntax.
         raise SubscriptionParseError("subscription URI is invalid") from error
-    if not parsed.username or not parsed.hostname or parsed.port is None:
-        raise SubscriptionParseError("vless URI is missing its endpoint")
+    _validate_endpoint(hostname, port, "vless")
+    try:
+        uuid.UUID(unquote(username))
+    except (AttributeError, ValueError):
+        # VLESS identities are UUIDs in the URI envelope.
+        raise SubscriptionParseError("vless URI id is invalid")
     query = dict()
     for part in parsed.query.split("&") if parsed.query else ():
         if not part:
@@ -350,25 +487,39 @@ def _validate_vless_fields(uri):  # type: (str) -> None
         if not separator or not key or key in query:
             raise SubscriptionParseError("vless URI has an invalid query")
         query[key] = value
-    if query.get("security") == "reality":
-        required = ("sni", "pbk", "sid")
+    security = query.get("security", "none")
+    if security not in _VLESS_SECURITY:
+        raise SubscriptionParseError("unsupported vless security")
+    if "type" in query and query["type"] not in _VLESS_NETWORKS:
+        raise SubscriptionParseError("unsupported vless network")
+    if security == "reality":
+        required = ("type", "security", "flow", "sni", "fp", "pbk", "sid")
         if any(not query.get(key) for key in required):
             raise SubscriptionParseError("vless Reality URI is missing required fields")
-        if query.get("flow") not in (None, "xtls-rprx-vision"):
+        if query.get("type") not in _VLESS_NETWORKS:
+            raise SubscriptionParseError("unsupported vless Reality network")
+        if query.get("fp") not in _REALITY_FINGERPRINTS:
+            raise SubscriptionParseError("unsupported vless Reality fingerprint")
+        if not _REALITY_PUBLIC_KEY.match(query["pbk"]):
+            raise SubscriptionParseError("vless Reality public key is invalid")
+        if not _REALITY_SHORT_ID.match(query["sid"]) or len(query["sid"]) % 2:
+            raise SubscriptionParseError("vless Reality short id is invalid")
+        if query.get("flow") not in ("xtls-rprx-vision",):
             raise SubscriptionParseError("unsupported vless Reality flow")
 
 
 def _validate_uri_line(line):  # type: (str) -> Tuple[str, str, str]
+    if len(line.encode("utf-8")) > MAXIMUM_URI_BYTES:
+        raise SubscriptionParseError("subscription URI record exceeds the 16 KiB bound")
     if not _URI_LINE.match(line) or any(ord(char) < 0x20 or ord(char) == 0x7F for char in line):
         raise SubscriptionParseError("subscription contains an invalid URI record")
     scheme = line.split(":", 1)[0].lower()
     if scheme == "vless":
         _validate_vless_fields(line)
     elif scheme == "ss":
-        if "@" not in line and "://" not in line:
-            raise SubscriptionParseError("ss URI is invalid")
-    elif scheme == "vmess" and len(line) <= len("vmess://"):
-        raise SubscriptionParseError("vmess URI is empty")
+        _validate_ss_uri(line)
+    elif scheme == "vmess":
+        _validate_vmess_uri(line)
     return scheme, _display_for_uri(line), line
 
 
@@ -415,7 +566,9 @@ def _parse_v2ray_subscription_body(body, format_hint="auto"):
             raise SubscriptionParseError("subscription contains too many nodes")
     if not records:
         raise SubscriptionParseError("subscription contains no supported nodes")
-    return ParsedSubscription(format_name, decoded_body, tuple(records))
+    # Keep the exact fetched representation for revision/rollback integrity;
+    # Mihomo receives the decoded records through the private provider file.
+    return ParsedSubscription(format_name, body, tuple(records))
 
 
 class V2RaySubscriptionParser(SubscriptionParser):

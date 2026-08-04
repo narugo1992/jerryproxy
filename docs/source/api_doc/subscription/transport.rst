@@ -20,6 +20,13 @@ MAXIMUM\_URL\_BYTES
    :no-value:
 
 
+MAXIMUM\_URI\_BYTES
+-----------------------------------------------------
+
+.. autodata:: MAXIMUM_URI_BYTES
+   :no-value:
+
+
 MAXIMUM\_RECORDS
 -----------------------------------------------------
 

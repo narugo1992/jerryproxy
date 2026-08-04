@@ -1,4 +1,4 @@
-"""Bounded authenticated connectivity probes and foreground recovery policy."""
+"""Bounded local-listener connectivity probes and foreground recovery policy."""
 
 import hashlib
 import math
@@ -66,7 +66,7 @@ class HealthSnapshot(object):
 
 
 class ConnectivityProbe(object):
-    """Probe public targets through the authenticated local HTTP listener."""
+    """Probe public targets through one local proxy listener."""
 
     def __init__(
         self,
@@ -75,6 +75,7 @@ class ConnectivityProbe(object):
         quorum=2,
         session_factory=None,
         clock=None,
+        protocol="http",
     ):
         self.targets = tuple(targets or DEFAULT_HEALTH_TARGETS)
         if not self.targets:
@@ -87,14 +88,23 @@ class ConnectivityProbe(object):
         self.quorum = quorum
         self.session_factory = session_factory or requests.Session
         self.clock = clock or time.monotonic
+        if protocol not in ("http", "mixed", "socks5"):
+            raise ValueError("unsupported local proxy protocol")
+        self.protocol = protocol
 
     @staticmethod
-    def _proxy_url(port, username, password):
+    def _proxy_url(port, username, password, protocol="http"):
         # Credentials are constructed only in the private request boundary and
         # never appear in a result, exception, or diagnostic string.
         from urllib.parse import quote
 
-        return "http://%s:%s@127.0.0.1:%d" % (
+        scheme = "socks5h" if protocol == "socks5" else "http"
+        if username is None and password is None:
+            return "%s://127.0.0.1:%d" % (scheme, port)
+        if username is None or password is None:
+            raise ValueError("proxy authentication requires both username and password")
+        return "%s://%s:%s@127.0.0.1:%d" % (
+            scheme,
             quote(username, safe=""),
             quote(password, safe=""),
             port,
@@ -109,7 +119,7 @@ class ConnectivityProbe(object):
         try:
             if hasattr(session, "trust_env"):
                 session.trust_env = False
-            proxy = self._proxy_url(port, username, password)
+            proxy = self._proxy_url(port, username, password, self.protocol)
             response = session.get(
                 target.url,
                 proxies={"http": proxy, "https": proxy},
@@ -173,6 +183,12 @@ class ConnectivityProbe(object):
             # Timeout is a normal degraded target result; it is not an
             # exception shown to the user or recorded with the target URL.
             return TargetHealth(target.name, False, detail="timeout")
+        except requests.exceptions.InvalidSchema:
+            # Requests raises InvalidSchema when the optional SOCKS transport
+            # dependency is absent; keep the action-oriented diagnosis without
+            # exposing the target URL or the raw exception text.
+            detail = "socks_dependency_missing" if self.protocol == "socks5" else "invalid_proxy_schema"
+            return TargetHealth(target.name, False, detail=detail)
         except requests.exceptions.RequestException:
             # Transport failures are classified as a failed target only.
             return TargetHealth(target.name, False, detail="transport_failed")

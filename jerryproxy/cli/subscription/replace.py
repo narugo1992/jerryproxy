@@ -11,12 +11,24 @@ The source forms and secret-handling rules are identical to
 `subscription add`. The previous valid generation remains
 selected until transport, classification and publication all succeed.
 Replacement does not rename the subscription.
+
+Omit NAME only in a real TTY to enter the guided name prompt. JSON and other
+non-interactive invocations must provide the exact existing NAME.
+When no source option is supplied in guided mode, the same exact
+`V2RAY_SUBSCRIPTION`, direct URL, file, and bounded-stdin source wizard is used;
+the environment value remains hidden and other names are rejected.
 """
 
 
 @click.command("replace", help=_HELP, short_help="Replace a subscription source.")
-@click.argument("name")
-@click.option("--url-env", "url_env", type=click.Choice([_common.SOURCE_ENVIRONMENT]), help="Read V2RAY_SUBSCRIPTION.")
+@click.argument("name", required=False)
+@click.option(
+    "--url-env",
+    "url_env",
+    type=click.Choice([_common.SOURCE_ENVIRONMENT]),
+    metavar="V2RAY_SUBSCRIPTION",
+    help="Read a subscription URL from the exact V2RAY_SUBSCRIPTION environment variable.",
+)
 @click.option("--url-stdin", is_flag=True, help="Read one bounded URL from stdin.")
 @click.option(
     "--file",
@@ -39,8 +51,9 @@ def subscription_replace(context, name, url_env, url_stdin, file_path, body_stdi
     # type: (click.Context, str, Optional[str], bool, Optional[str], bool, str, bool) -> None
     """Replace one subscription source."""
 
+    name = _common.prompt_name(name, as_json, "replace")
     source_kind, source_url, body = _common.read_source(
-        bool(url_env), file_path, body_stdin, url_stdin, interactive=not as_json
+        url_env, file_path, body_stdin, url_stdin, interactive=not as_json
     )
     manager = _common.subscriptions(context)
     if source_kind == "url":
