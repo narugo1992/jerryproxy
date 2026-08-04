@@ -25,3 +25,17 @@ def test_redaction_covers_structured_backend_secret_forms():
     assert "key-value" not in rendered
     assert "plain-key" not in rendered
     assert "token=[REDACTED]" in rendered
+
+
+def test_redaction_covers_non_http_proxy_url_schemes():
+    rendered = redact_text(
+        "socks5h://user:password@example.test:1080?token=secret "
+        "ssh://name:secret@example.test:22/path "
+        "wss://name:secret@example.test:443/path?token=secret"
+    )
+    assert "user:password" not in rendered
+    assert "token=secret" not in rendered
+    assert "name:secret" not in rendered
+    assert "socks5h://example.test:1080" in rendered
+    assert "ssh://example.test:22" in rendered
+    assert "wss://example.test:443" in rendered

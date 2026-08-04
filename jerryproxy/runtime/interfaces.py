@@ -26,13 +26,23 @@ class RuntimeDriver(object, metaclass=ABCMeta):
         """Return the canonical backend identity."""
 
     @abstractmethod
-    def projection(self, provider_path, node, port, username, password):
-        # type: (object, object, int, str, str) -> RuntimeProjection
+    def projection(
+        self,
+        provider_path,
+        node,
+        port,
+        username,
+        password,
+        listener_protocol,
+        backend_log_level,
+        bind_address="127.0.0.1",
+    ):
+        # type: (object, object, int, str, str, str, str, str) -> RuntimeProjection
         """Build an opaque-node projection without exposing it to the session."""
 
     @abstractmethod
-    def create_process(self, executable, config_path, session_root, log_path, backend_log_level):
-        # type: (object, object, object, object, str) -> object
+    def create_process(self, executable, config_path, session_root, log_path, backend_log_level, log_sink=None):
+        # type: (object, object, object, object, str, object) -> object
         """Create (but do not start) the backend child wrapper."""
 
     @abstractmethod

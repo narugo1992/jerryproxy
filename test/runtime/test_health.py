@@ -1,6 +1,7 @@
 import hashlib
 
 import pytest
+import requests
 
 from jerryproxy.runtime.health import ConnectivityProbe, HealthTarget, RecoveryPolicy
 
@@ -33,6 +34,12 @@ class FakeSession(object):
 
     def close(self):
         pass
+
+
+class MissingSocksSession(FakeSession):
+    def get(self, url, **kwargs):
+        del url, kwargs
+        raise requests.exceptions.InvalidSchema("Missing dependencies for SOCKS support.")
 
 
 def test_probe_requires_authenticated_proxy_and_returns_sanitized_quorum():
@@ -82,6 +89,22 @@ def test_probe_validates_pinned_body_hash_and_first_chunk_metrics():
     assert result.ok
     assert result.targets[0].first_chunk_latency >= 0
     assert result.targets[0].speed_bytes_per_second >= 0
+
+
+def test_socks_probe_reports_a_missing_transport_dependency_explicitly():
+    target = HealthTarget("socks-target", "https://example.invalid/204", 204)
+
+    probe = ConnectivityProbe(
+        targets=(target,),
+        quorum=1,
+        session_factory=lambda: MissingSocksSession(None),
+        timeout=1,
+        protocol="socks5",
+    )
+    result = probe.check(17777, None, None)
+
+    assert not result.ok
+    assert result.targets[0].detail == "socks_dependency_missing"
 
 
 def test_recovery_policy_defaults_match_closed_foreground_strategy():

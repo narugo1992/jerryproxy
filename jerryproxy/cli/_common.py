@@ -1,5 +1,7 @@
 """Shared private helpers for JerryProxy command modules."""
 
+import sys
+
 import click
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
@@ -28,6 +30,14 @@ def subscriptions(context):  # type: (click.Context) -> SubscriptionManager
     """Return the public subscription manager for the selected home."""
 
     return SubscriptionManager(paths(context))
+
+
+def interactive_available():  # type: () -> bool
+    """Return whether a command may safely start an interactive prompt."""
+
+    stdin_is_tty = getattr(sys.stdin, "isatty", lambda: False)()
+    stdout_is_tty = getattr(sys.stdout, "isatty", lambda: False)()
+    return bool(stdin_is_tty and stdout_is_tty)
 
 
 def confirm_dangerous_operation(message, assume_yes):  # type: (str, bool) -> bool
@@ -71,11 +81,16 @@ def prompt_confirm(message, default=False):  # type: (str, bool) -> bool
         raise click.ClickException("interactive selection cancelled")
 
 
-def prompt_text(message):  # type: (str) -> str
+def prompt_text(message, completer=None, default=None):  # type: (str, object, object) -> str
     """Collect one required text value during guided mode."""
 
     try:
-        value = str(inquirer.text(message=message).execute()).strip()
+        kwargs = {"message": message}
+        if completer is not None:
+            kwargs["completer"] = completer
+        if default is not None:
+            kwargs["default"] = default
+        value = str(inquirer.text(**kwargs).execute()).strip()
     except EOFError:
         # InquirerPy raises EOFError when an incomplete command has no terminal input.
         raise click.ClickException("interactive selection unavailable; provide complete command options")
@@ -96,6 +111,48 @@ def select_backend(message, names=None):  # type: (str, Optional[Iterable[str]])
     ]
     if not choices:
         raise click.ClickException("no backend matches this interactive operation")
+    return str(select(message, choices))
+
+
+def select_subscription(context, message, enabled_only=False):  # type: (click.Context, str, bool) -> str
+    """Select one stored subscription using only credential-free metadata."""
+
+    records = subscriptions(context).list()
+    if enabled_only:
+        records = tuple(record for record in records if record.enabled)
+    if not records:
+        if enabled_only:
+            raise click.ClickException("no enabled subscriptions are available")
+        raise click.ClickException("no subscriptions are stored")
+    choices = [
+        Choice(
+            record.name,
+            name="%s - %s, %d node(s)%s"
+            % (
+                record.name,
+                record.format,
+                record.node_count,
+                " (disabled)" if not record.enabled else "",
+            ),
+        )
+        for record in records
+    ]
+    return str(select(message, choices))
+
+
+def select_subscription_node(context, subscription_name, message):  # type: (click.Context, str, str) -> str
+    """Select one node while displaying only its stable public projection."""
+
+    record = subscriptions(context).get(subscription_name)
+    choices = [
+        Choice(
+            node.node_id,
+            name="%s - %s - %s" % (node.node_id, node.scheme.upper(), node.display),
+        )
+        for node in record.nodes
+    ]
+    if not choices:
+        raise click.ClickException("subscription has no nodes: %s" % subscription_name)
     return str(select(message, choices))
 
 

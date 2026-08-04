@@ -32,6 +32,12 @@ subscriptions
 .. autofunction:: subscriptions
 
 
+interactive\_available
+-----------------------------------------------------
+
+.. autofunction:: interactive_available
+
+
 confirm\_dangerous\_operation
 -----------------------------------------------------
 
@@ -60,6 +66,18 @@ select\_backend
 -----------------------------------------------------
 
 .. autofunction:: select_backend
+
+
+select\_subscription
+-----------------------------------------------------
+
+.. autofunction:: select_subscription
+
+
+select\_subscription\_node
+-----------------------------------------------------
+
+.. autofunction:: select_subscription_node
 
 
 select\_catalog\_version

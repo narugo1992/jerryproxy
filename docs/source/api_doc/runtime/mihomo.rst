@@ -20,6 +20,27 @@ MAXIMUM\_LOG\_BYTES
    :no-value:
 
 
+MAXIMUM\_BACKEND\_LINE\_BYTES
+-----------------------------------------------------
+
+.. autodata:: MAXIMUM_BACKEND_LINE_BYTES
+   :no-value:
+
+
+LISTENER\_PROTOCOLS
+-----------------------------------------------------
+
+.. autodata:: LISTENER_PROTOCOLS
+   :no-value:
+
+
+LISTENER\_ADDRESSES
+-----------------------------------------------------
+
+.. autodata:: LISTENER_ADDRESSES
+   :no-value:
+
+
 MihomoDriver
 -----------------------------------------------------
 
@@ -31,7 +52,7 @@ MihomoProcess
 -----------------------------------------------------
 
 .. autoclass:: MihomoProcess
-   :members: __init__,start,wait_ready,stop
+   :members: __init__,set_log_lock,start,wait_ready,stop
 
 
 reserve\_loopback\_port

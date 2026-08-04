@@ -61,7 +61,19 @@ class SubscriptionManager(object):
             source_url, body, format_hint, self.session, allow_http
         )
         parsed = self.parser.parse(body, format_hint)
-        record = build_record(name, secrets.token_hex(16), parsed, source_url=source_url)
+        current_ids = {
+            node.node_id
+            for record in self.store._list_locked()
+            for node in record.nodes
+        }
+        record = build_record(
+            name,
+            secrets.token_hex(16),
+            parsed,
+            source_url=source_url,
+            paths=self.paths,
+            reserved_ids=current_ids,
+        )
         return self.store._publish_locked(record)
 
     def replace(self, name, source_url=None, body=None, format_hint="auto", allow_http=False):
@@ -74,11 +86,27 @@ class SubscriptionManager(object):
     def _replace_locked(self, name, source_url=None, body=None, format_hint="auto", allow_http=False):
         validate_subscription_name(name)
         previous = self.store._get_locked(name)
+        body_source = body is not None
         body, source_url, format_hint = self._source_body(
             source_url, body, format_hint, self.session, allow_http
         )
         parsed = self.parser.parse(body, format_hint)
-        record = build_record(name, previous.subscription_id, parsed, source_url=source_url, previous=previous)
+        current_ids = {
+            node.node_id
+            for record in self.store._list_locked()
+            if record.name != name
+            for node in record.nodes
+        }
+        record = build_record(
+            name,
+            previous.subscription_id,
+            parsed,
+            source_url=source_url,
+            previous=previous,
+            retain_source_url=not body_source,
+            paths=self.paths,
+            reserved_ids=current_ids,
+        )
         return self.store._publish_locked(record, replace=True, expected_revision=previous.revision)
 
     def refresh(self, name):  # type: (str) -> SubscriptionRecord

@@ -8,10 +8,17 @@ _HELP = """Add one bounded V2RAY_SUBSCRIPTION source and publish its sanitized n
 
 \b
 Forms:
-  jerryproxy subscription add NAME --url-env V2RAY_SUBSCRIPTION
-  jerryproxy subscription add NAME --url-stdin
-  jerryproxy subscription add NAME --file BODY
-  jerryproxy subscription add NAME --body-stdin
+  jerryproxy subscription add [NAME] --url-env V2RAY_SUBSCRIPTION
+  jerryproxy subscription add [NAME] --url-stdin
+  jerryproxy subscription add [NAME] --file BODY
+  jerryproxy subscription add [NAME] --body-stdin
+
+If NAME is omitted in a real TTY, InquirerPy asks for it before reading the
+source. JSON output, redirected stdin/stdout, and other non-interactive calls
+must provide NAME explicitly; the command never invents a state-file name.
+When no source option is supplied in guided mode, the wizard offers the exact
+`V2RAY_SUBSCRIPTION` environment variable (value hidden), direct secret URL
+input, a file path, or bounded stdin. Other environment names are rejected.
 
 The URL is bearer material. It is never placed in argv, output, logs, or child
 environment. A URL source is retained only in owner-private state so an
@@ -23,8 +30,14 @@ this first implementation slice. Use --json for deterministic automation.
 
 
 @click.command("add", help=_HELP, short_help="Add a subscription source.")
-@click.argument("name")
-@click.option("--url-env", "url_env", type=click.Choice([_common.SOURCE_ENVIRONMENT]), help="Read V2RAY_SUBSCRIPTION.")
+@click.argument("name", required=False)
+@click.option(
+    "--url-env",
+    "url_env",
+    type=click.Choice([_common.SOURCE_ENVIRONMENT]),
+    metavar="V2RAY_SUBSCRIPTION",
+    help="Read a subscription URL from the exact V2RAY_SUBSCRIPTION environment variable.",
+)
 @click.option("--url-stdin", is_flag=True, help="Read one bounded URL from stdin.")
 @click.option(
     "--file",
@@ -47,8 +60,9 @@ def subscription_add(context, name, url_env, url_stdin, file_path, body_stdin, f
     # type: (click.Context, str, Optional[str], bool, Optional[str], bool, str, bool) -> None
     """Add and publish one subscription."""
 
+    name = _common.prompt_name(name, as_json, "add")
     source_kind, source_url, body = _common.read_source(
-        bool(url_env), file_path, body_stdin, url_stdin, interactive=not as_json
+        url_env, file_path, body_stdin, url_stdin, interactive=not as_json
     )
     manager = _common.subscriptions(context)
     if source_kind == "url":
