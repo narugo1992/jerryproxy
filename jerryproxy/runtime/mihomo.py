@@ -668,12 +668,14 @@ def _macos_process_info(pid):  # type: (int) -> object
     if sys.platform != "darwin":
         return None
     try:
+        ps_environment = dict(os.environ, LANG="C", LC_ALL="C")
         result = subprocess.run(
             ["/bin/ps", "-o", "ppid=", "-p", str(pid)],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
             timeout=0.5,
+            env=ps_environment,
         )
         ppid = int(result.stdout.decode("ascii", "strict").strip())
         pgid = os.getpgid(pid)
@@ -684,6 +686,7 @@ def _macos_process_info(pid):  # type: (int) -> object
             stderr=subprocess.DEVNULL,
             check=False,
             timeout=0.5,
+            env=ps_environment,
         )
         start_token = result.stdout.decode("ascii", "strict").strip()
         if not start_token:

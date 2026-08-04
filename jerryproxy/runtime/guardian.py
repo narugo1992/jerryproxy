@@ -53,12 +53,14 @@ def _start_time(pid):
             return None
     if sys.platform == "darwin":
         try:
+            ps_environment = dict(os.environ, LANG="C", LC_ALL="C")
             result = subprocess.run(
                 ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=0.5,
+                env=ps_environment,
             )
             token = result.stdout.decode("ascii", "strict").strip()
             if token:
@@ -70,6 +72,7 @@ def _start_time(pid):
                 stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=0.5,
+                env=ps_environment,
             )
             token = result.stdout.decode("ascii", "strict").strip()
             return token or None
