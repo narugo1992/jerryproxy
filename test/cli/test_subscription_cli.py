@@ -262,6 +262,7 @@ def test_server_guided_selection_passes_explicit_targets_to_runtime(tmp_path, mo
     assert "[mihomo]" in result.output
     assert "connected" in result.output
     assert "[TCP] live request" not in result.output
+    assert "\\u000a" not in result.output
 
 
 @pytest.mark.parametrize("width", [72, 80, 100, 120])
@@ -610,4 +611,51 @@ def test_guided_add_source_wizard_discovers_and_completes_environment_names(tmp_
         "body": None,
         "format_hint": "auto",
     }
+    assert "hidden" not in result.output
+
+
+def test_guided_add_source_wizard_accepts_matching_custom_environment(tmp_path, monkeypatch):
+    captured = {}
+
+    class Prompt(object):
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    class FakeRecord(object):
+        name = "custom"
+        revision = "r"
+        format = "uri-lines"
+        enabled = True
+        node_count = 0
+        nodes = ()
+
+        def public(self, include_nodes=True):
+            del include_nodes
+            return {
+                "name": self.name,
+                "revision": self.revision,
+                "format": self.format,
+                "enabled": True,
+                "node_count": 0,
+            }
+
+    class FakeManager(object):
+        def add(self, name, source_url, body=None, format_hint="auto"):
+            captured.update(name=name, source_url=source_url, body=body, format_hint=format_hint)
+            return FakeRecord()
+
+    monkeypatch.setenv("CUSTOM_PROXY_SUB_URL", "https://provider.example/sub?token=hidden")
+    monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
+    monkeypatch.setattr(subscription_common, "subscriptions", lambda context: FakeManager())
+    selections = iter(["env", "__custom__"])
+    monkeypatch.setattr(cli_common.inquirer, "select", lambda **kwargs: Prompt(next(selections)))
+    monkeypatch.setattr(cli_common, "prompt_text", lambda message, completer=None, default=None: "CUSTOM_PROXY_SUB_URL")
+
+    result = _invoke(CliRunner(), tmp_path / "home", "subscription", "add", "custom")
+
+    assert result.exit_code == 0, result.output
+    assert captured["source_url"] == "https://provider.example/sub?token=hidden"
     assert "hidden" not in result.output

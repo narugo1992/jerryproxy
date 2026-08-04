@@ -320,7 +320,7 @@ def server_command(
             rich_tracebacks=False,
         )
 
-    def log_sink(source, level, message, emphasize=False, preserve_local_auth=False):
+    def log_sink(source, level, message, emphasize=False, preserve_local_auth=False, multiline=False):
         if source == "jerryproxy" and _LOG_PRIORITIES[level] < _LOG_PRIORITIES[log_level]:
             return
         if log_format == "jsonl":
@@ -333,7 +333,15 @@ def server_command(
                 payload["source"] = source
             click.echo(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")), err=True)
             return
-        if preserve_local_auth:
+        if multiline:
+            safe_lines = []
+            for line in str(message).split("\n"):
+                if preserve_local_auth:
+                    safe_lines.append(terminal_safe_text(line))
+                else:
+                    safe_lines.append(terminal_safe_text(redact_text(line)))
+            safe_message = rich_escape("\n".join(safe_lines))
+        elif preserve_local_auth:
             safe_message = rich_escape(terminal_safe_text(message))
         else:
             safe_message = rich_escape(terminal_safe_text(redact_text(message)))
@@ -355,13 +363,14 @@ def server_command(
         )
         rich_handler.emit(record)
 
-    def startup_log(message, emphasize=False, preserve_local_auth=False):
+    def startup_log(message, emphasize=False, preserve_local_auth=False, multiline=False):
         log_sink(
             "jerryproxy",
             "INFO",
             message,
             emphasize=emphasize,
             preserve_local_auth=preserve_local_auth,
+            multiline=multiline,
         )
 
     def startup_warning(message):
@@ -444,7 +453,7 @@ def server_command(
             if listener_protocol == "socks5":
                 guide.append("SOCKS5 uses the `socks5h` URL so DNS lookups also go through the proxy.")
             guide.append("When finished, run: unset HTTP_PROXY HTTPS_PROXY ALL_PROXY")
-            startup_log("\n".join(guide), preserve_local_auth=authenticate)
+            startup_log("\n".join(guide), preserve_local_auth=authenticate, multiline=True)
         exit_code = runtime.wait()
         if exit_code and exit_code != 130:
             raise click.ClickException("Mihomo exited with status %d" % exit_code)

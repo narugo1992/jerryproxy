@@ -34,6 +34,9 @@ _IDENTITY_KEY_BYTES = 32
 _MAXIMUM_TOMBSTONES = 4096
 _IDENTITY_FILE = "identity.key"
 _TOMBSTONES_FILE = "tombstones.json"
+_PUBLICATION_JOURNAL = ".publication.journal.json"
+_HISTORY_PREFIX = ".history-"
+_MAXIMUM_HISTORY = 8
 _RECORD_KEYS = {
     "body",
     "enabled",
@@ -54,6 +57,24 @@ def _identity_path(paths):  # type: (object) -> object
 
 def _tombstones_path(paths):  # type: (object) -> object
     return paths.nodes / _TOMBSTONES_FILE
+
+
+def _publication_journal_path(paths):  # type: (object) -> object
+    return paths.subscriptions / _PUBLICATION_JOURNAL
+
+
+def _history_path(paths, record):  # type: (object, SubscriptionRecord) -> object
+    return paths.subscriptions / (
+        "%s%s-%s.json" % (_HISTORY_PREFIX, record.subscription_id, record.revision)
+    )
+
+
+def _is_history_path(path):  # type: (object) -> bool
+    return path.name.startswith(_HISTORY_PREFIX) and path.suffix == ".json"
+
+
+def _name_digest(name):  # type: (str) -> str
+    return hashlib.sha256(name.encode("ascii")).hexdigest()
 
 
 def _ensure_identity_key_locked(paths):  # type: (object) -> bytes
@@ -169,27 +190,39 @@ def _retire_node_ids_locked(paths, node_ids):  # type: (object, object) -> None
     _write_json(_tombstones_path(paths), {"entries": entries})
 
 
-def _canonical_node_bytes(scheme, display, uri, occurrence):  # type: (str, str, str, int) -> bytes
+def _canonical_node_bytes(subscription_id, format_name, scheme, display, uri, occurrence):
+    # type: (str, str, str, str, str, int) -> bytes
     value = {
         "display": display,
+        "format": format_name,
         "occurrence": occurrence,
         "scheme": scheme,
+        "subscription_id": subscription_id,
         "uri": uri,
     }
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
 
 
-def _derive_node_id(key, scheme, display, uri, occurrence, ordinal=0):
-    preimage = b"jerryproxy-node-v1\x00" + _canonical_node_bytes(scheme, display, uri, occurrence)
+def _derive_node_id(key, subscription_id, format_name, scheme, display, uri, occurrence, ordinal=0):
+    preimage = b"jerryproxy-node-v2\x00" + _canonical_node_bytes(
+        subscription_id,
+        format_name,
+        scheme,
+        display,
+        uri,
+        occurrence,
+    )
     if ordinal:
         preimage += b"\x00collision-%d" % ordinal
     return hmac.new(key, preimage, hashlib.sha256).hexdigest()[:_ID_HEX]
 
 
-def _node_id_matches(key, node):  # type: (bytes, NodeRecord) -> bool
+def _node_id_matches(key, record, node):  # type: (bytes, SubscriptionRecord, NodeRecord) -> bool
     for ordinal in range(17):
         if _derive_node_id(
             key,
+            record.subscription_id,
+            record.format,
             node.scheme,
             node.display,
             node.uri,
@@ -207,7 +240,7 @@ def _validate_record_identity_if_present(paths, record):  # type: (object, Subsc
             raise IntegrityError("node identity key is missing while tombstones exist")
         return
     key = _ensure_identity_key_locked(paths)
-    if any(not _node_id_matches(key, node) for node in record.nodes):
+    if any(not _node_id_matches(key, record, node) for node in record.nodes):
         raise IntegrityError("subscription node identity does not match the home key")
 
 
@@ -298,6 +331,83 @@ def _write_json(path, value):  # type: (Path, dict) -> None
                 os.unlink(temporary)
             except OSError:
                 pass
+
+
+def _write_publication_journal_locked(paths, value):  # type: (object, dict) -> None
+    """Persist a non-secret generation journal before changing public state."""
+
+    allowed = {
+        "kind",
+        "name_digest",
+        "new_revision",
+        "old_revision",
+        "operation",
+        "phase",
+        "subscription_id",
+    }
+    if set(value) != allowed:
+        raise IntegrityError("subscription publication journal has an invalid shape")
+    _write_json(_publication_journal_path(paths), value)
+
+
+def _read_publication_journal_locked(paths):  # type: (object) -> object
+    path = _publication_journal_path(paths)
+    if not path.exists():
+        return None
+    if is_path_alias(path) or not path.is_file():
+        raise IntegrityError("subscription publication journal is invalid")
+    try:
+        value = _read_json(path)
+    except SubscriptionStateError as error:
+        # A journal is authoritative recovery state and cannot be ignored.
+        raise IntegrityError("subscription publication journal cannot be read") from error
+    required = {
+        "kind",
+        "name_digest",
+        "new_revision",
+        "old_revision",
+        "operation",
+        "phase",
+        "subscription_id",
+    }
+    if set(value) != required:
+        raise IntegrityError("subscription publication journal has an invalid shape")
+    if value["kind"] not in ("publish", "remove") or value["phase"] not in ("prepared", "committed"):
+        raise IntegrityError("subscription publication journal has an invalid phase")
+    for key in ("name_digest", "operation", "subscription_id"):
+        if not isinstance(value[key], str):
+            raise IntegrityError("subscription publication journal has invalid identity")
+    if len(value["name_digest"]) != 64 or any(char not in "0123456789abcdef" for char in value["name_digest"]):
+        raise IntegrityError("subscription publication journal has an invalid name identity")
+    if len(value["operation"]) != 32 or any(char not in "0123456789abcdef" for char in value["operation"]):
+        raise IntegrityError("subscription publication journal has an invalid operation identity")
+    if len(value["subscription_id"]) != _ID_HEX or any(
+        char not in "0123456789abcdef" for char in value["subscription_id"]
+    ):
+        raise IntegrityError("subscription publication journal has an invalid subscription identity")
+    for key in ("old_revision", "new_revision"):
+        revision = value[key]
+        if revision is not None and (
+            not isinstance(revision, str)
+            or len(revision) != 64
+            or any(char not in "0123456789abcdef" for char in revision)
+        ):
+            raise IntegrityError("subscription publication journal has an invalid revision")
+    return value
+
+
+def _clear_publication_journal_locked(paths):  # type: (object) -> None
+    path = _publication_journal_path(paths)
+    if not path.exists():
+        return
+    if is_path_alias(path) or not path.is_file():
+        raise IntegrityError("subscription publication journal is invalid")
+    try:
+        path.unlink()
+        flush_directory(path.parent)
+    except OSError as error:
+        # Recovery evidence cannot be silently discarded after a mutation.
+        raise IntegrityError("subscription publication journal cleanup failed") from error
 
 
 def _record_path(paths, name):  # type: (JerryProxyPaths, str) -> Path
@@ -438,6 +548,62 @@ def _record_value(record):  # type: (SubscriptionRecord) -> dict
     }
 
 
+def _history_records_locked(paths, parser):  # type: (object, object) -> list
+    """Read and validate bounded last-good generations in the private namespace."""
+
+    if not paths.subscriptions.exists():
+        return []
+    result = []
+    for path in sorted(paths.subscriptions.iterdir(), key=lambda item: item.name):
+        if not _is_history_path(path):
+            continue
+        if is_path_alias(path) or not path.is_file():
+            raise IntegrityError("subscription history entry is invalid")
+        identity = path.stem[len(_HISTORY_PREFIX) :]
+        parts = identity.split("-", 1)
+        if len(parts) != 2 or len(parts[0]) != _ID_HEX or len(parts[1]) != 64:
+            raise IntegrityError("subscription history filename is invalid")
+        if any(char not in "0123456789abcdef" for char in parts[0] + parts[1]):
+            raise IntegrityError("subscription history filename is invalid")
+        record = _record_from_value(_read_json(path), parser=parser)
+        _validate_record_identity_if_present(paths, record)
+        if record.subscription_id != parts[0] or record.revision != parts[1]:
+            raise IntegrityError("subscription history identity does not match its filename")
+        result.append(record)
+    return result
+
+
+def _remove_history_for_id_locked(paths, subscription_id):  # type: (object, str) -> None
+    prefix = "%s%s-" % (_HISTORY_PREFIX, subscription_id)
+    if not paths.subscriptions.exists():
+        return
+    for path in tuple(paths.subscriptions.iterdir()):
+        if not path.name.startswith(prefix) or not _is_history_path(path):
+            continue
+        if is_path_alias(path) or not path.is_file():
+            raise IntegrityError("subscription history entry is invalid")
+        try:
+            path.unlink()
+        except OSError as error:
+            # Removal must not leave an untracked secret-bearing generation.
+            raise SubscriptionStateError("subscription history cleanup failed") from error
+    flush_directory(paths.subscriptions)
+
+
+def _prune_history_locked(paths, subscription_id, parser):  # type: (object, str, object) -> None
+    entries = [item for item in _history_records_locked(paths, parser) if item.subscription_id == subscription_id]
+    entries.sort(key=lambda item: item.updated_at, reverse=True)
+    for record in entries[_MAXIMUM_HISTORY:]:
+        path = _history_path(paths, record)
+        try:
+            path.unlink()
+        except OSError as error:
+            # History pruning is part of the locked publication operation.
+            raise SubscriptionStateError("subscription history pruning failed") from error
+    if entries[_MAXIMUM_HISTORY:]:
+        flush_directory(paths.subscriptions)
+
+
 class SubscriptionStore(object):
     """Lock-aware store for current subscription generations."""
 
@@ -447,7 +613,7 @@ class SubscriptionStore(object):
         if not isinstance(self.parser, SubscriptionParser):
             raise TypeError("parser must implement SubscriptionParser")
 
-    def _records_locked(self):  # type: () -> list
+    def _records_without_recovery_locked(self):  # type: () -> list
         if not self.paths.subscriptions.exists():
             return []
         if is_path_alias(self.paths.subscriptions) or not self.paths.subscriptions.is_dir():
@@ -460,6 +626,8 @@ class SubscriptionStore(object):
             # safe to interpret as an empty subscription set.
             raise IntegrityError("subscription namespace cannot be enumerated") from error
         for path in entries:
+            if path.name == _PUBLICATION_JOURNAL or _is_history_path(path):
+                continue
             if is_path_alias(path) or not path.is_file() or path.suffix != ".json":
                 raise IntegrityError("subscription namespace contains unexpected content")
             record = _record_from_value(_read_json(path), parser=self.parser)
@@ -469,6 +637,40 @@ class SubscriptionStore(object):
             records.append(record)
         if len(records) > MAXIMUM_SUBSCRIPTIONS:
             raise SubscriptionStateError("subscription count exceeds the safety bound")
+        return records
+
+    def _recover_publication_journal_locked(self):  # type: () -> None
+        journal = _read_publication_journal_locked(self.paths)
+        if journal is None:
+            return
+        records = self._records_without_recovery_locked()
+        matches = [
+            record
+            for record in records
+            if record.subscription_id == journal["subscription_id"]
+            and _name_digest(record.name) == journal["name_digest"]
+        ]
+        if len(matches) > 1:
+            raise IntegrityError("subscription publication journal matches multiple records")
+        current_revision = matches[0].revision if matches else None
+        old_revision = journal["old_revision"]
+        new_revision = journal["new_revision"]
+        if journal["kind"] == "publish":
+            allowed = (new_revision,) if journal["phase"] == "committed" else (old_revision, new_revision)
+            if current_revision not in allowed:
+                raise IntegrityError("subscription publication journal has an ambiguous current generation")
+        else:
+            allowed = (None,) if journal["phase"] == "committed" else (old_revision, None)
+            if current_revision not in allowed:
+                raise IntegrityError("subscription removal journal has an ambiguous current generation")
+            if current_revision is None:
+                _remove_history_for_id_locked(self.paths, journal["subscription_id"])
+        _clear_publication_journal_locked(self.paths)
+
+    def _records_locked(self):  # type: (object) -> list
+        self._recover_publication_journal_locked()
+        records = self._records_without_recovery_locked()
+        _history_records_locked(self.paths, self.parser)
         return records
 
     def _list_locked(self):  # type: () -> tuple
@@ -518,7 +720,23 @@ class SubscriptionStore(object):
         if existing is None and len(self._records_locked()) >= MAXIMUM_SUBSCRIPTIONS:
             raise SubscriptionStateError("subscription count exceeds the safety bound")
         _validate_record_identity_if_present(self.paths, record)
+        if existing is not None and existing.revision != record.revision:
+            _write_json(_history_path(self.paths, existing), _record_value(existing))
+        journal = {
+            "kind": "publish",
+            "name_digest": _name_digest(record.name),
+            "new_revision": record.revision,
+            "old_revision": existing.revision if existing is not None else None,
+            "operation": secrets.token_hex(16),
+            "phase": "prepared",
+            "subscription_id": record.subscription_id,
+        }
+        _write_publication_journal_locked(self.paths, journal)
         _write_json(path, _record_value(record))
+        journal["phase"] = "committed"
+        _write_publication_journal_locked(self.paths, journal)
+        _clear_publication_journal_locked(self.paths)
+        _prune_history_locked(self.paths, record.subscription_id, self.parser)
         return record
 
     def publish(self, record, replace=False, expected_revision=None):
@@ -534,9 +752,16 @@ class SubscriptionStore(object):
         if not path.exists():
             raise SubscriptionStateError("subscription not found: %s" % name)
         record = _record_from_value(_read_json(path), parser=self.parser)
-        # Retire identities before removing the public record.  A crash between
-        # this journal-like publication and unlink is harmless: the old record
-        # remains readable and the ID is conservatively never reused.
+        journal = {
+            "kind": "remove",
+            "name_digest": _name_digest(record.name),
+            "new_revision": None,
+            "old_revision": record.revision,
+            "operation": secrets.token_hex(16),
+            "phase": "prepared",
+            "subscription_id": record.subscription_id,
+        }
+        _write_publication_journal_locked(self.paths, journal)
         _retire_node_ids_locked(self.paths, [node.node_id for node in record.nodes])
         try:
             path.unlink()
@@ -544,6 +769,10 @@ class SubscriptionStore(object):
         except OSError as error:
             # Removing a private record may fail through filesystem errors.
             raise SubscriptionStateError("subscription removal failed") from error
+        _remove_history_for_id_locked(self.paths, record.subscription_id)
+        journal["phase"] = "committed"
+        _write_publication_journal_locked(self.paths, journal)
+        _clear_publication_journal_locked(self.paths)
         return record
 
     def remove(self, name):  # type: (str) -> SubscriptionRecord
@@ -572,6 +801,7 @@ def build_record(
             previous_by_uri.setdefault(node.uri, []).append(node.node_id)
     nodes = []
     identity_key = _ensure_identity_key_locked(paths) if paths is not None else None
+    record_subscription_id = previous.subscription_id if previous is not None else subscription_id
     reserved = set(reserved_ids or ())
     if paths is not None:
         reserved.update(entry["id"] for entry in _read_tombstones_locked(paths))
@@ -593,6 +823,8 @@ def build_record(
             for ordinal in range(17):
                 candidate = _derive_node_id(
                     identity_key,
+                    record_subscription_id,
+                    parsed.format,
                     scheme,
                     display,
                     uri,
