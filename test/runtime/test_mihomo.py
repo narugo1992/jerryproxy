@@ -1,7 +1,9 @@
 import io
+import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 
@@ -145,6 +147,48 @@ def test_guardian_parent_identity_requires_same_parent_and_start_token(monkeypat
     assert not guardian_module._parent_identity_matches(42, None)
 
 
+@pytest.mark.parametrize("module", [guardian_module, mihomo_module])
+def test_parent_death_signal_fails_closed_when_prctl_returns_error(monkeypatch, module):
+    if os.name != "posix":
+        pytest.skip("parent-death signal is POSIX-specific")
+
+    import ctypes
+
+    class FailingPrctl(object):
+        argtypes = None
+        restype = None
+
+        def __call__(self, *args):
+            del args
+            return -1
+
+    class FakeLibc(object):
+        prctl = FailingPrctl()
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: FakeLibc())
+    monkeypatch.setattr(ctypes, "get_errno", lambda: 1)
+
+    with pytest.raises(OSError):
+        module._configure_parent_death_signal()
+
+
+def test_guardian_converts_parent_death_setup_failure_to_launch_failure(tmp_path, monkeypatch):
+    def fail_launch(*args, **kwargs):
+        del args, kwargs
+        raise subprocess.SubprocessError("pre-exec prctl failed")
+
+    monkeypatch.setattr(guardian_module.subprocess, "Popen", fail_launch)
+    assert guardian_module.run(tmp_path / "mihomo", tmp_path / "config", tmp_path / "meta", tmp_path) == 127
+
+
+def test_guardian_main_reports_parent_death_setup_failure(monkeypatch):
+    def fail_setup():
+        raise OSError("prctl unavailable")
+
+    monkeypatch.setattr(guardian_module, "_configure_parent_death_signal", fail_setup)
+    assert guardian_module.main(["--executable", "x", "--config", "y", "--metadata", "z", "--session-root", "."]) == 127
+
+
 def test_guardian_refuses_to_launch_without_authenticated_parent(tmp_path, monkeypatch):
     monkeypatch.setattr(guardian_module, "_parent_identity_matches", lambda pid, token: False)
 
@@ -164,11 +208,375 @@ def test_guardian_refuses_to_launch_without_authenticated_parent(tmp_path, monke
     assert result == 125
 
 
+def test_guardian_rejects_closed_start_gate_before_launch(tmp_path, monkeypatch):
+    read_descriptor, write_descriptor = os.pipe()
+    os.close(write_descriptor)
+    launched = []
+
+    def unexpected_launch(*args, **kwargs):
+        launched.append((args, kwargs))
+        raise AssertionError("backend must not launch after gate cancellation")
+
+    monkeypatch.setattr(guardian_module.subprocess, "Popen", unexpected_launch)
+    try:
+        result = guardian_module.run(
+            tmp_path / "mihomo", tmp_path / "config.yaml", tmp_path / "guardian.json", tmp_path,
+            start_gate=read_descriptor,
+        )
+    finally:
+        try:
+            os.close(read_descriptor)
+        except OSError:
+            pass
+    assert result == 125
+    assert launched == []
+
+
+def test_guardian_returns_launch_error_without_creating_metadata(tmp_path, monkeypatch):
+    def fail_launch(*args, **kwargs):
+        raise OSError("executable missing")
+
+    monkeypatch.setattr(guardian_module.subprocess, "Popen", fail_launch)
+    metadata = tmp_path / "guardian.json"
+    result = guardian_module.run(tmp_path / "missing", tmp_path / "config.yaml", metadata, tmp_path)
+    assert result == 127
+    assert not metadata.exists()
+
+
+def test_guardian_rejects_aliased_metadata_parent(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = tmp_path / "lease"
+    if os.name == "nt":
+        pytest.skip("symlink primitive is not available on this Windows runner")
+    alias.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError, match="aliased"):
+        guardian_module._write_metadata(alias / "guardian.json", {"pid": 1}, tmp_path)
+
+
+def test_guardian_metadata_is_private_and_atomically_readable(tmp_path):
+    metadata = tmp_path / "lease" / "guardian.json"
+    guardian_module._write_metadata(metadata, {"pid": 7, "config": "x"}, tmp_path)
+    assert json.loads(metadata.read_text(encoding="ascii")) == {"pid": 7, "config": "x"}
+    if os.name == "posix":
+        assert metadata.stat().st_mode & 0o777 == 0o600
+
+
+def test_guardian_terminates_child_when_metadata_publication_fails(tmp_path, monkeypatch):
+    class Child(object):
+        pid = 123
+
+        def __init__(self):
+            self.terminated = False
+
+        def wait(self, timeout=None):
+            del timeout
+            return 0
+
+        def poll(self):
+            return None
+
+    child = Child()
+    monkeypatch.setattr(guardian_module.subprocess, "Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr(
+        guardian_module,
+        "_write_metadata",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("alias")),
+    )
+    monkeypatch.setattr(
+        guardian_module,
+        "_terminate_child_group",
+        lambda value, hard=False: setattr(value, "terminated", hard),
+    )
+    monkeypatch.setattr(guardian_module, "_start_time", lambda pid: 1)
+    monkeypatch.setattr(guardian_module.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(guardian_module.os, "getsid", lambda pid: pid)
+    assert guardian_module.run(tmp_path / "mihomo", tmp_path / "config", tmp_path / "meta", tmp_path) == 127
+    assert child.terminated is True
+
+
+def test_guardian_publishes_identity_and_returns_child_status(tmp_path, monkeypatch):
+    class Child(object):
+        pid = 321
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            del timeout
+            return 7
+
+    monkeypatch.setattr(guardian_module.subprocess, "Popen", lambda *args, **kwargs: Child())
+    monkeypatch.setattr(guardian_module, "_start_time", lambda pid: 99)
+    monkeypatch.setattr(guardian_module.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(guardian_module.os, "getsid", lambda pid: pid)
+    metadata = tmp_path / "guardian.json"
+    assert guardian_module.run(tmp_path / "mihomo", tmp_path / "config", metadata, tmp_path) == 7
+    value = json.loads(metadata.read_text(encoding="ascii"))
+    assert value["pid"] == 321
+    assert value["start_time"] == 99
+
+
+def test_guardian_stops_child_when_parent_identity_changes(tmp_path, monkeypatch):
+    class Child(object):
+        pid = 322
+
+        def __init__(self):
+            self.waits = 0
+            self.killed = False
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            del timeout
+            self.waits += 1
+            if self.waits == 1:
+                raise guardian_module.subprocess.TimeoutExpired("child", 0.2)
+            return 0
+
+    child = Child()
+    identity = iter((True, False))
+    monkeypatch.setattr(guardian_module.subprocess, "Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr(guardian_module, "_parent_identity_matches", lambda *args: next(identity))
+    monkeypatch.setattr(guardian_module, "_start_time", lambda pid: 99)
+    monkeypatch.setattr(guardian_module.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(guardian_module.os, "getsid", lambda pid: pid)
+    terminated = []
+    monkeypatch.setattr(guardian_module, "_terminate_child_group", lambda value, hard=False: terminated.append(hard))
+    result = guardian_module.run(
+        tmp_path / "mihomo", tmp_path / "config", tmp_path / "meta", tmp_path,
+        parent_pid=1, parent_start_time="token",
+    )
+    assert result == 125
+    assert terminated == [True]
+
+
 def test_windows_job_helper_is_inactive_off_windows():
     if os.name == "nt":
         pytest.skip("native Windows Job Object path")
     assert mihomo_module._windows_create_job() is None
     assert not mihomo_module._windows_assign_job(None, None)
+
+
+def test_mihomo_rejects_invalid_log_lock_and_readiness_settings(tmp_path):
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    with pytest.raises(ValueError, match="context-manager"):
+        process.set_log_lock(object())
+    with pytest.raises(ValueError, match="invalid listener"):
+        process.set_readiness_challenge(None, None, "invalid", "127.0.0.1")
+    with pytest.raises(ValueError, match="supplied together"):
+        process.set_readiness_challenge("user", None, "http", "127.0.0.1")
+
+
+def test_mihomo_start_reports_guardian_launch_failure(tmp_path, monkeypatch):
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+
+    def fail_launch(*args, **kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(mihomo_module.subprocess, "Popen", fail_launch)
+    with pytest.raises(RuntimeSessionError, match="backend launch failed"):
+        process.start()
+    assert process.process is None
+    assert process._start_gate_write is None
+
+
+def test_mihomo_start_cleans_authorization_gate_after_preexec_failure(tmp_path, monkeypatch):
+    class FailingPopen(object):
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+            raise subprocess.SubprocessError("pre-exec prctl failed")
+
+    monkeypatch.setattr(mihomo_module.subprocess, "Popen", FailingPopen)
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    with pytest.raises(RuntimeSessionError, match="backend launch failed"):
+        process.start()
+    assert process.process is None
+    assert process._start_gate_write is None
+
+
+def test_mihomo_start_authorizes_real_popen_shape_and_drains_child(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakePopen(object):
+        def __init__(self, arguments, **options):
+            captured["arguments"] = arguments
+            captured["options"] = options
+            self.pid = 12345
+            self.stdout = io.BytesIO(b"ready\n")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            del timeout
+            return 0
+
+    monkeypatch.setattr(mihomo_module.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(mihomo_module, "_linux_optional_pidfd_open", lambda pid: None)
+    monkeypatch.setattr(mihomo_module, "_linux_process_start_time", lambda pid: 1)
+    monkeypatch.setattr(MihomoProcess, "_load_guardian_identity", lambda self, timeout=5.0: None)
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    monkeypatch.setattr(process, "_release_start_gate", lambda: captured.setdefault("authorized", True))
+    process.start()
+    for thread in process._threads:
+        thread.join(1.0)
+    assert captured["options"]["start_new_session"] is True
+    assert captured["options"]["pass_fds"]
+    assert "--start-gate" in captured["arguments"]
+    assert process.log_path.read_text(encoding="ascii") == "[mihomo] ready\n"
+
+
+def test_mihomo_start_rejects_unsafe_existing_log(tmp_path):
+    log_path = tmp_path / "log"
+    log_path.write_text("old", encoding="ascii")
+    if os.name == "posix":
+        log_path.chmod(0o644)
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, log_path)
+    if os.name == "posix":
+        with pytest.raises(RuntimeSessionError, match="unsafe permissions"):
+            process.start()
+
+
+def test_mihomo_private_environment_is_scrubbed_and_bounded(tmp_path):
+    values = mihomo_module.build_environment(tmp_path / "bin" / "mihomo", tmp_path)
+    assert values["HOME"].startswith(str(tmp_path))
+    assert values["TMPDIR"].startswith(str(tmp_path))
+    assert values["PATH"] == str(tmp_path / "bin")
+    assert values["LANG"] == "C"
+    assert values["LC_ALL"] == "C"
+    assert values["TZ"] == "UTC"
+    assert "HTTP_PROXY" not in values
+
+
+def test_mihomo_environment_rejects_aliased_private_directory(tmp_path):
+    if os.name == "nt":
+        pytest.skip("symlink primitive is not available on this Windows runner")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "backend-home").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeSessionError, match="aliased"):
+        mihomo_module.build_environment(tmp_path / "bin" / "mihomo", tmp_path)
+
+
+@pytest.mark.parametrize("value, expected", [("OFF", "silent"), ("WARNING", "warning"), ("debug", "debug")])
+def test_mihomo_log_levels_are_normalized(value, expected):
+    assert mihomo_module._config_log_level(value) == expected
+
+
+def test_mihomo_rejects_unknown_log_level():
+    with pytest.raises(ValueError, match="unsupported"):
+        mihomo_module._config_log_level("trace")
+
+
+def test_mihomo_wait_ready_rejects_unstarted_or_exited_process(tmp_path):
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    with pytest.raises(RuntimeSessionError, match="has not started"):
+        process.wait_ready(17777, timeout=0.1)
+    process.process = type("Exited", (), {"poll": lambda self: 1})()
+    with pytest.raises(RuntimeSessionError, match="exited before readiness"):
+        process.wait_ready(17777, timeout=0.1)
+    with pytest.raises(RuntimeSessionError, match="deadline exhausted"):
+        process.wait_ready(17777, timeout=0)
+
+
+def test_mihomo_release_start_gate_authorizes_once_and_cancel_is_idempotent(tmp_path):
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    read_descriptor, write_descriptor = os.pipe()
+    process._start_gate_write = write_descriptor
+    process._release_start_gate()
+    assert os.read(read_descriptor, 1) == b"\x01"
+    os.close(read_descriptor)
+    process._release_start_gate()
+    process._cancel_start_gate()
+
+
+def test_mihomo_drain_off_level_does_not_publish_output(tmp_path):
+    events = []
+    process = MihomoProcess(
+        tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log",
+        backend_log_level="OFF", log_sink=lambda *event: events.append(event),
+    )
+    process._drain(io.BytesIO(b"secret\n"))
+    assert events == []
+    assert not process.log_path.exists()
+
+
+def test_mihomo_driver_projects_secret_node_and_delegates_lifecycle(tmp_path):
+    class Node(object):
+        def secret_uri(self):
+            return "ss://opaque-secret"
+
+    class Process(object):
+        def __init__(self):
+            self.started = False
+            self.stopped = False
+
+        def start(self):
+            self.started = True
+
+        def wait_ready(self, port, timeout=5.0):
+            self.ready = (port, timeout)
+
+        def stop(self, timeout=2.0):
+            self.stopped = timeout
+
+    created = []
+    driver = mihomo_module.MihomoDriver(
+        process_factory=lambda *args, **kwargs: created.append(Process()) or created[-1]
+    )
+    projection = driver.projection(
+        tmp_path / "provider", Node(), 17777, "user", "password", listener_protocol="http"
+    )
+    assert b"ss://opaque-secret" in projection.provider
+    assert b"authentication:" in projection.config
+    process = driver.create_process(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log", "INFO")
+    driver.wait_ready(process, 17777, timeout=0.25)
+    driver.stop(process, timeout=0.5)
+    assert process.ready == (17777, 5.0)
+    assert process.stopped == 2.0
+
+
+def test_mihomo_stop_terminates_authorized_group_and_cleans_metadata(tmp_path, monkeypatch):
+    class Child(object):
+        pid = 456
+
+        def __init__(self):
+            self.calls = 0
+
+        def poll(self):
+            return None if self.calls == 0 else 0
+
+        def wait(self, timeout=None):
+            del timeout
+            self.calls += 1
+            return 0
+
+    child = Child()
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = child
+    process._backend_pgid = 456
+    process._backend_sid = 456
+    process.backend_pid = 456
+    process._backend_start_time = 1
+    metadata = process._guardian_metadata_path
+    metadata.write_text("{}", encoding="ascii")
+    signals = []
+    monkeypatch.setattr(mihomo_module, "_linux_process_identity_matches", lambda *args: True)
+    monkeypatch.setattr(mihomo_module, "_linux_process_group", lambda pid: 456)
+    monkeypatch.setattr(mihomo_module, "_linux_process_session", lambda pid: 456)
+    monkeypatch.setattr(mihomo_module, "_linux_process_group_members", lambda *args: ())
+    monkeypatch.setattr(mihomo_module.os, "killpg", lambda group, signal: signals.append((group, signal)))
+    process.stop(timeout=0.05)
+    assert signals and signals[0][0] == 456
+    assert not metadata.exists()
+
+
+def test_mihomo_stop_is_safe_before_start(tmp_path):
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.stop(timeout=0.01)
+    assert process.process is None
 
 
 def test_guardian_malformed_metadata_aborts_before_reraising(tmp_path, monkeypatch):
