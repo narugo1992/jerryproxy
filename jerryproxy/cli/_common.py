@@ -40,13 +40,13 @@ def interactive_available():  # type: () -> bool
     return bool(stdin_is_tty and stdout_is_tty)
 
 
-def confirm_dangerous_operation(message, assume_yes):  # type: (str, bool) -> bool
+def confirm_dangerous_operation(message, assume_yes, default=False):  # type: (str, bool, bool) -> bool
     """Confirm a destructive command through the same TUI used by v2raycli."""
 
     if assume_yes:
         return True
     try:
-        return bool(inquirer.confirm(message=message, default=False).execute())
+        return bool(inquirer.confirm(message=message, default=default).execute())
     except EOFError:
         # InquirerPy raises EOFError when no interactive input stream is available.
         raise click.ClickException("interactive confirmation unavailable; rerun with --yes")
