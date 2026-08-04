@@ -1196,6 +1196,13 @@ class MihomoProcess(object):
             if os.name == "posix" and stat.S_IMODE(self.log_path.stat().st_mode) != 0o600:
                 raise RuntimeSessionError("runtime log path has unsafe permissions")
         real_popen = isinstance(getattr(subprocess, "Popen"), type)
+        guardian_parent_pid = None
+        guardian_parent_start_time = None
+        if sys.platform == "darwin":
+            guardian_parent_pid = os.getpid()
+            guardian_parent_start_time = _posix_process_start_time(guardian_parent_pid)
+            if guardian_parent_start_time is None:
+                raise RuntimeSessionError("macOS parent process identity is unavailable")
         gate_read = None
         if real_popen:
             gate_read, gate_write = os.pipe()
@@ -1253,6 +1260,15 @@ class MihomoProcess(object):
             )
             if gate_read is not None:
                 arguments.extend(["--start-gate", str(gate_read)])
+            if guardian_parent_pid is not None:
+                arguments.extend(
+                    [
+                        "--parent-pid",
+                        str(guardian_parent_pid),
+                        "--parent-start-time",
+                        str(guardian_parent_start_time),
+                    ]
+                )
             self.process = subprocess.Popen(arguments, **options)
         except OSError as error:
             self._cancel_start_gate()

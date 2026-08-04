@@ -3,6 +3,7 @@
 import os
 import re
 import sys
+import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 
@@ -104,15 +105,32 @@ class JerryProxyOperationLock(object):
             if is_path_alias(self.paths.lock_file):
                 raise OSError("managed JerryProxy lock file became an alias")
             return
-        descriptor = -1
-        try:
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            descriptor = os.open(str(self.paths.lock_file), flags, 0o600)
-        except FileExistsError:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        for _attempt in range(3):
+            descriptor = -1
+            try:
+                descriptor = os.open(str(self.paths.lock_file), flags, 0o600)
+                return
+            except FileExistsError:
+                # Another legacy waiter may have recreated the marker between
+                # the existence check and O_EXCL. Recheck before retrying so a
+                # release/acquire race cannot silently lose the marker.
+                if os.path.lexists(str(self.paths.lock_file)):
+                    from .home import is_path_alias
+
+                    if is_path_alias(self.paths.lock_file):
+                        raise OSError("managed JerryProxy lock file became an alias")
+                time.sleep(0.001)
+            finally:
+                if descriptor != -1:
+                    os.close(descriptor)
+        if os.path.lexists(str(self.paths.lock_file)):
+            from .home import is_path_alias
+
+            if is_path_alias(self.paths.lock_file):
+                raise OSError("managed JerryProxy lock file became an alias")
             return
-        finally:
-            if descriptor != -1:
-                os.close(descriptor)
+        raise OSError("managed JerryProxy lock marker could not be restored")
 
     def _validate_existing_lock(self):  # type: () -> None
         from .home import is_path_alias

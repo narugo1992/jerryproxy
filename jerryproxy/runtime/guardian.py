@@ -79,6 +79,19 @@ def _start_time(pid):
     return None
 
 
+def _parent_identity_matches(parent_pid, parent_start_time):
+    """Prove that the original supervisor still owns this guardian."""
+
+    if not isinstance(parent_pid, int) or parent_pid <= 0 or not parent_start_time:
+        return False
+    try:
+        if os.getppid() != parent_pid:
+            return False
+    except OSError:
+        return False
+    return _start_time(parent_pid) == parent_start_time
+
+
 def _wait_for_start_gate(start_gate):
     """Wait for the parent authorization byte; EOF cancels before launch."""
 
@@ -174,7 +187,15 @@ def _terminate_child_group(child, hard=False):
             pass
 
 
-def run(executable, config_path, metadata_path, session_root, start_gate=None):
+def run(
+    executable,
+    config_path,
+    metadata_path,
+    session_root,
+    start_gate=None,
+    parent_pid=None,
+    parent_start_time=None,
+):
     """Launch and own the backend until it exits."""
 
     if os.name == "posix":
@@ -201,6 +222,10 @@ def run(executable, config_path, metadata_path, session_root, start_gate=None):
             "universal_newlines": False,
         }
     if not _wait_for_start_gate(start_gate):
+        return 125
+    if parent_pid is not None and not _parent_identity_matches(parent_pid, parent_start_time):
+        # macOS has no parent-death signal primitive; refuse to launch unless
+        # the supervisor identity is authenticated before the backend starts.
         return 125
     child = None
     old_term = None
@@ -248,7 +273,17 @@ def run(executable, config_path, metadata_path, session_root, start_gate=None):
             _terminate_child_group(child, hard=True)
             child.wait()
             return 127
-        return child.wait()
+        while True:
+            try:
+                return child.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                if parent_pid is not None and not _parent_identity_matches(parent_pid, parent_start_time):
+                    _terminate_child_group(child, hard=True)
+                    try:
+                        child.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    return 125
     finally:
         if old_term is not None:
             signal.signal(signal.SIGTERM, old_term)
@@ -263,9 +298,21 @@ def main(argv=None):
     parser.add_argument("--metadata", required=True)
     parser.add_argument("--session-root", required=True)
     parser.add_argument("--start-gate", type=int)
+    parser.add_argument("--parent-pid", type=int)
+    parser.add_argument("--parent-start-time")
     args = parser.parse_args(argv)
     _configure_parent_death_signal()
-    return int(run(args.executable, args.config, args.metadata, args.session_root, args.start_gate))
+    return int(
+        run(
+            args.executable,
+            args.config,
+            args.metadata,
+            args.session_root,
+            args.start_gate,
+            args.parent_pid,
+            args.parent_start_time,
+        )
+    )
 
 
 if __name__ == "__main__":

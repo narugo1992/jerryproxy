@@ -182,6 +182,28 @@ def test_filelock_status_is_observable():
     assert "filelock" in status.detail
 
 
+def test_legacy_windows_marker_restoration_retries_exclusive_create(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path)
+    paths.locks.mkdir(parents=True)
+    operation = JerryProxyOperationLock(paths)
+    operation._restore_lock_marker = True
+    monkeypatch.setattr(lock_module.os, "name", "nt")
+    original_open = lock_module.os.open
+    calls = []
+
+    def raced_open(path, flags, mode):
+        calls.append(path)
+        if len(calls) == 1:
+            raise FileExistsError(path)
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(lock_module.os, "open", raced_open)
+    operation._restore_marker_after_release()
+
+    assert len(calls) == 2
+    assert paths.lock_file.is_file()
+
+
 @pytest.mark.parametrize(
     ("python_version", "filelock_version", "message"),
     [

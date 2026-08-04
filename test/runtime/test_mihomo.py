@@ -7,6 +7,7 @@ import threading
 
 import pytest
 
+import jerryproxy.runtime.guardian as guardian_module
 import jerryproxy.runtime.mihomo as mihomo_module
 from jerryproxy.errors import RuntimeSessionError
 from jerryproxy.runtime.health import ConnectivityProbe
@@ -131,6 +132,16 @@ def test_linux_process_identity_rejects_reused_or_unknown_pid():
     assert mihomo_module._linux_process_identity_matches(pid, start_time)
     assert not mihomo_module._linux_process_identity_matches(pid, start_time + 1)
     assert not mihomo_module._linux_process_identity_matches(pid, None)
+
+
+def test_guardian_parent_identity_requires_same_parent_and_start_token(monkeypatch):
+    monkeypatch.setattr(guardian_module.os, "getppid", lambda: 42)
+    monkeypatch.setattr(guardian_module, "_start_time", lambda pid: "started")
+
+    assert guardian_module._parent_identity_matches(42, "started")
+    assert not guardian_module._parent_identity_matches(41, "started")
+    assert not guardian_module._parent_identity_matches(42, "reused")
+    assert not guardian_module._parent_identity_matches(42, None)
 
 
 def test_windows_job_helper_is_inactive_off_windows():
