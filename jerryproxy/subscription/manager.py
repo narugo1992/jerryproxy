@@ -74,11 +74,19 @@ class SubscriptionManager(object):
     def _replace_locked(self, name, source_url=None, body=None, format_hint="auto", allow_http=False):
         validate_subscription_name(name)
         previous = self.store._get_locked(name)
+        body_source = body is not None
         body, source_url, format_hint = self._source_body(
             source_url, body, format_hint, self.session, allow_http
         )
         parsed = self.parser.parse(body, format_hint)
-        record = build_record(name, previous.subscription_id, parsed, source_url=source_url, previous=previous)
+        record = build_record(
+            name,
+            previous.subscription_id,
+            parsed,
+            source_url=source_url,
+            previous=previous,
+            retain_source_url=not body_source,
+        )
         return self.store._publish_locked(record, replace=True, expected_revision=previous.revision)
 
     def refresh(self, name):  # type: (str) -> SubscriptionRecord

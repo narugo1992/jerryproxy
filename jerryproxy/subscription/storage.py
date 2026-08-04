@@ -364,8 +364,8 @@ class SubscriptionStore(object):
             return self._remove_locked(name)
 
 
-def build_record(name, subscription_id, parsed, source_url=None, previous=None):
-    # type: (str, str, object, str, Optional[SubscriptionRecord]) -> SubscriptionRecord
+def build_record(name, subscription_id, parsed, source_url=None, previous=None, retain_source_url=True):
+    # type: (str, str, object, str, Optional[SubscriptionRecord], bool) -> SubscriptionRecord
     """Build a new record while reconciling exact URI identities."""
 
     previous_by_uri = {}
@@ -392,6 +392,10 @@ def build_record(name, subscription_id, parsed, source_url=None, previous=None):
         enabled=previous.enabled if previous is not None else True,
         updated_at=_now(),
         nodes=tuple(nodes),
-        source_url=source_url if source_url is not None else (previous.source_url if previous else None),
+        source_url=(
+            source_url
+            if source_url is not None
+            else (previous.source_url if previous is not None and retain_source_url else None)
+        ),
         body=parsed.body,
     )

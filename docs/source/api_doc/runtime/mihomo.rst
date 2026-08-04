@@ -20,6 +20,20 @@ MAXIMUM\_LOG\_BYTES
    :no-value:
 
 
+LISTENER\_PROTOCOLS
+-----------------------------------------------------
+
+.. autodata:: LISTENER_PROTOCOLS
+   :no-value:
+
+
+LISTENER\_ADDRESSES
+-----------------------------------------------------
+
+.. autodata:: LISTENER_ADDRESSES
+   :no-value:
+
+
 MihomoDriver
 -----------------------------------------------------
 

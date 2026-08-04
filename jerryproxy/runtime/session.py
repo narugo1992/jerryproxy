@@ -3,7 +3,9 @@
 import json
 import os
 import secrets
+import stat
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,15 +24,21 @@ from ..home import is_path_alias
 from ..lock import JerryProxyOperationLock
 from ..subscription import SubscriptionManager
 from ..subscription.interfaces import NodeSource
+from ..subscription.redaction import redact_text
 from ..subscription.storage import _ensure_extension_directory
 from .health import ConnectivityProbe, RecoveryDeadline, RecoveryPolicy
 from .interfaces import RuntimeDriver
 from .mihomo import (
+    LISTENER_ADDRESSES,
+    LISTENER_PROTOCOLS,
+    MAXIMUM_LOG_BYTES,
     QUALIFIED_VERSION,
     MihomoDriver,
     _private_bytes,
     reserve_loopback_port,
 )
+
+_LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 
 
 def _token_urlsafe(byte_count):  # type: (int) -> str
@@ -56,7 +64,7 @@ def _parse_timestamp(value):  # type: (str) -> datetime
 
 
 class RuntimeSession(object):
-    """One authenticated, foreground Mihomo session with bounded recovery.
+    """One foreground Mihomo session with optional authentication and recovery.
 
     Automatic recovery is intentionally in-memory.  The user's selected node
     remains the saved preference; a successful failover changes only this
@@ -72,7 +80,8 @@ class RuntimeSession(object):
         relay_url=None,
         relay_pattern=None,
         log_level="INFO",
-        backend_log_level="WARN",
+        backend_log_level="INFO",
+        authenticate=False,
         session_id=None,
         health_probe=None,
         recovery_policy=None,
@@ -81,6 +90,11 @@ class RuntimeSession(object):
         clock=None,
         sleeper=None,
         driver=None,
+        listener_protocol="mixed",
+        log_sink=None,
+        preferred_port=None,
+        strict_port=False,
+        bind_address="127.0.0.1",
     ):
         self.paths = paths
         self.manager = manager or BackendManager(paths)
@@ -91,11 +105,36 @@ class RuntimeSession(object):
         if not isinstance(self.driver, RuntimeDriver):
             raise TypeError("driver must implement RuntimeDriver")
         self.backend_version = backend_version or QUALIFIED_VERSION
+        if listener_protocol not in LISTENER_PROTOCOLS:
+            raise ValueError("unsupported local proxy protocol")
+        self.listener_protocol = listener_protocol
+        if bind_address not in LISTENER_ADDRESSES:
+            raise ValueError("unsupported listener bind address")
+        self.bind_address = bind_address
+        if preferred_port is not None and (
+            not isinstance(preferred_port, int)
+            or isinstance(preferred_port, bool)
+            or not 1 <= preferred_port <= 65535
+        ):
+            raise ValueError("preferred port is outside the TCP port range")
+        if not isinstance(strict_port, bool):
+            raise ValueError("strict_port must be a boolean")
+        self.preferred_port = preferred_port
+        self.strict_port = strict_port
         self.relay = relay
         self.relay_url = relay_url
         self.relay_pattern = relay_pattern
         self.log_level = log_level
-        self.backend_log_level = backend_log_level
+        self.backend_log_level = str(backend_log_level).upper()
+        if not isinstance(authenticate, bool):
+            raise ValueError("authenticate must be a boolean")
+        self.authenticate = authenticate
+        self.log_level = str(log_level).upper()
+        if self.log_level not in _LOG_LEVELS:
+            raise ValueError("unsupported JerryProxy log level")
+        if self.backend_log_level not in ("OFF", "DEBUG", "INFO", "WARN", "ERROR"):
+            raise ValueError("unsupported backend log level")
+        self.log_sink = log_sink
         self.session_id = session_id or secrets.token_hex(16)
         self.session_root = self.paths.leases / self.session_id
         # Mihomo's safe-path policy permits file providers only below its
@@ -105,7 +144,10 @@ class RuntimeSession(object):
         self.config_path = self.session_root / "config.yaml"
         self.access_path = self.session_root / "access.json"
         self.access_staging_path = self.session_root / ".access.pending.json"
-        self.log_path = self.paths.logs / ("runtime-%s.log" % self.session_id)
+        # Keep UTC startup time in the filename while retaining the session id
+        # to avoid collisions when sessions start within the same second.
+        started_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.log_path = self.paths.logs / ("runtime-%s-%s.log" % (started_at, self.session_id))
         self.port = None
         self.username = None
         self.password = None
@@ -114,7 +156,7 @@ class RuntimeSession(object):
         self.node = None
         self.subscription = None
         self.preference_node_id = None
-        self.health_probe = health_probe or ConnectivityProbe()
+        self.health_probe = health_probe or ConnectivityProbe(protocol=listener_protocol)
         self.recovery_policy = recovery_policy or RecoveryPolicy()
         self.clock = clock or time.monotonic
         self.sleeper = sleeper or time.sleep
@@ -122,6 +164,53 @@ class RuntimeSession(object):
         self._next_health_at = None
         self._cooldowns = {}
         self._operation_lock = None
+        self._log_file_lock = threading.Lock()
+        self._log_errors = []
+        self.last_health = None
+        self._startup_health_failure_logged = False
+
+    def _append_log_line(self, source, level, message):
+        safe = redact_text(" ".join(str(message).split()))[:4096]
+        if not safe:
+            return
+        if source == "jerryproxy":
+            line = ("[%s] %s\n" % (level, safe)).encode("utf-8", "replace")
+        else:
+            line = ("[%s] %s\n" % (source, safe)).encode("utf-8", "replace")
+        descriptor = -1
+        try:
+            with self._log_file_lock:
+                _ensure_extension_directory(self.log_path.parent)
+                if is_path_alias(self.log_path):
+                    raise RuntimeSessionError("runtime log path is aliased")
+                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(str(self.log_path), flags, 0o600)
+                status = os.fstat(descriptor)
+                if not stat.S_ISREG(status.st_mode):
+                    raise RuntimeSessionError("runtime log path is not a regular file")
+                if os.name == "posix" and stat.S_IMODE(status.st_mode) != 0o600:
+                    raise RuntimeSessionError("runtime log path has unsafe permissions")
+                if status.st_size < MAXIMUM_LOG_BYTES:
+                    os.write(descriptor, line[: MAXIMUM_LOG_BYTES - status.st_size])
+        except (OSError, RuntimeSessionError, ValueError) as error:
+            # Logging must not interrupt proxy service; retain a bounded error.
+            if len(self._log_errors) < 8:
+                self._log_errors.append(redact_text(error)[:1024])
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+
+    def _log(self, level, message):
+        normalized = str(level).upper()
+        if normalized not in _LOG_LEVELS or _LOG_LEVELS[normalized] < _LOG_LEVELS[self.log_level]:
+            return
+        self._append_log_line("jerryproxy", normalized, message)
+        if self.log_sink is not None:
+            try:
+                self.log_sink("jerryproxy", normalized, redact_text(message))
+            except (OSError, ValueError):
+                # The caller's terminal may close while the foreground child runs.
+                pass
 
     def _enter_operation_lock(self):
         """Own the home-wide lock for the complete foreground session."""
@@ -179,19 +268,26 @@ class RuntimeSession(object):
                 raise RuntimeSessionError("runtime path is aliased")
 
     def _write_access(self):
-        self.username = _token_urlsafe(16)
-        self.password = _token_urlsafe(32)
+        if self.authenticate:
+            self.username = _token_urlsafe(16)
+            self.password = _token_urlsafe(32)
+        else:
+            self.username = None
+            self.password = None
         value = {
             "session": self.session_id,
             "backend": self.driver.name,
             "backend_version": self.backend_version,
             "controller": None,
+            "authentication": self.authenticate,
             "listeners": [
                 {
-                    "kind": "mixed",
-                    "address": "127.0.0.1",
+                    "kind": self.listener_protocol,
+                    "protocol": self.listener_protocol,
+                    "address": self.bind_address,
                     "port": self.port,
                     "primary": True,
+                    "authentication": self.authenticate,
                     "username": self.username,
                     "password": self.password,
                 }
@@ -221,6 +317,9 @@ class RuntimeSession(object):
             self.port,
             self.username,
             self.password,
+            listener_protocol=self.listener_protocol,
+            backend_log_level=self.backend_log_level,
+            bind_address=self.bind_address,
         )
         if projection.provider is not None:
             _private_bytes(self.provider_path, projection.provider, boundary=self.session_root)
@@ -277,12 +376,17 @@ class RuntimeSession(object):
         self.node = node
         self._write_projection()
         try:
+            process_options = {
+                "backend_log_level": self.backend_log_level,
+            }
+            if self.log_sink is not None:
+                process_options["log_sink"] = self.log_sink
             self.process = self.driver.create_process(
                 self.executable,
                 self.config_path,
                 self.session_root,
                 self.log_path,
-                backend_log_level=self.backend_log_level,
+                **process_options
             )
             self.process.start()
             if deadline is not None:
@@ -299,7 +403,7 @@ class RuntimeSession(object):
             raise RuntimeSessionError("mihomo backend candidate failed to start") from error
 
     def _check_health(self, deadline=None):
-        if self.port is None or self.username is None or self.password is None:
+        if self.port is None:
             raise RuntimeSessionError("proxy listener is not configured")
         checker = getattr(self.health_probe, "check", None)
         if checker is None:
@@ -317,6 +421,31 @@ class RuntimeSession(object):
             raise RuntimeSessionError("proxy health probe returned an invalid result")
         return result
 
+    def _log_health(self, level, phase, snapshot, action=None):
+        """Render one sanitized health result and its next action."""
+
+        passed = int(getattr(snapshot, "passed", 0))
+        required = int(getattr(snapshot, "required", 0))
+        status = "passed" if bool(snapshot.ok) else "failed"
+        message = "%s health check %s (%d/%d targets passed)" % (
+            phase,
+            status,
+            passed,
+            required,
+        )
+        failed = []
+        for target in tuple(getattr(snapshot, "targets", ())):
+            if getattr(target, "ok", False):
+                continue
+            name = redact_text(getattr(target, "name", "target"))[:64]
+            detail = redact_text(getattr(target, "detail", "failed"))[:96] or "failed"
+            failed.append("%s:%s" % (name, detail))
+        if failed:
+            message += "; failed=%s" % ",".join(failed[:8])
+        if action:
+            message += "; next=%s" % redact_text(action)
+        self._log(level, message)
+
     def _startup_health(self, deadline=None):
         deadline = deadline or RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
         delays = tuple(self.recovery_policy.startup_retry_delays)
@@ -327,7 +456,26 @@ class RuntimeSession(object):
                 raise RuntimeSessionError("mihomo backend exited before health readiness")
             snapshot = self._check_health(deadline=deadline)
             if snapshot.ok:
+                self.last_health = snapshot
+                self._log_health("INFO", "startup", snapshot)
                 return snapshot
+            retrying = index + 1 < len(delays)
+            missing_socks = any(
+                getattr(target, "detail", "") == "socks_dependency_missing"
+                for target in tuple(getattr(snapshot, "targets", ()))
+            )
+            if missing_socks:
+                action = "install PySocks>=1.7.1 and retry the SOCKS5 server"
+            else:
+                action = "retrying current node" if retrying else "no startup retry remains; stopping session"
+            self._log_health(
+                "WARN" if retrying else "ERROR",
+                "startup",
+                snapshot,
+                action,
+            )
+            if not retrying:
+                self._startup_health_failure_logged = True
             if index + 1 < len(delays):
                 self._stop_process(deadline=deadline)
                 if deadline.remaining() <= 0:
@@ -344,7 +492,16 @@ class RuntimeSession(object):
             self.node = self._select_node(self.subscription, node_id)
             self.preference_node_id = self.node.node_id
             self._prepare_paths()
-            self.port = reserve_loopback_port()
+            self._log(
+                "INFO",
+                "starting backend %s %s with %s listener for node %s"
+                % (self.driver.name, self.backend_version, self.listener_protocol, self.node.node_id),
+            )
+            self.port = reserve_loopback_port(
+                preferred=self.preferred_port,
+                strict=self.strict_port,
+                bind_address=self.bind_address,
+            )
             self._write_access()
             self._resolve_executable(install_missing)
             startup_deadline = RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
@@ -353,9 +510,20 @@ class RuntimeSession(object):
             self._publish_access()
             self._next_health_at = self.clock() + self.recovery_policy.health_interval
             self._health_failures = 0
+            self._log(
+                "INFO",
+                "proxy listener ready at %s:%d using %s"
+                % (self.bind_address, self.port, self.listener_protocol),
+            )
         except (JerryProxyError, OSError) as error:
             # Startup failures must not leave a live child or secret-bearing
             # lease behind.  The original domain error remains user-visible.
+            if not self._startup_health_failure_logged:
+                self._log(
+                    "ERROR",
+                    "startup failed before a healthy listener was published; stopping session: %s"
+                    % redact_text(error),
+                )
             try:
                 self._stop_process()
                 _remove_private_tree(self.session_root)
@@ -431,6 +599,7 @@ class RuntimeSession(object):
 
         deadline = RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
         attempted = {self.node.node_id}
+        self._log("INFO", "health recovery action: restarting the current node")
 
         if not self._sleep_with_deadline(deadline, self.recovery_policy.same_node_delay):
             raise RuntimeSessionError("proxy recovery deadline exhausted")
@@ -440,6 +609,7 @@ class RuntimeSession(object):
         alternates = self._eligible_alternates(self.subscription, attempted)
         for index, candidate in enumerate(alternates):
             attempted.add(candidate.node_id)
+            self._log("INFO", "health recovery action: trying an alternate node")
             delay = self.recovery_policy.alternate_delays[0]
             if index != 0:
                 delay = self.recovery_policy.alternate_delays[-1]
@@ -451,6 +621,7 @@ class RuntimeSession(object):
         if self.recovery_policy.refresh_on_failure and self.subscription.source_url:
             if deadline.remaining() <= 0:
                 raise RuntimeSessionError("proxy recovery deadline exhausted")
+            self._log("INFO", "health recovery action: refreshing the subscription source")
             try:
                 refresh_locked = getattr(self.subscription_manager, "_refresh_locked", None)
                 if refresh_locked is not None:
@@ -487,8 +658,15 @@ class RuntimeSession(object):
             "session": self.session_id,
             "backend": self.driver.name,
             "backend_version": self.backend_version,
-            "listener": {"address": "127.0.0.1", "port": self.port, "kind": "mixed"},
+            "listener": {
+                "address": self.bind_address,
+                "port": self.port,
+                "kind": self.listener_protocol,
+                "protocol": self.listener_protocol,
+                "authentication": self.authenticate,
+            },
             "access_file": str(self.access_path),
+            "log_file": str(self.log_path),
             "subscription": self.subscription.name if self.subscription else None,
             "node": self.node.node_id if self.node else None,
             "preference_node": self.preference_node_id,
@@ -510,12 +688,39 @@ class RuntimeSession(object):
                 if now >= next_health:
                     snapshot = self._check_health()
                     if snapshot.ok:
+                        self._log_health(
+                            "INFO",
+                            "periodic",
+                            snapshot,
+                            "continuing the current node" if self._health_failures else None,
+                        )
                         self._health_failures = 0
                     else:
                         self._health_failures += 1
                         if self._health_failures >= 2:
-                            self._recover()
+                            self._log_health(
+                                "ERROR",
+                                "periodic",
+                                snapshot,
+                                "starting recovery: restart current node, try alternates, then refresh if permitted",
+                            )
+                            try:
+                                self._recover()
+                            except RuntimeSessionError as error:
+                                self._log(
+                                    "ERROR",
+                                    "health recovery action failed; stopping session: %s" % redact_text(error),
+                                )
+                                raise
+                            self._log("INFO", "health recovery action completed; continuing the foreground session")
                             self._health_failures = 0
+                        else:
+                            self._log_health(
+                                "WARN",
+                                "periodic",
+                                snapshot,
+                                "one more failed check will start recovery",
+                            )
                     next_health = self.clock() + self.recovery_policy.health_interval
                     self._next_health_at = next_health
                 self.sleeper(min(0.2, max(0.01, next_health - self.clock())))

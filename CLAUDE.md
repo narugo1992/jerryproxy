@@ -23,7 +23,8 @@ The canonical technical identifiers are all `jerryproxy`:
 The backend version manager, official release resolution, verified downloads,
 safe extraction, manifests, active-link switching, bounded
 `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS/VMess/VLESS URI lines, and a
-Mihomo `1.19.29` authenticated foreground session now exist. The session keeps
+Mihomo `1.19.29` foreground session now exist. The listener is loopback-only
+and open by default; authentication is explicit opt-in. The session keeps
 subscription state below `JERRYPROXY_HOME`, probes the global health quorum,
 restarts the current node once, sweeps deterministic alternates, and may refresh
 the retained source once without rewriting the saved preference. Native profiles,
@@ -244,6 +245,23 @@ authentication, extraction, process, or permission errors to warnings.
   modules must not import either CLI framework. Define each public leaf callback
   in its same-named module and each command-group callback in that group's
   `__init__.py`; package initializers only assemble their direct children.
+- Every new CLI family must provide two deliberate entry modes. A short or
+  incomplete command may enter an `InquirerPy` guided TUI only when stdin and
+  stdout are real TTYs; the TUI must select from manager-owned, credential-free
+  records and then invoke the same public operation as the explicit form.
+  Complete command-line options must execute deterministically without prompts.
+  JSON output, redirected/non-TTY execution, and `-y/--yes` must reject missing
+  required targets rather than guessing a subscription, node, backend, version,
+  or cleanup scope. `-y/--yes` bypasses confirmation only; it never selects a
+  target. Help text and tests must document and verify both modes.
+- Source-ingestion commands must make the source method explicit in guided
+  mode: offer matching environment variables, direct secret input, a bounded
+  file source, and bounded stdin where the command supports them. Discover
+  environment names from the current process using narrow subscription-related
+  keyword patterns, show names and set/hidden status only, and provide
+  completion for custom environment-name input. Never print or log the bearer
+  value. Review every new CLI interaction for discoverability, safe defaults,
+  compact labels, keyboard flow, and parity between guided and explicit forms.
 - Keep private cross-command helpers inside `jerryproxy/cli/` in clearly private
   modules such as `_common.py` and `_completion.py`. Leaf modules own their
   command-specific behavior; do not recreate a monolithic dispatcher or expose
@@ -274,6 +292,11 @@ authentication, extraction, process, or permission errors to warnings.
 - Subscription URLs are bearer credentials. Never print them or pass them on a
   command line. Redact URL userinfo, queries, fragments, UUIDs, passwords,
   public keys, and short IDs from captured backend output.
+- The local proxy listener is loopback-only and has no authentication by
+  default. `server --auth` is explicit opt-in; its one-time human startup
+  guide may print the generated local username, password, and proxy URL, while
+  JSON output and persistent JerryProxy/backend logs must not contain those
+  credentials. Controller endpoints still use a random private secret.
 - Controller endpoints bind to loopback or private local IPC and use a random
   private secret.
 - Do not commit real subscriptions, backend caches, generated configs, runtime
@@ -303,8 +326,8 @@ authentication, extraction, process, or permission errors to warnings.
   the runtime session or duplicate credential-bearing node models. A future
   single-node input must implement `NodeSource` rather than create a second
   runtime selection path.
-- `jerryproxy.runtime` owns the current Mihomo projection, authenticated
-  loopback listener, backend stream separation, connectivity quorum, and the
+- `jerryproxy.runtime` owns the current Mihomo projection, loopback listener,
+  one merged named backend output stream, connectivity quorum, and the
   bounded foreground recovery policy. Future runtime drivers own other cores,
   native profiles, and backend control APIs.
 - `jerryproxy.runtime.interfaces` owns the `RuntimeDriver` and
@@ -517,6 +540,21 @@ force regeneration and fail when tracked or untracked generated output differs.
 - Keep current behavior and roadmap items separate.
 - Every public command, state file, environment variable, and security default
   needs documentation before stable release.
+- Foreground `server` startup guidance is emitted through the same structured
+  JerryProxy log path as runtime events. Human mode uses Rich styling to make
+  the proxy URL, environment variables, endpoint, and explicit authentication
+  details conspicuous; it must not use ad-hoc direct printing for those lines.
+  Human startup prints one readiness summary, one proxy URL, and a compact
+  multi-line shell guide. `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` must
+  contain the same URL, including a `socks5h` URL for a SOCKS5 listener. Do not
+  print access-file or log-file paths in that guide; runtime log filenames
+  include the UTC startup timestamp to the second plus a unique session id.
+  Rich console width must be detected from the active terminal or pipe; do not
+  hard-code a display width. Keep the guide as one multi-line log record so
+  its lines do not repeat a log prefix, while runtime events remain one record
+  per event. JerryProxy-owned records have no owner prefix; backend records use
+  the backend name (`[mihomo]`, `[v2ray]`, and so on) and merge stdout/stderr
+  into that one owner stream.
 - Generated Python API pages are part of the English Sphinx toctree and must
   remain reproducible through `make rst_auto`.
 - Do not use copied Tom and Jerry artwork. Any mouse/cheese visual identity
