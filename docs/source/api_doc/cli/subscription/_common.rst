@@ -63,6 +63,12 @@ read\_bounded\_stdin
 .. autofunction:: read_bounded_stdin
 
 
+read\_bounded\_file
+-----------------------------------------------------
+
+.. autofunction:: read_bounded_file
+
+
 read\_url\_stdin
 -----------------------------------------------------
 
