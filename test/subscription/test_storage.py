@@ -204,6 +204,21 @@ def test_default_remote_fetch_uses_the_bounded_worker_boundary(tmp_path, monkeyp
     assert not tuple(paths.runtimes.glob(".subscription-fetch-*"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink creation may require elevated privileges")
+def test_default_remote_fetch_rejects_an_aliased_runtime_root(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    paths.root.mkdir()
+    paths.runtimes.symlink_to(outside, target_is_directory=True)
+    manager = SubscriptionManager(paths)
+
+    with pytest.raises(IntegrityError, match="must not be a symlink"):
+        manager._fetch_remote("https://provider.example/sub", False, "uri-lines")
+
+    assert not tuple(outside.iterdir())
+
+
 def test_worker_cleanup_failure_is_reported_after_a_successful_fetch(tmp_path, monkeypatch):
     paths = JerryProxyPaths(tmp_path / ".jerryproxy")
     manager = SubscriptionManager(paths)

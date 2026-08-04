@@ -87,6 +87,12 @@ def _reject_duplicate_json_keys(pairs):  # type: (list) -> dict
     return value
 
 
+def _reject_nonfinite_json_constant(value):  # type: (str) -> None
+    """Reject JSON extensions that are not valid interoperable numbers."""
+
+    raise SubscriptionParseError("vmess URI contains a non-standard JSON number: %s" % value)
+
+
 class _PinnedConnectionMixin(object):
     """Connect only to the address set validated immediately before a request."""
 
@@ -499,6 +505,7 @@ def _validate_vmess_uri(uri):  # type: (str) -> None
         value = json.loads(
             decoded.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
         )
     except (UnicodeDecodeError, ValueError, RecursionError) as error:
         # JSON and UTF-8 errors identify malformed VMess envelopes.

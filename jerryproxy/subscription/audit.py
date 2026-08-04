@@ -36,7 +36,9 @@ _FIELD_DISPOSITION_MANIFEST = {
             "password": "preserve",
             "server": "preserve",
             "port": "preserve",
-            "fragment": "reject",
+            # URI fragments are local node labels; they are never sent in the
+            # request target and are retained only as opaque source material.
+            "fragment": "preserve",
         },
         "vmess": {
             "add": "preserve",
@@ -47,7 +49,7 @@ _FIELD_DISPOSITION_MANIFEST = {
             "net": "preserve",
             "tls": "preserve",
             "ps": "replace",
-            "fragment": "reject",
+            "fragment": "preserve",
         },
         "vless": {
             "uuid": "preserve",
@@ -60,7 +62,7 @@ _FIELD_DISPOSITION_MANIFEST = {
             "pbk": "preserve",
             "sid": "preserve",
             "flow": "preserve",
-            "fragment": "reject",
+            "fragment": "preserve",
         },
     },
     "provider": {

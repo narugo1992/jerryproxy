@@ -103,7 +103,7 @@ def _prompt_source():  # type: () -> tuple
         file_path = cli_common.prompt_text("Subscription body file:")
         path = Path(file_path)
         try:
-            body = path.read_bytes()
+            body = read_bounded_file(path, MAXIMUM_BODY_BYTES)
         except OSError as error:
             # Source file failures are user-visible input failures.
             raise click.UsageError("cannot read subscription source file") from error
@@ -159,6 +159,21 @@ def read_bounded_stdin(maximum_bytes):  # type: (int) -> bytes
     return data
 
 
+def read_bounded_file(path, maximum_bytes):  # type: (Path, int) -> bytes
+    """Read a file in bounded chunks, retaining at most one overflow byte."""
+
+    chunks = []
+    remaining = maximum_bytes + 1
+    with path.open("rb") as source:
+        while remaining:
+            chunk = source.read(min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def read_url_stdin():  # type: () -> str
     maximum = 16 * 1024
     data = sys.stdin.buffer.readline(maximum + 2)
@@ -194,7 +209,7 @@ def read_source(url_env, file_path, body_stdin, url_stdin, interactive=True):
     if file_path is not None:
         file_path = Path(file_path)
         try:
-            body = file_path.read_bytes()
+            body = read_bounded_file(file_path, MAXIMUM_BODY_BYTES)
         except OSError as error:
             # Source file failures are user-visible input failures.
             raise click.UsageError("cannot read subscription source file") from error

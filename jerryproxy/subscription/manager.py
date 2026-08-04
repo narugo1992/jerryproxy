@@ -258,7 +258,9 @@ class SubscriptionManager(object):
         ):
             return fetch_subscription(source_url, session=self.session, allow_http=allow_http)
         runtime_root = self.paths.runtimes
-        runtime_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Worker artifacts are managed state; reject symlink/reparse aliases
+        # before creating or traversing the runtime namespace.
+        self.paths._ensure_directory(runtime_root, reject_alias=True)
         temporary = tempfile.mkdtemp(prefix=".subscription-fetch-", dir=str(runtime_root))
         result_path = os.path.join(temporary, "result.json")
         process = None
