@@ -62,6 +62,13 @@ SUPPORTED\_SCHEMES
    :no-value:
 
 
+MIHOMO\_SUBSCRIPTION\_PARSER
+-----------------------------------------------------
+
+.. autodata:: MIHOMO_SUBSCRIPTION_PARSER
+   :no-value:
+
+
 DEFAULT\_SUBSCRIPTION\_PARSER
 -----------------------------------------------------
 
@@ -81,6 +88,13 @@ V2RaySubscriptionParser
 
 .. autoclass:: V2RaySubscriptionParser
    :members: name,parse
+
+
+MihomoSubscriptionParser
+-----------------------------------------------------
+
+.. autoclass:: MihomoSubscriptionParser
+   :members: name,backend,backend_version,source_parser,identity,parse
 
 
 validate\_source\_url

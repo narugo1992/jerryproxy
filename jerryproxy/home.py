@@ -183,14 +183,16 @@ class JerryProxyPaths(object):
                 )
             self._validate_private_mode(path, 0o700)
 
-        if os.path.lexists(str(self.lock_file)):
-            if not self.lock_file.is_file() or is_path_alias(self.lock_file):
-                raise IntegrityError(
-                    "managed JerryProxy lock file is invalid or aliased: %s" % self.lock_file
-                )
-            self._validate_private_mode(self.lock_file, 0o600)
-        elif os.name != "nt":
+        if not os.path.lexists(str(self.lock_file)):
+            # A complete managed home must retain its authoritative lock file
+            # on every platform.  Read-only access must not create one through
+            # a partially initialized or externally modified home.
             raise IntegrityError("JerryProxy home is incomplete: %s" % self.root)
+        if not self.lock_file.is_file() or is_path_alias(self.lock_file):
+            raise IntegrityError(
+                "managed JerryProxy lock file is invalid or aliased: %s" % self.lock_file
+            )
+        self._validate_private_mode(self.lock_file, 0o600)
         return True
 
     def _ensure_layout_locked(self):  # type: () -> None

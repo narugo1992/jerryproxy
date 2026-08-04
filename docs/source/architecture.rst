@@ -26,13 +26,22 @@ JerryProxy separates backend distribution from backend runtime behavior:
           └── V2RayDriver (planned)
 
 The first Mihomo runtime slice is implemented for Base64/plain SS, VMess, and
-VLESS URI lines. It writes a private file provider below the session's Mihomo
-safe path, exposes one loopback listener (open by default, with explicit
-optional authentication), and performs a global health quorum with
-deterministic restart/failover and one policy-controlled source refresh. Xray,
-V2Ray, and sing-box runtime drivers remain
-optional compatibility work; all four binaries can already be installed and
+VLESS URI lines from the exact ``V2RAY_SUBSCRIPTION`` source format. It writes a
+private file provider below the session's Mihomo safe path, exposes an open
+loopback listener on ``127.0.0.1`` by default, and performs a global health
+quorum with deterministic restart/failover and one policy-controlled source
+refresh. ``server --auth`` enables generated local credentials and
+``server --bind-all`` explicitly selects ``0.0.0.0``. Xray, V2Ray, and sing-box
+runtime drivers remain optional compatibility work; all four binaries can already be installed and
 version-switched by the generic manager.
+
+When the exact Mihomo release is absent, ``server`` bootstraps it automatically
+by default. A guided terminal asks for confirmation with Yes as the default;
+``-y/--yes`` accepts the bootstrap without prompting and
+``--no-install-missing`` disables it. Backend stdout/stderr are merged into one
+bounded live stream, redacted, and logged with the core name (for example
+``[mihomo]``), without a stdout/stderr distinction; the backend log level
+defaults to ``INFO``.
 
 Catalog maintenance is intentionally outside this runtime graph. The
 repository-only ``tools.backend_catalog`` module reads official release

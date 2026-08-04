@@ -8,9 +8,10 @@ home directory all use the same name: `jerryproxy`.
 > **Work in progress:** the first runtime slice is implemented: bounded
 > `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, and VLESS URI
 > lines, sanitized home-local state, and a synchronous Mihomo 1.19.29
-> foreground server with bounded health diagnostics. The listener is open on
-> loopback by default; `--auth` is an explicit opt-in. Native profiles, other
-> core drivers, and the historical `v2raycli` compatibility layer remain
+> foreground server with bounded health diagnostics. The CLI binds an open
+> listener to `127.0.0.1` by default; `--auth` enables generated local
+> credentials and `--bind-all` explicitly selects `0.0.0.0`. Native profiles,
+> other core drivers, and the historical `v2raycli` compatibility layer remain
 > planned.
 
 ## Current status
@@ -48,10 +49,10 @@ Implemented now:
   integrity-checked availability probes for the three built-in relays;
 - bounded `V2RAY_SUBSCRIPTION` source ingestion with private state below
   `JERRYPROXY_HOME`, stable sanitized node IDs, and SS/VMess/VLESS URI support;
-- a synchronous Mihomo 1.19.29 foreground server with an unauthenticated
-  loopback listener by default, optional local authentication, one merged
-  live redacted backend output stream labeled by core name (for example
-  `[mihomo]`) with no stdout/stderr split, and bounded health diagnostics;
+- a synchronous Mihomo 1.19.29 foreground server with an open loopback
+  listener by default, one merged bounded live backend output stream labeled by
+  core name (for example `[mihomo]`) with no stdout/stderr split, and bounded
+  health diagnostics;
 - two-stage standalone validation that builds Linux in a pinned Python 3.7
   Docker image and executes every downloaded artifact in clean environments;
 - deterministic offline unit tests, Sphinx documentation, packaging checks,
@@ -464,12 +465,22 @@ export V2RAY_SUBSCRIPTION='https://provider.example/subscription'
 
 jerryproxy subscription add main --url-env V2RAY_SUBSCRIPTION
 jerryproxy node list main
-jerryproxy server --subscription main --node NODE_ID --install-missing -y
+jerryproxy server --subscription main --node NODE_ID
 ```
 
 `server` ensures the exact Mihomo backend exists, creates private state, loads
 the subscription without exposing its URL, reports the loopback HTTP/SOCKS
-endpoint, and keeps the process in the foreground. Two consecutive
+endpoint, and keeps the process in the foreground. If the exact backend is
+missing, installation is enabled by
+default; guided confirmation defaults to **Yes** (press Enter), while `-y`
+accepts it without prompting and `--no-install-missing` disables bootstrap.
+The listener is open on loopback by default; `--auth` adds generated local
+credentials and `--bind-all` selects `0.0.0.0`. The same proxy URL is placed in
+`HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` by the human startup guide; a
+SOCKS5 listener uses a `socks5h` URL. Backend stdout/stderr are merged into one
+bounded live stream, redacted, and labeled only with the backend name
+(`[mihomo]`), never separate stdout/stderr labels; `--backend-log-level`
+defaults to `INFO`. Two consecutive
 failed global health quorums trigger one same-node restart, deterministic
 alternate-node attempts, and one optional subscription refresh within the
 configured recovery deadline. Automatic recovery never rewrites the saved node

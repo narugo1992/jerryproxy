@@ -21,6 +21,7 @@ from urllib3.poolmanager import PoolManager
 from urllib3.util.connection import create_connection
 
 from ..errors import SubscriptionFetchError, SubscriptionParseError
+from .audit import MIHOMO_PARSER_IDENTITY
 from .interfaces import SubscriptionParser
 from .model import ParsedSubscription
 
@@ -582,7 +583,43 @@ class V2RaySubscriptionParser(SubscriptionParser):
         return _parse_v2ray_subscription_body(body, format_hint=format_hint)
 
 
-DEFAULT_SUBSCRIPTION_PARSER = V2RaySubscriptionParser()
+class MihomoSubscriptionParser(SubscriptionParser):
+    """Source-pinned Mihomo 1.19.29 adapter over the URI-line parser.
+
+    Mihomo consumes the resulting private provider projection; validation and
+    URI semantics remain owned by :class:`V2RaySubscriptionParser`.
+    """
+
+    @property
+    def name(self):  # type: () -> str
+        return "mihomo-1.19.29-v2ray-uri-lines"
+
+    @property
+    def backend(self):  # type: () -> str
+        return "mihomo"
+
+    @property
+    def backend_version(self):  # type: () -> str
+        return "1.19.29"
+
+    @property
+    def source_parser(self):  # type: () -> str
+        return "v2ray-uri-lines"
+
+    @property
+    def identity(self):  # type: () -> dict
+        return dict(MIHOMO_PARSER_IDENTITY)
+
+    def parse(self, body, format_hint="auto"):  # type: (bytes, str) -> ParsedSubscription
+        return _V2RAY_SUBSCRIPTION_PARSER.parse(body, format_hint=format_hint)
+
+
+_V2RAY_SUBSCRIPTION_PARSER = V2RaySubscriptionParser()
+MIHOMO_SUBSCRIPTION_PARSER = MihomoSubscriptionParser()
+# NodeSet ingestion is owned by the qualified Mihomo projection.  The adapter
+# delegates only the bounded URI-envelope validation; the provider bytes remain
+# opaque and are parsed again by Mihomo at runtime.
+DEFAULT_SUBSCRIPTION_PARSER = MIHOMO_SUBSCRIPTION_PARSER
 
 
 def parse_subscription_body(body, format_hint="auto"):

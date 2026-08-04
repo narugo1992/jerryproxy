@@ -16,7 +16,7 @@ from ..errors import SubscriptionError, SubscriptionFetchError, SubscriptionPars
 from ..lock import JerryProxyOperationLock
 from .interfaces import SubscriptionParser
 from .storage import SubscriptionStore, build_record, validate_subscription_name
-from .transport import DEFAULT_SUBSCRIPTION_PARSER, FetchedSubscription, fetch_subscription, validate_source_url
+from .transport import MIHOMO_SUBSCRIPTION_PARSER, FetchedSubscription, fetch_subscription, validate_source_url
 
 _DEFAULT_FETCH_SUBSCRIPTION = fetch_subscription
 _FETCH_WALL_SECONDS = 30.0
@@ -158,7 +158,7 @@ def _fetch_worker(url, result_path, allow_http, format_hint, start_gate, cancel_
         return
     try:
         fetched = fetch_subscription(url, allow_http=allow_http)
-        DEFAULT_SUBSCRIPTION_PARSER.parse(fetched.body, format_hint=format_hint)
+        MIHOMO_SUBSCRIPTION_PARSER.parse(fetched.body, format_hint=format_hint)
     except (SubscriptionFetchError, SubscriptionParseError, SubscriptionStateError, ValueError):
         # Transport failures are represented without carrying remote details.
         _write_fetch_result(result_path, {"error": "subscription source fetch failed", "ok": False})
@@ -230,7 +230,7 @@ class SubscriptionManager(object):
         # type: (JerryProxyPaths, object, Optional[SubscriptionParser]) -> None
         self.paths = paths
         self.session = session
-        self.parser = parser or DEFAULT_SUBSCRIPTION_PARSER
+        self.parser = parser or MIHOMO_SUBSCRIPTION_PARSER
         if not isinstance(self.parser, SubscriptionParser):
             raise TypeError("parser must implement SubscriptionParser")
         self.store = SubscriptionStore(paths, parser=self.parser)
@@ -254,7 +254,7 @@ class SubscriptionManager(object):
         if (
             self.session is not None
             or fetch_subscription is not _DEFAULT_FETCH_SUBSCRIPTION
-            or self.parser is not DEFAULT_SUBSCRIPTION_PARSER
+            or self.parser is not MIHOMO_SUBSCRIPTION_PARSER
         ):
             return fetch_subscription(source_url, session=self.session, allow_http=allow_http)
         runtime_root = self.paths.runtimes

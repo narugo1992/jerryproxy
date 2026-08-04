@@ -75,7 +75,7 @@ def _select_interactive_port(bind_address="127.0.0.1"):  # type: (str) -> tuple
     return custom, True
 
 
-_HELP = """Run one local loopback proxy synchronously in the foreground.
+_HELP = """Run one local proxy synchronously in the foreground.
 
 The server command selects one stored subscription and one explicit node, then
 launches the exact Mihomo backend through BackendManager. It never changes the
@@ -115,21 +115,20 @@ NODE_ID`. JSONL output and `-y/--yes` never infer missing targets; they fail
 with a usage error instead. Selection labels contain only subscription format,
 node count, node scheme, endpoint display, and the stable node ID.
 
-The listener defaults to an unauthenticated mixed proxy on `127.0.0.1`; use
-`--protocol` to select mixed, HTTP, or SOCKS5, `--auth` for generated local
+The listener is an open mixed proxy on `127.0.0.1` by default; use `--protocol`
+to select mixed, HTTP, or SOCKS5, `--auth` to opt into generated local
 credentials, and `--bind-all` only when LAN exposure is intentional. JerryProxy
-messages have no owner prefix; backend output is merged into one stream and
-each backend line is labeled only with the core name (`[mihomo]`, `[v2ray]`,
-and so on). The stream never distinguishes the child's original stdout and
-stderr. Backend lines are forwarded live only after terminal-safety handling
-and credential redaction; the backend name is the sole owner label.
+messages have no owner prefix. Backend stdout and stderr are merged before one
+bounded line stream is redacted, persisted, and forwarded live; only the
+backend name is shown (`[mihomo]`, `[v2ray]`, and so on), never the original
+stream name.
 
 Human startup output is emitted through the JerryProxy log stream as one
 readable readiness summary, one copyable proxy URL, and a short
 environment-variable guide. The private runtime log filename contains its UTC
 start time to the second. The same URL is assigned to `HTTP_PROXY`,
-`HTTPS_PROXY`, and `ALL_PROXY`; credentials are included in that guide only
-when `--auth` is enabled.
+`HTTPS_PROXY`, and `ALL_PROXY`; generated local credentials are included in
+that guide only when `--auth` is enabled.
 """
 
 
@@ -171,12 +170,12 @@ when `--auth` is enabled.
     "authenticate",
     default=False,
     show_default=True,
-    help="Require generated local proxy credentials; default is an open loopback listener.",
+    help="Require generated local credentials; open proxy access is the default.",
 )
 @click.option(
     "--bind-all",
     is_flag=True,
-    help="Bind the listener to 0.0.0.0 and allow LAN access; combine with --auth on untrusted networks.",
+    help="Bind 0.0.0.0 for LAN access; use --auth when exposing the listener.",
 )
 @click.option(
     "--install-missing/--no-install-missing",
@@ -190,7 +189,7 @@ when `--auth` is enabled.
     type=click.Choice(["OFF", "DEBUG", "INFO", "WARN", "ERROR"]),
     default="INFO",
     show_default=True,
-    help="Set backend verbosity; merged backend lines are forwarded live after redaction, or suppressed with OFF.",
+    help="Set backend verbosity; stdout/stderr remain one live redacted stream unless OFF.",
 )
 @click.option("--log-format", type=click.Choice(["human", "jsonl"]), default="human", show_default=True)
 @click.option(
@@ -323,7 +322,15 @@ def server_command(
             rich_tracebacks=False,
         )
 
-    def log_sink(source, level, message, emphasize=False, preserve_local_auth=False, multiline=False):
+    def log_sink(
+        source,
+        level,
+        message,
+        emphasize=False,
+        preserve_local_auth=False,
+        multiline=False,
+        **event_fields
+    ):
         if source == "jerryproxy" and _LOG_PRIORITIES[level] < _LOG_PRIORITIES[log_level]:
             return
         if log_format == "jsonl":
@@ -411,7 +418,7 @@ def server_command(
         info.pop("access_file", None)
         info.pop("log_file", None)
         if bind_all:
-            startup_warning("listener is exposed on all interfaces; use --auth on untrusted networks")
+            startup_warning("Listener is exposed on all interfaces; use --auth on untrusted networks.")
         if log_format == "jsonl":
             click.echo(json.dumps({"event": "session.ready", "data": info}, sort_keys=True, separators=(",", ":")))
         else:

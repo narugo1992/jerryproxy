@@ -66,7 +66,7 @@ def _parse_timestamp(value):  # type: (str) -> datetime
 
 
 class RuntimeSession(object):
-    """One foreground Mihomo session with optional authentication and recovery.
+    """One foreground Mihomo session with bounded recovery.
 
     Automatic recovery is intentionally in-memory.  The user's selected node
     remains the saved preference; a successful failover changes only this

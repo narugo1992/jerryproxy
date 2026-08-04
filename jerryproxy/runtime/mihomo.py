@@ -1,6 +1,7 @@
 """Mihomo 1.19.29 foreground projection for an opaque NodeSet."""
 
 import base64
+import json
 import os
 import signal
 import socket
@@ -170,9 +171,8 @@ def build_provider_config(
         raise ValueError("unsupported Mihomo listener protocol")
     if bind_address not in LISTENER_ADDRESSES:
         raise ValueError("unsupported listener bind address")
-    if username is not None or password is not None:
-        if username is None or password is None:
-            raise ValueError("proxy authentication requires both username and password")
+    if (username is None) != (password is None):
+        raise ValueError("proxy authentication requires both username and password")
     # The provider body remains opaque and is parsed by Mihomo 1.19.29.  The
     # generated projection contains no controller or secondary network source.
     escaped_path = str(provider_path).replace("\\", "/").replace("'", "''")
@@ -342,6 +342,76 @@ def _windows_system_root():  # type: () -> str
     return ""
 
 
+def _windows_create_job():  # type: () -> object
+    """Create a kill-on-close Job Object, or return None when unavailable."""
+
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimit(ctypes.Structure):
+            # JOBOBJECT_BASIC_LIMIT_INFORMATION is ordered exactly as the
+            # native ABI; flags is the final DWORD, not the first field.
+            _fields_ = [
+                ("per_process_user_time_limit", ctypes.c_longlong),
+                ("per_job_user_time_limit", ctypes.c_longlong),
+                ("limit_flags", wintypes.DWORD),
+                ("minimum_working_set", ctypes.c_size_t),
+                ("maximum_working_set", ctypes.c_size_t),
+                ("active_process_limit", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t),
+                ("priority", wintypes.DWORD),
+                ("scheduling_class", wintypes.DWORD),
+            ]
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in
+                        ("read_ops", "write_ops", "other_ops", "read_bytes", "write_bytes", "other_bytes")]
+        class ExtendedLimit(ctypes.Structure):
+            _fields_ = [("basic", BasicLimit), ("io", IoCounters), ("process_memory", ctypes.c_size_t),
+                        ("job_memory", ctypes.c_size_t), ("peak_process_memory", ctypes.c_size_t),
+                        ("peak_job_memory", ctypes.c_size_t)]
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            return None
+        limits = ExtendedLimit()
+        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION.
+        limits.basic.limit_flags = 0x2000
+        if not kernel32.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            kernel32.CloseHandle(handle)
+            return None
+        return handle
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Native APIs may be absent or blocked by the host policy.
+        return None
+
+
+def _windows_assign_job(handle, process_handle):  # type: (object, object) -> bool
+    if os.name != "nt" or handle is None:
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.kernel32.AssignProcessToJobObject(handle, process_handle))
+    except (AttributeError, OSError, TypeError):
+        return False
+
+
+def _windows_close_job(handle):  # type: (object) -> None
+    if handle is None or os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, TypeError):
+        pass
+
+
 def _linux_listener_inodes(port, address):  # type: (int, str) -> object
     """Return LISTEN socket inodes for one IPv4 port from procfs."""
 
@@ -400,7 +470,7 @@ def _linux_process_socket_inodes(pid):  # type: (int) -> object
 
 
 def _listener_owned_by_linux_process(process, port, address):  # type: (object, int, str) -> object
-    pid = getattr(process, "pid", None)
+    pid = getattr(process, "backend_pid", None) or getattr(process, "pid", None)
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     listener_inodes = _linux_listener_inodes(port, address)
@@ -411,7 +481,7 @@ def _listener_owned_by_linux_process(process, port, address):  # type: (object, 
 
 
 def _listener_owned_by_macos_process(process, port, address):  # type: (object, int, str) -> object
-    pid = getattr(process, "pid", None)
+    pid = getattr(process, "backend_pid", None) or getattr(process, "pid", None)
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     executable = None
@@ -460,7 +530,7 @@ def _listener_owned_by_macos_process(process, port, address):  # type: (object, 
 def _listener_owned_by_windows_process(process, port, address):  # type: (object, int, str) -> object
     """Use GetExtendedTcpTable when the native Windows API is available."""
 
-    pid = getattr(process, "pid", None)
+    pid = getattr(process, "backend_pid", None) or getattr(process, "pid", None)
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     try:
@@ -534,8 +604,331 @@ def _listener_owned_by_process(process, port, address):  # type: (object, int, s
     return None
 
 
+def _linux_process_start_time(pid):  # type: (int) -> object
+    """Read procfs start time, which disambiguates a reused PID."""
+
+    try:
+        text = Path("/proc/%d/stat" % pid).read_text(encoding="ascii")
+        closing = text.rfind(")")
+        fields = text[closing + 2 :].split()
+        # The post-comm fields start at proc field 4, so field 22 is index 19.
+        return int(fields[19]) if len(fields) > 19 else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def _linux_process_parent(pid):  # type: (int) -> object
+    """Return a Linux process parent PID using the same robust stat parser."""
+
+    try:
+        text = Path("/proc/%d/stat" % pid).read_text(encoding="ascii")
+        closing = text.rfind(")")
+        fields = text[closing + 2 :].split()
+        # Proc field 4 (ppid) is index 1 after the comm field.
+        return int(fields[1]) if len(fields) > 1 else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def _linux_process_group(pid):  # type: (int) -> object
+    """Return the process-group ID from procfs without following aliases."""
+
+    try:
+        text = Path("/proc/%d/stat" % pid).read_text(encoding="ascii")
+        closing = text.rfind(")")
+        fields = text[closing + 2 :].split()
+        return int(fields[2]) if len(fields) > 2 else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def _linux_process_session(pid):  # type: (int) -> object
+    """Return the process-session ID from procfs without following aliases."""
+
+    try:
+        text = Path("/proc/%d/stat" % pid).read_text(encoding="ascii")
+        closing = text.rfind(")")
+        fields = text[closing + 2 :].split()
+        return int(fields[3]) if len(fields) > 3 else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def _macos_process_info(pid):  # type: (int) -> object
+    """Return ``(ppid, pgid, sid, start_token)`` from the fixed system ps."""
+
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "ppid=,pgid=,sid=,lstart=", "-p", str(pid)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=0.5,
+        )
+        fields = result.stdout.decode("ascii", "strict").strip().split(None, 3)
+        if len(fields) != 4:
+            return None
+        return int(fields[0]), int(fields[1]), int(fields[2]), fields[3]
+    except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
+        # A missing or blocked system process table cannot authenticate a child.
+        return None
+
+
+def _posix_process_start_time(pid):  # type: (int) -> object
+    if sys.platform.startswith("linux"):
+        return _linux_process_start_time(pid)
+    information = _macos_process_info(pid)
+    return information[3] if information is not None else None
+
+
+def _posix_process_parent(pid):  # type: (int) -> object
+    if sys.platform.startswith("linux"):
+        return _linux_process_parent(pid)
+    information = _macos_process_info(pid)
+    return information[0] if information is not None else None
+
+
+def _posix_process_group(pid):  # type: (int) -> object
+    if sys.platform.startswith("linux"):
+        return _linux_process_group(pid)
+    information = _macos_process_info(pid)
+    return information[1] if information is not None else None
+
+
+def _posix_process_session(pid):  # type: (int) -> object
+    if sys.platform.startswith("linux"):
+        return _linux_process_session(pid)
+    information = _macos_process_info(pid)
+    return information[2] if information is not None else None
+
+
+def _posix_process_identity_matches(pid, start_time):  # type: (int, object) -> bool
+    if start_time is None:
+        return False
+    return _posix_process_start_time(pid) == start_time
+
+
+def _linux_process_group_members(pgid, session_id):  # type: (int, int) -> tuple
+    """Return current process IDs in one verified process group/session."""
+
+    if not sys.platform.startswith("linux"):
+        return ()
+    members = []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return ()
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if _linux_process_group(pid) == pgid and _linux_process_session(pid) == session_id:
+            members.append(pid)
+    return tuple(sorted(set(members)))
+
+
+def _windows_read_private_metadata(path, maximum):  # type: (Path, int) -> bytes
+    """Read metadata through a native Windows no-follow handle."""
+
+    if os.name != "nt":
+        raise RuntimeSessionError("Windows metadata reader is unavailable")
+    current = Path(path)
+    while True:
+        if is_path_alias(current):
+            raise RuntimeSessionError("mihomo guardian metadata path is aliased")
+        if current.parent == current:
+            break
+        current = current.parent
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        get_tag = kernel32.GetFileInformationByHandleEx
+        get_tag.argtypes = [wintypes.HANDLE, wintypes.INT, wintypes.LPVOID, wintypes.DWORD]
+        get_tag.restype = wintypes.BOOL
+        get_size = kernel32.GetFileSizeEx
+        get_size.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_longlong)]
+        get_size.restype = wintypes.BOOL
+        read_file = kernel32.ReadFile
+        read_file.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.LPVOID,
+        ]
+        read_file.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        class AttributeTagInfo(ctypes.Structure):
+            _fields_ = [("file_attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
+
+        invalid = ctypes.c_void_p(-1).value
+        flags = 0x00200000 | 0x02000000  # OPEN_REPARSE_POINT | BACKUP_SEMANTICS
+        handle = create_file(
+            str(Path(path)),
+            0x80000000,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            flags,
+            None,
+        )
+        handle_value = ctypes.cast(handle, ctypes.c_void_p).value
+        if handle_value in (None, invalid):
+            error = ctypes.get_last_error()
+            if error in (2, 3):
+                raise FileNotFoundError(error, "metadata file is not available")
+            raise RuntimeSessionError("mihomo guardian metadata could not be opened")
+        try:
+            before = AttributeTagInfo()
+            if not get_tag(handle, 9, ctypes.byref(before), ctypes.sizeof(before)):
+                raise RuntimeSessionError("mihomo guardian metadata attributes are unavailable")
+            if before.file_attributes & (0x10 | 0x400):
+                raise RuntimeSessionError("mihomo guardian metadata is a directory or reparse point")
+            size = ctypes.c_longlong()
+            if not get_size(handle, ctypes.byref(size)):
+                raise RuntimeSessionError("mihomo guardian metadata size is unavailable")
+            if size.value < 0 or size.value > maximum:
+                raise RuntimeSessionError("mihomo guardian metadata is oversized")
+            chunks = []
+            remaining = int(size.value)
+            while remaining:
+                amount = min(65536, remaining)
+                buffer = ctypes.create_string_buffer(amount)
+                read = wintypes.DWORD()
+                if not read_file(handle, buffer, amount, ctypes.byref(read), None):
+                    raise RuntimeSessionError("mihomo guardian metadata read failed")
+                if read.value <= 0:
+                    raise RuntimeSessionError("mihomo guardian metadata ended early")
+                chunks.append(buffer.raw[: read.value])
+                remaining -= int(read.value)
+            after = AttributeTagInfo()
+            if not get_tag(handle, 9, ctypes.byref(after), ctypes.sizeof(after)):
+                raise RuntimeSessionError("mihomo guardian metadata attributes changed")
+            if (before.file_attributes, before.reparse_tag) != (after.file_attributes, after.reparse_tag):
+                raise RuntimeSessionError("mihomo guardian metadata changed while being read")
+            value = b"".join(chunks)
+            if len(value) != int(size.value):
+                raise RuntimeSessionError("mihomo guardian metadata changed while being read")
+            return value
+        finally:
+            close_handle(handle)
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        # Missing files remain retryable; native API failures are terminal.
+        if isinstance(error, FileNotFoundError):
+            raise
+        raise RuntimeSessionError("mihomo guardian metadata native read failed") from error
+
+
+def _read_private_metadata(path, maximum):  # type: (Path, int) -> bytes
+    """Read one private metadata file through a pinned, no-follow descriptor."""
+
+    path = Path(path)
+    descriptor = -1
+    parent = -1
+    try:
+        if os.name == "posix" and os.open in os.supports_dir_fd:
+            absolute = Path(os.path.abspath(str(path)))
+            parts = absolute.parts
+            if len(parts) < 2:
+                raise RuntimeSessionError("guardian metadata path is invalid")
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            parent = os.open(parts[0] or os.sep, directory_flags)
+            for component in parts[1:-1]:
+                child = os.open(component, directory_flags, dir_fd=parent)
+                opened = os.fstat(child)
+                if not stat.S_ISDIR(opened.st_mode):
+                    os.close(child)
+                    raise RuntimeSessionError("guardian metadata parent is not a directory")
+                os.close(parent)
+                parent = child
+            leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(parts[-1], leaf_flags, dir_fd=parent)
+        elif os.name == "nt":
+            # Ordinary ``os.open`` follows reparse points.  Use the native
+            # OPEN_REPARSE_POINT handle path instead of weakening this boundary.
+            return _windows_read_private_metadata(path, maximum)
+        else:
+            if is_path_alias(path):
+                raise RuntimeSessionError("mihomo guardian metadata is aliased")
+            descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeSessionError("mihomo guardian metadata is not a regular file")
+        if os.name == "posix" and stat.S_IMODE(before.st_mode) != 0o600:
+            raise RuntimeSessionError("mihomo guardian metadata permissions are unsafe")
+        if before.st_size < 0 or before.st_size > maximum:
+            raise RuntimeSessionError("mihomo guardian metadata is oversized")
+        chunks = []
+        remaining = maximum + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(4096, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        identity_before = (before.st_dev, before.st_ino, before.st_mode, before.st_size)
+        identity_after = (after.st_dev, after.st_ino, after.st_mode, after.st_size)
+        if identity_before != identity_after or len(b"".join(chunks)) != before.st_size:
+            raise RuntimeSessionError("mihomo guardian metadata changed while being read")
+        return b"".join(chunks)
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        if parent != -1:
+            os.close(parent)
+
+
+def _linux_process_identity_matches(pid, start_time):  # type: (int, object) -> bool
+    if start_time is None:
+        return False
+    return _linux_process_start_time(pid) == start_time
+
+
+def _linux_pidfd_send_signal(pidfd, signum):  # type: (int, int) -> None
+    """Send through a pidfd on Python 3.7+ without a second lock primitive."""
+
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if sender is not None:
+        sender(pidfd, signum)
+        return
+    # Python 3.7-3.10 do not expose the syscall even when the kernel does.
+    # pidfd_send_signal is syscall 424 on the supported Linux architectures.
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        syscall = libc.syscall
+        syscall.restype = ctypes.c_long
+        result = syscall(424, int(pidfd), int(signum), 0, 0)
+        if result != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+    except (AttributeError, OSError, TypeError, ValueError):
+        raise OSError("pidfd_send_signal is unavailable")
+
+
 class MihomoProcess(object):
-    """One bounded Mihomo child with one redacted merged output stream."""
+    """One guarded Mihomo child with opaque fixed-output accounting."""
 
     def __init__(
         self,
@@ -558,6 +951,16 @@ class MihomoProcess(object):
         self._threads = []
         self._stop = threading.Event()
         self._drain_errors = []
+        self._pidfd = None
+        self._linux_start_time = None
+        self.backend_pid = None
+        self._backend_pidfd = None
+        self._backend_start_time = None
+        self._backend_pgid = None
+        self._backend_sid = None
+        self._guardian_metadata_path = self.session_root / ".mihomo-guardian.json"
+        self._windows_job = None
+        self._start_gate_write = None
         self._log_lock = threading.Lock()
         self._readiness_username = None
         self._readiness_password = None
@@ -583,6 +986,44 @@ class MihomoProcess(object):
         self._readiness_protocol = protocol
         self._readiness_address = address
 
+    def _release_start_gate(self):
+        """Authorize the guardian to launch its backend exactly once."""
+
+        descriptor = self._start_gate_write
+        self._start_gate_write = None
+        if descriptor is None:
+            return
+        try:
+            remaining = b"\x01"
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    raise OSError("start authorization pipe made no progress")
+                remaining = remaining[written:]
+        except OSError as error:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise RuntimeSessionError("mihomo guardian authorization failed") from error
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            raise RuntimeSessionError("mihomo guardian authorization cleanup failed") from error
+
+    def _cancel_start_gate(self):
+        """Close a pending authorization pipe so a guardian cannot start."""
+
+        descriptor = self._start_gate_write
+        self._start_gate_write = None
+        if descriptor is None:
+            return
+        try:
+            os.close(descriptor)
+        except OSError:
+            # The descriptor may already have been closed during a failed start.
+            pass
+
     def _record_drain_error(self, error):
         if len(self._drain_errors) >= 8:
             return
@@ -598,13 +1039,10 @@ class MihomoProcess(object):
         return stream.read(65536)
 
     def _write_backend_line(self, payload):
-        """Persist and forward one redacted line from the merged child stream."""
+        """Persist and forward one bounded, redacted merged backend line."""
 
         if self.backend_log_level == "OFF":
             return
-        # The child stream is deliberately opaque to the process supervisor:
-        # decode only for diagnostics, redact credentials, and make control
-        # characters visible before either persistence or terminal rendering.
         safe = terminal_safe_text(redact_bytes(payload)).strip()
         if not safe:
             return
@@ -641,7 +1079,8 @@ class MihomoProcess(object):
                 # A foreground log sink may close during shutdown.
                 pass
 
-    def _drain(self, stream):
+    def _drain(self, stream, source=None):
+        del source
         stream_descriptor = None
         try:
             stream_descriptor = stream.fileno()
@@ -674,9 +1113,6 @@ class MihomoProcess(object):
                         line += b" [line truncated]"
                         pending_line_truncated = False
                     self._write_backend_line(line)
-                # A backend may write a progress/blob line without a newline.
-                # Emit bounded chunks so live diagnostics cannot consume
-                # unbounded memory or wait for EOF, even across pipe reads.
                 while len(pending) > MAXIMUM_BACKEND_LINE_BYTES:
                     line = bytes(pending[:MAXIMUM_BACKEND_LINE_BYTES])
                     del pending[:MAXIMUM_BACKEND_LINE_BYTES]
@@ -695,42 +1131,230 @@ class MihomoProcess(object):
 
     def start(self):
         env = build_environment(self.executable, self.session_root)
+        # The guardian module is part of the installed package.  A source-tree
+        # invocation needs its package parent explicitly because the child cwd
+        # is the private session lease rather than the repository root.
+        package_parent = str(Path(__file__).resolve().parents[2])
+        env["PYTHONPATH"] = package_parent
         if os.path.lexists(str(self.log_path)):
             if is_path_alias(self.log_path) or not self.log_path.is_file():
                 raise RuntimeSessionError("runtime log path is aliased or not a regular file")
             if os.name == "posix" and stat.S_IMODE(self.log_path.stat().st_mode) != 0o600:
                 raise RuntimeSessionError("runtime log path has unsafe permissions")
+        real_popen = isinstance(getattr(subprocess, "Popen"), type)
+        gate_read = None
+        if real_popen:
+            gate_read, gate_write = os.pipe()
+            self._start_gate_write = gate_write
+            try:
+                os.set_inheritable(gate_read, True)
+                os.set_inheritable(gate_write, False)
+            except (OSError, ValueError) as error:
+                self._cancel_start_gate()
+                os.close(gate_read)
+                raise RuntimeSessionError("mihomo guardian authorization setup failed") from error
         try:
+            if os.name == "nt":
+                self._windows_job = _windows_create_job()
+                if self._windows_job is None:
+                    raise RuntimeSessionError("mihomo Windows Job containment is unavailable")
             options = {
                 "cwd": str(self.session_root),
                 "env": env,
                 "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.PIPE,
-                # Keep one backend stream so callers never need to reason
-                # about whether a line came from stdout or stderr.
+                # Merge both child streams before the supervisor sees them;
+                # callers only need the backend owner label, never stdout vs stderr.
                 "stderr": subprocess.STDOUT,
                 "shell": False,
-                "close_fds": True,
+                "close_fds": os.name != "nt",
                 "universal_newlines": False,
             }
             if os.name == "posix":
+                if gate_read is not None:
+                    options["pass_fds"] = (gate_read,)
                 options["start_new_session"] = True
                 if sys.platform.startswith("linux"):
                     options["preexec_fn"] = _configure_parent_death_signal
-            elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
-                options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-            self.process = subprocess.Popen(
-                [str(self.executable), "-f", str(self.config_path)],
-                **options
+            else:
+                # The guardian waits on the inherited authorization pipe. The
+                # Job Object is assigned before the backend is allowed to run.
+                options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if getattr(sys, "frozen", False):
+                arguments = [sys.executable, "--jerryproxy-guardian"]
+            else:
+                guardian = Path(__file__).with_name("guardian.py")
+                arguments = [sys.executable, str(guardian)]
+            arguments.extend(
+                [
+                "--executable",
+                str(self.executable),
+                "--config",
+                str(self.config_path),
+                "--metadata",
+                str(self._guardian_metadata_path),
+                "--session-root",
+                str(self.session_root),
+                ]
             )
+            if gate_read is not None:
+                arguments.extend(["--start-gate", str(gate_read)])
+            self.process = subprocess.Popen(arguments, **options)
         except OSError as error:
-            # Executable launch failures are terminal runtime errors.
+            self._cancel_start_gate()
+            _windows_close_job(self._windows_job)
+            self._windows_job = None
+            # Executable/guardian launch failures are terminal runtime errors.
             raise RuntimeSessionError("mihomo backend launch failed") from error
-        thread = threading.Thread(target=self._drain, args=(self.process.stdout,), name="jerryproxy-backend")
-        thread.daemon = True
-        thread.start()
-        self._threads.append(thread)
+        except RuntimeSessionError:
+            self._cancel_start_gate()
+            _windows_close_job(self._windows_job)
+            self._windows_job = None
+            raise
+        finally:
+            if gate_read is not None:
+                try:
+                    os.close(gate_read)
+                except OSError:
+                    pass
+        if os.name == "nt":
+            process_handle = getattr(self.process, "_handle", None)
+            if process_handle is None or not _windows_assign_job(self._windows_job, process_handle):
+                self._windows_abort_start()
+                raise RuntimeSessionError("mihomo Windows Job containment is unavailable")
+        popen_type = getattr(subprocess, "Popen")
+        if isinstance(popen_type, type) and isinstance(self.process, popen_type):
+            if sys.platform.startswith("linux"):
+                pidfd_open = getattr(os, "pidfd_open", None)
+                if pidfd_open is None:
+                    self._abort_start()
+                    raise RuntimeSessionError("Linux pidfd containment is unavailable")
+                try:
+                    self._pidfd = pidfd_open(self.process.pid)
+                except OSError as error:
+                    self._abort_start()
+                    raise RuntimeSessionError("Linux pidfd containment is unavailable") from error
+                try:
+                    _linux_pidfd_send_signal(self._pidfd, 0)
+                except OSError:
+                    self._abort_start()
+                    raise RuntimeSessionError("Linux pidfd signaling is unavailable")
+                self._linux_start_time = _linux_process_start_time(self.process.pid)
+                if self._linux_start_time is None:
+                    self._abort_start()
+                    raise RuntimeSessionError("Linux guardian identity is unavailable")
+        try:
+            self._release_start_gate()
+        except RuntimeSessionError:
+            self._abort_start()
+            raise
+        if isinstance(popen_type, type) and isinstance(self.process, popen_type):
+            self._load_guardian_identity(timeout=5.0)
+            if sys.platform.startswith("linux"):
+                try:
+                    self._backend_pidfd = pidfd_open(self.backend_pid)
+                except OSError as error:
+                    self._abort_start()
+                    raise RuntimeSessionError("Linux backend pidfd containment is unavailable") from error
+        stream = getattr(self.process, "stdout", None)
+        if stream is not None:
+            thread = threading.Thread(
+                target=self._drain,
+                args=(stream,),
+                name="jerryproxy-backend-output",
+            )
+            thread.daemon = True
+            thread.start()
+            self._threads.append(thread)
         return self.process
+
+    def _load_guardian_identity(self, timeout=5.0):
+        """Authenticate the guardian's backend identity before draining output."""
+
+        deadline = time.monotonic() + max(0.01, float(timeout))
+        value = None
+        while time.monotonic() < deadline:
+            try:
+                raw = _read_private_metadata(self._guardian_metadata_path, 4096)
+                value = json.loads(raw.decode("ascii"))
+                break
+            except OSError:
+                # The guardian may still be atomically publishing its record.
+                pass
+            except (RuntimeSessionError, UnicodeError, ValueError) as error:
+                # A malformed or aliased record is terminal; never leave an
+                # already-launched guardian running after failed authentication.
+                self._abort_start()
+                raise RuntimeSessionError("mihomo guardian identity could not be read") from error
+            if self.process.poll() is not None:
+                break
+            time.sleep(0.01)
+        if not isinstance(value, dict):
+            self._abort_start()
+            raise RuntimeSessionError("mihomo guardian did not publish identity")
+        pid = value.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            self._abort_start()
+            raise RuntimeSessionError("mihomo guardian identity is invalid")
+        self.backend_pid = pid
+        self._backend_start_time = value.get("start_time")
+        self._backend_pgid = value.get("pgid")
+        self._backend_sid = value.get("sid")
+        executable_matches = value.get("executable") == str(self.executable.absolute())
+        config_matches = value.get("config") == str(self.config_path.absolute())
+        if not executable_matches or not config_matches:
+            self._abort_start()
+            raise RuntimeSessionError("mihomo guardian identity does not match the launch plan")
+        self._linux_start_time = _posix_process_start_time(self.process.pid) if os.name == "posix" else None
+        if os.name == "posix":
+            if self._backend_start_time is None or self._linux_start_time is None:
+                self._abort_start()
+                raise RuntimeSessionError("mihomo process identity is unavailable")
+            if not _posix_process_identity_matches(self.backend_pid, self._backend_start_time):
+                self._abort_start()
+                raise RuntimeSessionError("mihomo backend identity changed during launch")
+            parent = _posix_process_parent(self.backend_pid)
+            if parent != self.process.pid:
+                self._abort_start()
+                raise RuntimeSessionError("mihomo backend is not owned by its guardian")
+            if (
+                self._backend_pgid != self.process.pid
+                or self._backend_sid != self.process.pid
+                or _posix_process_group(self.backend_pid) != self.process.pid
+                or _posix_process_session(self.backend_pid) != self.process.pid
+            ):
+                self._abort_start()
+                raise RuntimeSessionError("mihomo backend process-group identity is invalid")
+
+    def _windows_abort_start(self):
+        self._cancel_start_gate()
+        process = self.process
+        if process is not None:
+            try:
+                process.kill()
+                process.wait(timeout=2.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        _windows_close_job(self._windows_job)
+        self._windows_job = None
+
+    def _abort_start(self):
+        self._cancel_start_gate()
+        if sys.platform.startswith("linux") and self.process is not None and self._pidfd is None:
+            # During the pre-authentication window the Popen PID is still the
+            # freshly-created session leader.  Kill only that new process
+            # group; no managed backend identity has been accepted yet.
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+                self.process.wait(timeout=2.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            return
+        try:
+            self.stop(timeout=2.0)
+        except (OSError, RuntimeSessionError, subprocess.TimeoutExpired):
+            # The caller reports the containment failure; cleanup is best effort.
+            pass
 
     @staticmethod
     def _read_exact(stream, size):
@@ -800,7 +1424,7 @@ class MihomoProcess(object):
                 raise RuntimeSessionError("mihomo backend exited before readiness")
             try:
                 self._challenge_listener(port)
-                ownership = _listener_owned_by_process(self.process, port, self._readiness_address)
+                ownership = _listener_owned_by_process(self, port, self._readiness_address)
                 if ownership is not True:
                     raise RuntimeSessionError("cannot prove listener ownership by the Mihomo process")
                 return
@@ -813,29 +1437,147 @@ class MihomoProcess(object):
     def stop(self, timeout=2.0):  # type: (float) -> None
         timeout = max(0.01, float(timeout))
         self._stop.set()
+        self._cancel_start_gate()
         process = self.process
-        if process is not None and process.poll() is None:
-            if os.name == "posix":
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except OSError:
-                    process.terminate()
-            else:
+        failures = []
+
+        def note(message):
+            if not failures:
+                failures.append(message)
+
+        guardian_alive = process is not None and process.poll() is None
+        group_id = self._backend_pgid
+        session_id = self._backend_sid
+        if sys.platform.startswith("linux") and group_id is None and guardian_alive:
+            group_id = process.pid
+            session_id = process.pid
+
+        def group_authorized():
+            if not sys.platform.startswith("linux") or not isinstance(group_id, int) or not isinstance(session_id, int):
+                return os.name == "posix" and isinstance(group_id, int)
+            if self.backend_pid and _linux_process_identity_matches(self.backend_pid, self._backend_start_time):
+                return (
+                    _linux_process_group(self.backend_pid) == group_id
+                    and _linux_process_session(self.backend_pid) == session_id
+                )
+            # A guardian crash can leave only forked descendants.  A non-empty
+            # group/session census is still anchored by the metadata identity
+            # captured before the crash and is safe to terminate as one unit.
+            return bool(_linux_process_group_members(group_id, session_id))
+
+        def signal_group(signum):
+            if not group_authorized():
+                return False
+            try:
+                os.killpg(group_id, signum)
+                return True
+            except OSError:
+                return False
+
+        if os.name == "posix":
+            if sys.platform.startswith("linux") and guardian_alive:
+                if self._pidfd is None or not _linux_process_identity_matches(process.pid, self._linux_start_time):
+                    note("guardian process identity is unavailable")
+                else:
+                    try:
+                        _linux_pidfd_send_signal(self._pidfd, signal.SIGTERM)
+                    except OSError as error:
+                        note("guardian pidfd termination failed: %s" % error)
+            if not signal_group(signal.SIGTERM):
+                if guardian_alive and not sys.platform.startswith("linux"):
+                    try:
+                        process.terminate()
+                    except OSError as error:
+                        note("guardian termination failed: %s" % error)
+                elif guardian_alive and sys.platform.startswith("linux"):
+                    note("guardian process-group identity is unavailable")
+        elif guardian_alive:
+            try:
                 process.terminate()
+            except OSError as error:
+                note("guardian termination failed: %s" % error)
+
+        if guardian_alive:
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 if os.name == "posix":
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except OSError:
-                        process.kill()
+                    if sys.platform.startswith("linux") and self._pidfd is not None:
+                        try:
+                            if _linux_process_identity_matches(process.pid, self._linux_start_time):
+                                _linux_pidfd_send_signal(self._pidfd, signal.SIGKILL)
+                        except OSError as error:
+                            note("guardian pidfd kill failed: %s" % error)
+                    if not signal_group(signal.SIGKILL) and not sys.platform.startswith("linux"):
+                        try:
+                            process.kill()
+                        except OSError as error:
+                            note("guardian kill failed: %s" % error)
                 else:
-                    process.kill()
-                process.wait(timeout=timeout)
+                    try:
+                        process.kill()
+                    except OSError as error:
+                        note("guardian kill failed: %s" % error)
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    note("guardian did not stop before the cleanup deadline")
+
+        if sys.platform.startswith("linux") and self._backend_pidfd is not None:
+            if self.backend_pid and _linux_process_identity_matches(self.backend_pid, self._backend_start_time):
+                try:
+                    _linux_pidfd_send_signal(self._backend_pidfd, signal.SIGTERM)
+                except OSError:
+                    # Group termination remains authoritative when the backend races exit.
+                    pass
+
+        if os.name == "posix" and group_authorized():
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                members = (
+                    _linux_process_group_members(group_id, session_id)
+                    if sys.platform.startswith("linux")
+                    else ()
+                )
+                if not members:
+                    break
+                time.sleep(0.02)
+            if sys.platform.startswith("linux") and _linux_process_group_members(group_id, session_id):
+                signal_group(signal.SIGKILL)
+                kill_deadline = time.monotonic() + timeout
+                while time.monotonic() < kill_deadline:
+                    if not _linux_process_group_members(group_id, session_id):
+                        break
+                    time.sleep(0.02)
+                if _linux_process_group_members(group_id, session_id):
+                    note("mihomo backend descendants did not stop")
+
+        if process is not None and process.poll() is None:
+            note("mihomo guardian did not stop")
+        if self._pidfd is not None:
+            try:
+                os.close(self._pidfd)
+            except OSError:
+                pass
+            self._pidfd = None
+        if self._backend_pidfd is not None:
+            try:
+                os.close(self._backend_pidfd)
+            except OSError:
+                pass
+            self._backend_pidfd = None
+        _windows_close_job(self._windows_job)
+        self._windows_job = None
+        try:
+            if self._guardian_metadata_path.exists() and not is_path_alias(self._guardian_metadata_path):
+                self._guardian_metadata_path.unlink()
+        except OSError:
+            self._record_drain_error("mihomo guardian metadata cleanup failed")
         for thread in self._threads:
             thread.join(timeout=timeout)
         if any(thread.is_alive() for thread in self._threads):
-            raise RuntimeSessionError("mihomo backend log drain did not stop")
+            note("mihomo backend log drain did not stop")
         if self._drain_errors:
-            raise RuntimeSessionError("mihomo backend log capture failed: %s" % self._drain_errors[0])
+            note("mihomo backend log capture failed: %s" % self._drain_errors[0])
+        if failures:
+            raise RuntimeSessionError(failures[0])
