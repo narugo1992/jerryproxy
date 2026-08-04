@@ -554,10 +554,6 @@ def test_shell_completion_is_dynamic_and_does_not_initialize_home(tmp_path):
     (home / "backends" / "mihomo" / "1.2.3").mkdir()
     cached = home / "downloads" / "mihomo" / "9.9.9"
     cached.mkdir(parents=True)
-    lock_file = home / "locks" / "jerryproxy.lock"
-    if os.name == "nt" and lock_file.exists():
-        lock_file.unlink()
-
     for command in ("use", "clean"):
         backend_words = "cli --home %s backend %s mi" % (
             shlex.quote(home.as_posix()),
