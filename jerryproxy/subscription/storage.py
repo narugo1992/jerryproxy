@@ -7,11 +7,21 @@ import json
 import os
 import secrets
 import stat
+import struct
 import tempfile
 from datetime import datetime, timezone
 
+from ..backend.anchored import AnchoredDirectory
 from ..backend.durable import flush_directory
-from ..errors import IntegrityError, SubscriptionFetchError, SubscriptionParseError, SubscriptionStateError
+from ..backend.identity import capture_identity, identity_matches, validate_identity
+from ..backend.removal import _secure_remove_tree
+from ..errors import (
+    ArchiveError,
+    IntegrityError,
+    SubscriptionFetchError,
+    SubscriptionParseError,
+    SubscriptionStateError,
+)
 from ..home import is_path_alias
 from ..lock import JerryProxyOperationLock
 from .interfaces import SubscriptionParser
@@ -48,7 +58,7 @@ _RECORD_KEYS = {
     "source_url",
     "updated_at",
 }
-_NODE_KEYS = {"display", "id", "occurrence", "scheme", "uri"}
+_NODE_KEYS = {"display", "fingerprint", "id", "occurrence", "scheme", "uri"}
 
 
 def _identity_path(paths):  # type: (object) -> object
@@ -61,6 +71,10 @@ def _tombstones_path(paths):  # type: (object) -> object
 
 def _publication_journal_path(paths):  # type: (object) -> object
     return paths.subscriptions / _PUBLICATION_JOURNAL
+
+
+def _quarantine_path(paths, operation):  # type: (object, str) -> object
+    return paths.runtimes / (".subscription-remove-%s.json" % operation)
 
 
 def _history_path(paths, record):  # type: (object, SubscriptionRecord) -> object
@@ -190,36 +204,55 @@ def _retire_node_ids_locked(paths, node_ids):  # type: (object, object) -> None
     _write_json(_tombstones_path(paths), {"entries": entries})
 
 
+def _unretire_node_ids_locked(paths, node_ids):  # type: (object, object) -> None
+    """Undo a prepared removal when recovery restores the old record."""
+
+    if not node_ids:
+        return
+    retired = set(node_ids)
+    entries = _read_tombstones_locked(paths)
+    retained = [entry for entry in entries if entry["id"] not in retired]
+    if retained != entries:
+        _write_json(_tombstones_path(paths), {"entries": retained})
+
+
 def _canonical_node_bytes(subscription_id, format_name, scheme, display, uri, occurrence):
     # type: (str, str, str, str, str, int) -> bytes
-    value = {
-        "display": display,
-        "format": format_name,
-        "occurrence": occurrence,
-        "scheme": scheme,
-        "subscription_id": subscription_id,
-        "uri": uri,
-    }
-    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+    """Build a length-prefixed private reconciliation preimage."""
 
-
-def _derive_node_id(key, subscription_id, format_name, scheme, display, uri, occurrence, ordinal=0):
-    preimage = b"jerryproxy-node-v2\x00" + _canonical_node_bytes(
-        subscription_id,
-        format_name,
-        scheme,
-        display,
-        uri,
-        occurrence,
+    fields = (
+        subscription_id.encode("utf-8"),
+        format_name.encode("utf-8"),
+        scheme.encode("utf-8"),
+        display.encode("utf-8"),
+        uri.encode("utf-8"),
+        str(occurrence).encode("ascii"),
     )
-    if ordinal:
-        preimage += b"\x00collision-%d" % ordinal
-    return hmac.new(key, preimage, hashlib.sha256).hexdigest()[:_ID_HEX]
+    return b"jerryproxy-node-fingerprint-v1\x00" + b"".join(
+        struct.pack(">I", len(value)) + value for value in fields
+    )
 
 
-def _node_id_matches(key, record, node):  # type: (bytes, SubscriptionRecord, NodeRecord) -> bool
-    for ordinal in range(17):
-        if _derive_node_id(
+def _private_node_fingerprint(key, subscription_id, format_name, scheme, display, uri, occurrence):
+    # type: (bytes, str, str, str, str, str, int) -> str
+    """Return the private keyed identity used to reconcile one source node."""
+
+    return hmac.new(
+        key,
+        _canonical_node_bytes(subscription_id, format_name, scheme, display, uri, occurrence),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _validate_record_identity_if_present(paths, record):  # type: (object, SubscriptionRecord) -> None
+    identity_path = _identity_path(paths)
+    if not identity_path.exists():
+        if _tombstones_path(paths).exists() or any(node.fingerprint for node in record.nodes):
+            raise IntegrityError("node identity key is missing while fingerprinted state exists")
+        return
+    key = _ensure_identity_key_locked(paths)
+    for node in record.nodes:
+        expected = _private_node_fingerprint(
             key,
             record.subscription_id,
             record.format,
@@ -227,21 +260,9 @@ def _node_id_matches(key, record, node):  # type: (bytes, SubscriptionRecord, No
             node.display,
             node.uri,
             node.occurrence,
-            ordinal=ordinal,
-        ) == node.node_id:
-            return True
-    return False
-
-
-def _validate_record_identity_if_present(paths, record):  # type: (object, SubscriptionRecord) -> None
-    identity_path = _identity_path(paths)
-    if not identity_path.exists():
-        if _tombstones_path(paths).exists():
-            raise IntegrityError("node identity key is missing while tombstones exist")
-        return
-    key = _ensure_identity_key_locked(paths)
-    if any(not _node_id_matches(key, record, node) for node in record.nodes):
-        raise IntegrityError("subscription node identity does not match the home key")
+        )
+        if node.fingerprint != expected:
+            raise IntegrityError("subscription node fingerprint does not match the home key")
 
 
 def validate_subscription_name(name):  # type: (str) -> str
@@ -336,15 +357,29 @@ def _write_json(path, value):  # type: (Path, dict) -> None
 def _write_publication_journal_locked(paths, value):  # type: (object, dict) -> None
     """Persist a non-secret generation journal before changing public state."""
 
-    allowed = {
-        "kind",
-        "name_digest",
-        "new_revision",
-        "old_revision",
-        "operation",
-        "phase",
-        "subscription_id",
-    }
+    if value.get("kind") == "remove":
+        # Removal journals must remain opaque: the quarantine contains the
+        # private record needed for rollback, while this file contains only
+        # public identity, object identity, and transaction state.
+        allowed = {
+            "kind",
+            "operation",
+            "phase",
+            "quarantine_identity",
+            "retired_at",
+            "subscription_id",
+        }
+    else:
+        allowed = {
+            "kind",
+            "name_digest",
+            "new_revision",
+            "old_revision",
+            "operation",
+            "phase",
+            "quarantine_identity",
+            "subscription_id",
+        }
     if set(value) != allowed:
         raise IntegrityError("subscription publication journal has an invalid shape")
     _write_json(_publication_journal_path(paths), value)
@@ -361,23 +396,41 @@ def _read_publication_journal_locked(paths):  # type: (object) -> object
     except SubscriptionStateError as error:
         # A journal is authoritative recovery state and cannot be ignored.
         raise IntegrityError("subscription publication journal cannot be read") from error
-    required = {
-        "kind",
-        "name_digest",
-        "new_revision",
-        "old_revision",
-        "operation",
-        "phase",
-        "subscription_id",
-    }
+    if not isinstance(value, dict) or value.get("kind") not in ("publish", "remove"):
+        raise IntegrityError("subscription publication journal has an invalid shape")
+    if value["kind"] == "remove":
+        required = {
+            "kind",
+            "operation",
+            "phase",
+            "quarantine_identity",
+            "retired_at",
+            "subscription_id",
+        }
+    else:
+        required = {
+            "kind",
+            "name_digest",
+            "new_revision",
+            "old_revision",
+            "operation",
+            "phase",
+            "quarantine_identity",
+            "subscription_id",
+        }
     if set(value) != required:
         raise IntegrityError("subscription publication journal has an invalid shape")
-    if value["kind"] not in ("publish", "remove") or value["phase"] not in ("prepared", "committed"):
+    if value["phase"] not in ("prepared", "committed"):
         raise IntegrityError("subscription publication journal has an invalid phase")
     for key in ("name_digest", "operation", "subscription_id"):
+        if key == "name_digest" and value["kind"] == "remove":
+            continue
         if not isinstance(value[key], str):
             raise IntegrityError("subscription publication journal has invalid identity")
-    if len(value["name_digest"]) != 64 or any(char not in "0123456789abcdef" for char in value["name_digest"]):
+    if value["kind"] == "publish" and (
+        len(value["name_digest"]) != 64
+        or any(char not in "0123456789abcdef" for char in value["name_digest"])
+    ):
         raise IntegrityError("subscription publication journal has an invalid name identity")
     if len(value["operation"]) != 32 or any(char not in "0123456789abcdef" for char in value["operation"]):
         raise IntegrityError("subscription publication journal has an invalid operation identity")
@@ -385,14 +438,24 @@ def _read_publication_journal_locked(paths):  # type: (object) -> object
         char not in "0123456789abcdef" for char in value["subscription_id"]
     ):
         raise IntegrityError("subscription publication journal has an invalid subscription identity")
-    for key in ("old_revision", "new_revision"):
-        revision = value[key]
-        if revision is not None and (
-            not isinstance(revision, str)
-            or len(revision) != 64
-            or any(char not in "0123456789abcdef" for char in revision)
-        ):
-            raise IntegrityError("subscription publication journal has an invalid revision")
+    if value["kind"] == "remove":
+        if not isinstance(value["retired_at"], str) or not value["retired_at"]:
+            raise IntegrityError("subscription removal journal has an invalid retirement time")
+        try:
+            validate_identity(value["quarantine_identity"], expected_file_type="regular")
+        except IntegrityError as error:
+            raise IntegrityError("subscription removal journal has an invalid quarantine identity") from error
+    elif value["quarantine_identity"] is not None:
+        raise IntegrityError("subscription publication journal has an unexpected quarantine identity")
+    if value["kind"] == "publish":
+        for key in ("old_revision", "new_revision"):
+            revision = value[key]
+            if revision is not None and (
+                not isinstance(revision, str)
+                or len(revision) != 64
+                or any(char not in "0123456789abcdef" for char in revision)
+            ):
+                raise IntegrityError("subscription publication journal has an invalid revision")
     return value
 
 
@@ -414,8 +477,93 @@ def _record_path(paths, name):  # type: (JerryProxyPaths, str) -> Path
     return paths.subscriptions / (name + ".json")
 
 
+def _capture_record_identity(path):  # type: (Path) -> dict
+    if is_path_alias(path) or not path.is_file():
+        raise IntegrityError("subscription record path is invalid")
+    try:
+        identity = capture_identity(path)
+        validate_identity(identity, expected_file_type="regular")
+        return identity
+    except (IntegrityError, OSError) as error:
+        # The record must remain an identity-pinned regular file at removal time.
+        raise IntegrityError("subscription record identity cannot be captured") from error
+
+
+def _stage_record_locked(paths, path, operation, expected_identity):  # type: (object, Path, str, dict) -> Path
+    """Move one record into a private, identity-anchored quarantine."""
+
+    quarantine = _quarantine_path(paths, operation)
+    if is_path_alias(quarantine) or os.path.lexists(str(quarantine)):
+        raise IntegrityError("subscription removal quarantine already exists")
+    try:
+        with AnchoredDirectory(paths.root, require_private_permissions=False) as anchored:
+            anchored.replace(
+                path.relative_to(paths.root).parts,
+                quarantine.relative_to(paths.root).parts,
+                expected_identity=expected_identity,
+                replace_existing=False,
+            )
+    except (ArchiveError, IntegrityError, ValueError) as error:
+        # The anchored primitive refuses path substitution and unsupported atomic moves.
+        raise IntegrityError("subscription removal quarantine staging failed") from error
+    try:
+        if not identity_matches(quarantine, expected_identity):
+            raise IntegrityError("subscription removal quarantine identity changed")
+    except IntegrityError:
+        raise
+    return quarantine
+
+
+def _restore_record_locked(paths, quarantine, expected_identity, parser):  # type: (object, Path, dict, SubscriptionParser) -> SubscriptionRecord
+    """Restore a quarantined record without copying or replacing a target."""
+
+    if is_path_alias(quarantine) or not quarantine.is_file():
+        raise IntegrityError("subscription removal quarantine is invalid")
+    record = _record_from_value(_read_json(quarantine), parser=parser)
+    if not identity_matches(quarantine, expected_identity):
+        raise IntegrityError("subscription removal quarantine identity changed")
+    destination = _record_path(paths, record.name)
+    if os.path.lexists(str(destination)):
+        raise IntegrityError("subscription removal rollback destination already exists")
+    try:
+        with AnchoredDirectory(paths.root, require_private_permissions=False) as anchored:
+            anchored.replace(
+                quarantine.relative_to(paths.root).parts,
+                destination.relative_to(paths.root).parts,
+                expected_identity=expected_identity,
+                replace_existing=False,
+            )
+    except (ArchiveError, IntegrityError, ValueError) as error:
+        # The anchored primitive rejects aliases, substitution, and overwrite races.
+        raise IntegrityError("subscription removal rollback failed") from error
+    if not identity_matches(destination, expected_identity):
+        raise IntegrityError("subscription removal rollback identity changed")
+    return record
+
+
+def _remove_quarantine_locked(paths, operation, expected_identity):  # type: (object, str, dict) -> None
+    quarantine = _quarantine_path(paths, operation)
+    if not os.path.lexists(str(quarantine)):
+        return
+    try:
+        removed = _secure_remove_tree(
+            paths.runtimes,
+            quarantine,
+            IntegrityError,
+            expected_identity=expected_identity,
+            private_names=True,
+        )
+        if removed:
+            flush_directory(quarantine.parent)
+    except IntegrityError:
+        raise
+    except OSError as error:
+        # Committed removal retains its quarantine when physical cleanup fails.
+        raise SubscriptionStateError("subscription removal quarantine cleanup failed") from error
+
+
 def _node_from_value(value):  # type: (dict) -> NodeRecord
-    required = ("id", "scheme", "display", "uri", "occurrence")
+    required = ("id", "scheme", "display", "uri", "occurrence", "fingerprint")
     if not isinstance(value, dict) or any(key not in value for key in required):
         raise SubscriptionStateError("subscription node state is incomplete")
     if set(value) != _NODE_KEYS:
@@ -431,6 +579,11 @@ def _node_from_value(value):  # type: (dict) -> NodeRecord
         raise SubscriptionStateError("subscription node state is invalid")
     if len(value["display"].encode("utf-8")) > _MAXIMUM_DISPLAY_BYTES:
         raise SubscriptionStateError("subscription node display is too long")
+    fingerprint = value["fingerprint"]
+    if not isinstance(fingerprint, str) or len(fingerprint) != 64 or any(
+        char not in "0123456789abcdef" for char in fingerprint
+    ):
+        raise SubscriptionStateError("subscription node fingerprint is invalid")
     if not isinstance(value["uri"], str) or not value["uri"]:
         raise SubscriptionStateError("subscription node URI state is invalid")
     if len(value["uri"].encode("utf-8")) > _MAXIMUM_URI_BYTES:
@@ -438,7 +591,7 @@ def _node_from_value(value):  # type: (dict) -> NodeRecord
     occurrence = value["occurrence"]
     if not isinstance(occurrence, int) or isinstance(occurrence, bool) or occurrence < 0:
         raise SubscriptionStateError("subscription node occurrence is invalid")
-    return NodeRecord(node_id, value["scheme"], value["display"], value["uri"], occurrence)
+    return NodeRecord(node_id, value["scheme"], value["display"], value["uri"], occurrence, fingerprint)
 
 
 def _record_from_value(value, parser=None):  # type: (dict, Optional[SubscriptionParser]) -> SubscriptionRecord
@@ -535,6 +688,7 @@ def _record_value(record):  # type: (SubscriptionRecord) -> dict
         "nodes": [
             {
                 "display": node.display,
+                "fingerprint": node.fingerprint,
                 "id": node.node_id,
                 "occurrence": node.occurrence,
                 "scheme": node.scheme,
@@ -546,6 +700,42 @@ def _record_value(record):  # type: (SubscriptionRecord) -> dict
         "source_url": record.source_url,
         "updated_at": record.updated_at,
     }
+
+
+def _materialize_record_fingerprints_locked(paths, record):  # type: (object, SubscriptionRecord) -> SubscriptionRecord
+    """Attach private fingerprints before a record enters durable state."""
+
+    key = _ensure_identity_key_locked(paths)
+    nodes = []
+    changed = False
+    for node in record.nodes:
+        expected = _private_node_fingerprint(
+            key,
+            record.subscription_id,
+            record.format,
+            node.scheme,
+            node.display,
+            node.uri,
+            node.occurrence,
+        )
+        if node.fingerprint and node.fingerprint != expected:
+            raise IntegrityError("subscription node fingerprint does not match the home key")
+        fingerprint = node.fingerprint or expected
+        changed = changed or fingerprint != node.fingerprint
+        nodes.append(NodeRecord(node.node_id, node.scheme, node.display, node.uri, node.occurrence, fingerprint))
+    if not changed:
+        return record
+    return SubscriptionRecord(
+        record.name,
+        record.subscription_id,
+        record.revision,
+        record.format,
+        record.enabled,
+        record.updated_at,
+        tuple(nodes),
+        record.source_url,
+        record.body,
+    )
 
 
 def _history_records_locked(paths, parser):  # type: (object, object) -> list
@@ -588,6 +778,23 @@ def _remove_history_for_id_locked(paths, subscription_id):  # type: (object, str
             # Removal must not leave an untracked secret-bearing generation.
             raise SubscriptionStateError("subscription history cleanup failed") from error
     flush_directory(paths.subscriptions)
+
+
+def _remove_history_record_locked(paths, record):  # type: (object, SubscriptionRecord) -> None
+    """Remove one exact rollback generation after a recovery decision."""
+
+    path = _history_path(paths, record)
+    if not path.exists():
+        return
+    if is_path_alias(path) or not path.is_file():
+        raise IntegrityError("subscription history entry is invalid")
+    try:
+        path.unlink()
+        flush_directory(path.parent)
+    except OSError as error:
+        # Recovery cannot discard a secret-bearing rollback generation
+        # without durable evidence that the unlink completed.
+        raise IntegrityError("subscription history cleanup failed") from error
 
 
 def _prune_history_locked(paths, subscription_id, parser):  # type: (object, str, object) -> None
@@ -644,27 +851,63 @@ class SubscriptionStore(object):
         if journal is None:
             return
         records = self._records_without_recovery_locked()
-        matches = [
-            record
-            for record in records
-            if record.subscription_id == journal["subscription_id"]
-            and _name_digest(record.name) == journal["name_digest"]
-        ]
-        if len(matches) > 1:
-            raise IntegrityError("subscription publication journal matches multiple records")
-        current_revision = matches[0].revision if matches else None
-        old_revision = journal["old_revision"]
-        new_revision = journal["new_revision"]
         if journal["kind"] == "publish":
+            matches = [
+                record
+                for record in records
+                if record.subscription_id == journal["subscription_id"]
+                and _name_digest(record.name) == journal["name_digest"]
+            ]
+            if len(matches) > 1:
+                raise IntegrityError("subscription publication journal matches multiple records")
+            current_revision = matches[0].revision if matches else None
+            old_revision = journal["old_revision"]
+            new_revision = journal["new_revision"]
             allowed = (new_revision,) if journal["phase"] == "committed" else (old_revision, new_revision)
             if current_revision not in allowed:
                 raise IntegrityError("subscription publication journal has an ambiguous current generation")
         else:
-            allowed = (None,) if journal["phase"] == "committed" else (old_revision, None)
-            if current_revision not in allowed:
-                raise IntegrityError("subscription removal journal has an ambiguous current generation")
-            if current_revision is None:
+            matches = [record for record in records if record.subscription_id == journal["subscription_id"]]
+            if len(matches) > 1:
+                raise IntegrityError("subscription removal journal matches multiple records")
+            current = matches[0] if matches else None
+            quarantine = _quarantine_path(self.paths, journal["operation"])
+            quarantine_exists = os.path.lexists(str(quarantine))
+            if quarantine_exists:
+                if is_path_alias(quarantine) or not quarantine.is_file():
+                    raise IntegrityError("subscription removal quarantine is invalid")
+                if not identity_matches(quarantine, journal["quarantine_identity"]):
+                    raise IntegrityError("subscription removal quarantine identity changed")
+            if journal["phase"] == "committed":
+                if current is not None:
+                    raise IntegrityError("subscription removal journal has an ambiguous current generation")
+                _remove_quarantine_locked(
+                    self.paths,
+                    journal["operation"],
+                    journal["quarantine_identity"],
+                )
                 _remove_history_for_id_locked(self.paths, journal["subscription_id"])
+            else:
+                if current is not None:
+                    if quarantine_exists:
+                        raise IntegrityError("subscription removal journal has ambiguous public and quarantine state")
+                    rollback = current
+                else:
+                    if not quarantine_exists:
+                        raise IntegrityError("subscription removal journal has no rollback quarantine")
+                    rollback = _restore_record_locked(
+                        self.paths,
+                        quarantine,
+                        journal["quarantine_identity"],
+                        self.parser,
+                    )
+                _unretire_node_ids_locked(self.paths, [node.node_id for node in rollback.nodes])
+                if quarantine_exists:
+                    _remove_quarantine_locked(
+                        self.paths,
+                        journal["operation"],
+                        journal["quarantine_identity"],
+                    )
         _clear_publication_journal_locked(self.paths)
 
     def _records_locked(self):  # type: (object) -> list
@@ -704,6 +947,7 @@ class SubscriptionStore(object):
         # type: (SubscriptionRecord, bool, Optional[str]) -> SubscriptionRecord
         """Publish while the caller owns the home-wide operation lock."""
 
+        record = _materialize_record_fingerprints_locked(self.paths, record)
         validate_subscription_name(record.name)
         _ensure_extension_directory(self.paths.subscriptions)
         path = _record_path(self.paths, record.name)
@@ -729,6 +973,7 @@ class SubscriptionStore(object):
             "old_revision": existing.revision if existing is not None else None,
             "operation": secrets.token_hex(16),
             "phase": "prepared",
+            "quarantine_identity": None,
             "subscription_id": record.subscription_id,
         }
         _write_publication_journal_locked(self.paths, journal)
@@ -752,26 +997,28 @@ class SubscriptionStore(object):
         if not path.exists():
             raise SubscriptionStateError("subscription not found: %s" % name)
         record = _record_from_value(_read_json(path), parser=self.parser)
+        record_identity = _capture_record_identity(path)
+        operation = secrets.token_hex(16)
         journal = {
             "kind": "remove",
-            "name_digest": _name_digest(record.name),
-            "new_revision": None,
-            "old_revision": record.revision,
-            "operation": secrets.token_hex(16),
+            "operation": operation,
             "phase": "prepared",
+            "quarantine_identity": record_identity,
+            "retired_at": _now(),
             "subscription_id": record.subscription_id,
         }
         _write_publication_journal_locked(self.paths, journal)
+        # The quarantined record is the rollback generation.  Keeping a second
+        # history copy would duplicate secret-bearing bytes and complicate
+        # prepared recovery without adding authority.
         _retire_node_ids_locked(self.paths, [node.node_id for node in record.nodes])
-        try:
-            path.unlink()
-            flush_directory(path.parent)
-        except OSError as error:
-            # Removing a private record may fail through filesystem errors.
-            raise SubscriptionStateError("subscription removal failed") from error
-        _remove_history_for_id_locked(self.paths, record.subscription_id)
+        _stage_record_locked(self.paths, path, operation, record_identity)
         journal["phase"] = "committed"
         _write_publication_journal_locked(self.paths, journal)
+        # Keep the rollback generation until the committed marker is durable;
+        # a hard exit before that marker must still be able to restore it.
+        _remove_history_for_id_locked(self.paths, record.subscription_id)
+        _remove_quarantine_locked(self.paths, operation, record_identity)
         _clear_publication_journal_locked(self.paths)
         return record
 
@@ -795,13 +1042,16 @@ def build_record(
     # type: (str, str, object, Optional[str], Optional[SubscriptionRecord], bool, object, object) -> SubscriptionRecord
     """Build a new record while reconciling exact URI identities."""
 
+    nodes = []
+    identity_key = _ensure_identity_key_locked(paths) if paths is not None else None
+    record_subscription_id = previous.subscription_id if previous is not None else subscription_id
+    previous_by_fingerprint = {}
     previous_by_uri = {}
     if previous is not None:
         for node in previous.nodes:
             previous_by_uri.setdefault(node.uri, []).append(node.node_id)
-    nodes = []
-    identity_key = _ensure_identity_key_locked(paths) if paths is not None else None
-    record_subscription_id = previous.subscription_id if previous is not None else subscription_id
+            if node.fingerprint:
+                previous_by_fingerprint.setdefault(node.fingerprint, []).append(node.node_id)
     reserved = set(reserved_ids or ())
     if paths is not None:
         reserved.update(entry["id"] for entry in _read_tombstones_locked(paths))
@@ -813,31 +1063,36 @@ def build_record(
             raise SubscriptionParseError("subscription node URI is too long")
         occurrence = occurrences.get(uri, 0)
         occurrences[uri] = occurrence + 1
-        old_ids = previous_by_uri.get(uri, [])
+        fingerprint = (
+            _private_node_fingerprint(
+                identity_key,
+                record_subscription_id,
+                parsed.format,
+                scheme,
+                display,
+                uri,
+                occurrence,
+            )
+            if identity_key is not None
+            else ""
+        )
+        old_ids = previous_by_fingerprint.get(fingerprint, []) if fingerprint else previous_by_uri.get(uri, [])
         if occurrence < len(old_ids):
             node_id = old_ids[occurrence]
-        elif identity_key is None:
-            node_id = secrets.token_hex(16)
         else:
             node_id = None
-            for ordinal in range(17):
-                candidate = _derive_node_id(
-                    identity_key,
-                    record_subscription_id,
-                    parsed.format,
-                    scheme,
-                    display,
-                    uri,
-                    occurrence,
-                    ordinal=ordinal,
-                )
+            # Public IDs are independent random 128-bit values.  The private
+            # fingerprint above is the reconciliation key; it must never be
+            # recoverable from the public node identity.
+            for _ in range(16):
+                candidate = secrets.token_hex(16)
                 if candidate not in reserved and all(item.node_id != candidate for item in nodes):
                     node_id = candidate
                     break
             if node_id is None:
                 raise IntegrityError("subscription node identity collision limit exceeded")
         reserved.add(node_id)
-        nodes.append(NodeRecord(node_id, scheme, display, uri, occurrence))
+        nodes.append(NodeRecord(node_id, scheme, display, uri, occurrence, fingerprint))
     return SubscriptionRecord(
         name=name,
         subscription_id=previous.subscription_id if previous is not None else subscription_id,

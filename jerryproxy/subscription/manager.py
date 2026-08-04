@@ -22,6 +22,7 @@ _DEFAULT_FETCH_SUBSCRIPTION = fetch_subscription
 _FETCH_WALL_SECONDS = 30.0
 _FETCH_START_SECONDS = 5.0
 _FETCH_STOP_SECONDS = 2.0
+_FETCH_LATE_CLEANUP_SECONDS = 5.0
 _FETCH_RESULT_MAXIMUM_BYTES = 16 * 1024 * 1024
 
 
@@ -89,6 +90,61 @@ def _write_fetch_result(path, value):  # type: (str, dict) -> None
     finally:
         if descriptor != -1:
             os.close(descriptor)
+
+
+class _FetchCleanupSupervisor(object):
+    """Own bounded cleanup after a process start returns too late."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._pending = set()
+
+    def register(self, startup_thread, process, runtime_root, temporary):  # type: (object, object, str, str) -> bool
+        """Register one delayed starter and run its independent cleanup."""
+
+        token = object()
+        with self._lock:
+            self._pending.add(token)
+        worker = threading.Thread(
+            target=self._cleanup,
+            args=(token, startup_thread, process, runtime_root, temporary),
+            name="jerryproxy-subscription-cleanup",
+        )
+        worker.daemon = True
+        try:
+            worker.start()
+        except RuntimeError:
+            # A host that rejects another thread cannot provide delayed cleanup;
+            # retain the evidence for the caller's explicit recovery path.
+            with self._lock:
+                self._pending.discard(token)
+            return False
+        return True
+
+    def _cleanup(self, token, startup_thread, process, runtime_root, temporary):
+        deadline = time.monotonic() + _FETCH_LATE_CLEANUP_SECONDS
+        completed = False
+        try:
+            while startup_thread is not None and startup_thread.is_alive():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                startup_thread.join(min(0.05, remaining))
+            while not _stop_fetch_process(process):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                time.sleep(min(0.05, remaining))
+            try:
+                _secure_remove_tree(runtime_root, temporary, SubscriptionFetchError, private_names=True)
+            except (OSError, SubscriptionFetchError):
+                # Recovery evidence remains available when safe deletion fails.
+                return
+            completed = True
+        finally:
+            if completed:
+                with self._lock:
+                    self._pending.discard(token)
 
 
 def _fetch_worker(url, result_path, allow_http, format_hint, start_gate, cancel_gate):
@@ -178,6 +234,7 @@ class SubscriptionManager(object):
         if not isinstance(self.parser, SubscriptionParser):
             raise TypeError("parser must implement SubscriptionParser")
         self.store = SubscriptionStore(paths, parser=self.parser)
+        self._fetch_cleanup = _FetchCleanupSupervisor()
 
     def list(self):  # type: () -> tuple
         return self.store.list()
@@ -275,9 +332,36 @@ class SubscriptionManager(object):
                 startup_thread.join(_FETCH_STOP_SECONDS)
                 if startup_thread.is_alive():
                     preserve_worker_tree = True
-                    cleanup_error = SubscriptionFetchError("subscription source worker startup cleanup failed")
+                    registered = self._fetch_cleanup.register(
+                        startup_thread,
+                        process,
+                        runtime_root,
+                        temporary,
+                    )
+                    if not registered:
+                        cleanup_error = SubscriptionFetchError(
+                            "subscription source worker cleanup supervisor unavailable; recovery artifact retained"
+                        )
+                    else:
+                        cleanup_error = SubscriptionFetchError(
+                            "subscription source worker startup cleanup failed; recovery supervisor retained"
+                        )
             elif process is not None and not _stop_fetch_process(process):
-                cleanup_error = SubscriptionFetchError("subscription source worker could not be stopped")
+                preserve_worker_tree = True
+                registered = self._fetch_cleanup.register(
+                    None,
+                    process,
+                    runtime_root,
+                    temporary,
+                )
+                if not registered:
+                    cleanup_error = SubscriptionFetchError(
+                        "subscription source worker cleanup supervisor unavailable; recovery artifact retained"
+                    )
+                else:
+                    cleanup_error = SubscriptionFetchError(
+                        "subscription source worker could not be stopped; recovery supervisor retained"
+                    )
             if not preserve_worker_tree:
                 try:
                     _secure_remove_tree(runtime_root, temporary, SubscriptionFetchError, private_names=True)
@@ -290,7 +374,8 @@ class SubscriptionManager(object):
                 if operation_error is None:
                     raise cleanup_error
                 raise SubscriptionFetchError(
-                    "subscription source operation and worker cleanup failed; recovery artifact retained"
+                    "subscription source operation and worker cleanup failed (%s); recovery artifact retained"
+                    % cleanup_error
                 ) from operation_error
 
     def _source_body(self, source_url, body, format_hint, allow_http):

@@ -2,12 +2,13 @@ import base64
 import json
 import os
 import threading
+import time
 
 import pytest
 
 import jerryproxy.subscription.manager as manager_module
 import jerryproxy.subscription.storage as storage_module
-from jerryproxy.errors import SubscriptionFetchError, SubscriptionStateError
+from jerryproxy.errors import IntegrityError, SubscriptionFetchError, SubscriptionStateError
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.subscription import SingleNodeSource, SubscriptionManager, V2RaySubscriptionParser
 from jerryproxy.subscription.manager import _read_fetch_result, _write_fetch_result
@@ -30,6 +31,8 @@ def test_subscription_state_is_private_and_rooted_below_home(tmp_path):
     identity = paths.nodes / "identity.key"
     assert identity.is_file()
     assert len(identity.read_bytes()) == 32
+    assert len(record.nodes[0].fingerprint) == 64
+    assert "fingerprint" not in record.nodes[0].public()
     if os.name == "posix":
         assert (state.stat().st_mode & 0o777) == 0o600
         assert (state.parent.stat().st_mode & 0o777) == 0o700
@@ -44,6 +47,7 @@ def test_node_identity_is_bound_to_the_subscription_public_id(tmp_path):
 
     assert first.subscription_id != second.subscription_id
     assert first.nodes[0].node_id != second.nodes[0].node_id
+    assert first.nodes[0].fingerprint != first.nodes[0].node_id
 
 
 def test_failed_refresh_preserves_last_known_good(tmp_path, monkeypatch):
@@ -90,6 +94,16 @@ def test_private_state_rejects_node_projection_tampering(tmp_path):
     value["nodes"][0]["uri"] = "ss://YWVzLTI1Ni1nY206YXR0YWNrQDE5Mi4wLjIuMjo0NDM"
     path.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(SubscriptionStateError, match="do not match source"):
+        manager.get("main")
+
+
+def test_fingerprinted_subscription_rejects_a_missing_identity_key(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    manager.add("main", None, body=SS, format_hint="uri-lines")
+    paths.nodes.joinpath("identity.key").unlink()
+
+    with pytest.raises(IntegrityError, match="fingerprinted state"):
         manager.get("main")
 
 
@@ -305,6 +319,125 @@ def test_remote_worker_start_has_a_bounded_deadline(tmp_path, monkeypatch):
     assert not tuple(paths.runtimes.glob(".subscription-fetch-*"))
 
 
+def test_late_worker_start_is_owned_by_an_independent_cleanup_supervisor(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    release = threading.Event()
+
+    class Gate(object):
+        def wait(self, timeout):
+            del timeout
+            return True
+
+        def is_set(self):
+            return False
+
+        def set(self):
+            pass
+
+    class LateProcess(object):
+        def __init__(self, target, args):
+            del target, args
+            self.started = False
+            self.exitcode = None
+
+        def start(self):
+            self.started = True
+            release.wait(1.0)
+            self.exitcode = 0
+
+        def join(self, timeout):
+            del timeout
+
+        def is_alive(self):
+            return self.started and not release.is_set()
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    class Context(object):
+        Event = Gate
+
+        @staticmethod
+        def Process(target, args):
+            return LateProcess(target, args)
+
+    monkeypatch.setattr(manager_module.multiprocessing, "get_context", lambda name: Context())
+    monkeypatch.setattr(manager_module, "_FETCH_START_SECONDS", 0.01)
+    monkeypatch.setattr(manager_module, "_FETCH_STOP_SECONDS", 0.01)
+    monkeypatch.setattr(manager_module, "_FETCH_LATE_CLEANUP_SECONDS", 0.5)
+    with pytest.raises(SubscriptionFetchError, match="cleanup failed"):
+        manager._fetch_remote("https://provider.example/sub", False, "uri-lines")
+    pending = tuple(paths.runtimes.glob(".subscription-fetch-*"))
+    assert len(pending) == 1
+
+    release.set()
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and tuple(paths.runtimes.glob(".subscription-fetch-*")):
+        time.sleep(0.01)
+    assert not tuple(paths.runtimes.glob(".subscription-fetch-*"))
+
+
+def test_late_worker_start_retains_evidence_when_supervisor_cannot_start(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    release = threading.Event()
+
+    class Gate(object):
+        def wait(self, timeout):
+            del timeout
+            return True
+
+        def is_set(self):
+            return False
+
+        def set(self):
+            pass
+
+    class LateProcess(object):
+        def __init__(self, target, args):
+            del target, args
+            self.started = False
+            self.exitcode = None
+
+        def start(self):
+            self.started = True
+            release.wait(1.0)
+            self.exitcode = 0
+
+        def join(self, timeout):
+            del timeout
+
+        def is_alive(self):
+            return self.started and not release.is_set()
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    class Context(object):
+        Event = Gate
+
+        @staticmethod
+        def Process(target, args):
+            return LateProcess(target, args)
+
+    monkeypatch.setattr(manager_module.multiprocessing, "get_context", lambda name: Context())
+    monkeypatch.setattr(manager_module, "_FETCH_START_SECONDS", 0.01)
+    monkeypatch.setattr(manager_module, "_FETCH_STOP_SECONDS", 0.01)
+    monkeypatch.setattr(manager._fetch_cleanup, "register", lambda *args: False)
+    with pytest.raises(SubscriptionFetchError, match="supervisor unavailable"):
+        manager._fetch_remote("https://provider.example/sub", False, "uri-lines")
+    assert tuple(paths.runtimes.glob(".subscription-fetch-*"))
+
+    release.set()
+
+
 def test_body_sources_validate_a_persisted_url_before_publication(tmp_path):
     paths = JerryProxyPaths(tmp_path / ".jerryproxy")
     manager = SubscriptionManager(paths)
@@ -375,6 +508,87 @@ def test_committed_subscription_publication_journal_rolls_forward_on_reopen(tmp_
     monkeypatch.undo()
     assert manager.get("main").revision == candidate.revision
     assert not (paths.subscriptions / ".publication.journal.json").exists()
+
+
+def test_prepared_subscription_removal_journal_restores_the_record_on_reopen(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    original = manager.add("main", None, body=SS, format_hint="uri-lines")
+    write_journal = storage_module._write_publication_journal_locked
+
+    def crash_before_commit(journal_paths, value):
+        if value["kind"] == "remove" and value["phase"] == "committed":
+            raise SystemExit("simulated removal commit interruption")
+        return write_journal(journal_paths, value)
+
+    monkeypatch.setattr(storage_module, "_write_publication_journal_locked", crash_before_commit)
+    with pytest.raises(SystemExit):
+        manager.remove("main")
+
+    assert not (paths.subscriptions / "main.json").exists()
+    journal = json.loads((paths.subscriptions / ".publication.journal.json").read_text(encoding="utf-8"))
+    assert set(journal) == {
+        "kind",
+        "operation",
+        "phase",
+        "quarantine_identity",
+        "retired_at",
+        "subscription_id",
+    }
+    assert "name_digest" not in journal
+    assert "old_revision" not in journal
+    assert "new_revision" not in journal
+    quarantine = paths.runtimes / (".subscription-remove-%s.json" % journal["operation"])
+    assert quarantine.is_file()
+    monkeypatch.undo()
+    restored = manager.get("main")
+    assert restored.revision == original.revision
+    assert restored.nodes[0].node_id == original.nodes[0].node_id
+    assert not (paths.subscriptions / ".publication.journal.json").exists()
+    assert not quarantine.exists()
+    tombstones = json.loads((paths.nodes / "tombstones.json").read_text(encoding="utf-8"))
+    assert tombstones["entries"] == []
+
+
+def test_prepared_subscription_removal_before_stage_rolls_back_without_quarantine(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    original = manager.add("main", None, body=SS, format_hint="uri-lines")
+
+    def crash_before_stage(*args, **kwargs):
+        del args, kwargs
+        raise SystemExit("simulated removal interruption before stage")
+
+    monkeypatch.setattr(storage_module, "_stage_record_locked", crash_before_stage)
+    with pytest.raises(SystemExit):
+        manager.remove("main")
+
+    assert (paths.subscriptions / "main.json").is_file()
+    assert not tuple(paths.runtimes.glob(".subscription-remove-*.json"))
+    monkeypatch.undo()
+    restored = manager.get("main")
+    assert restored.revision == original.revision
+    assert restored.nodes[0].node_id == original.nodes[0].node_id
+    assert not (paths.subscriptions / ".publication.journal.json").exists()
+    tombstones = json.loads((paths.nodes / "tombstones.json").read_text(encoding="utf-8"))
+    assert tombstones["entries"] == []
+
+
+def test_subscription_removal_quarantine_integrity_failure_is_not_downgraded(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    manager.add("main", None, body=SS, format_hint="uri-lines")
+
+    def fail_integrity(*args, **kwargs):
+        del args, kwargs
+        raise IntegrityError("quarantine identity changed")
+
+    monkeypatch.setattr(storage_module, "_secure_remove_tree", fail_integrity)
+    with pytest.raises(IntegrityError, match="quarantine identity changed"):
+        manager.remove("main")
+
+    assert not (paths.subscriptions / "main.json").exists()
+    assert (paths.subscriptions / ".publication.journal.json").is_file()
 
 
 def test_subscription_history_is_bounded_and_removed_with_the_record(tmp_path):

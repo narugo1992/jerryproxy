@@ -10,7 +10,7 @@ NodeRecord
 -----------------------------------------------------
 
 .. autoclass:: NodeRecord
-   :members: node_id,scheme,display,uri,occurrence,public,secret_uri
+   :members: node_id,scheme,display,uri,occurrence,fingerprint,public,secret_uri
 
 
 SingleNodeSource
