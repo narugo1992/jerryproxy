@@ -33,8 +33,12 @@ if CONTRACT is None:
 REQUEST_TIMEOUT = (5.0, 15.0)
 # Starting a node includes bootstrapping the exact backend release on a cold
 # home, so this lane needs far more than the unit matrix's per-test budget.
-STARTUP_DEADLINE = 240.0
-CASE_TIMEOUT = 420.0
+STARTUP_DEADLINE = 180.0
+BACKEND_INSTALL_DEADLINE = 420.0
+# pytest-timeout counts setup, so the first case also pays for the session-wide
+# backend install. The budget must exceed both or a legal slow download would be
+# reported as a three-protocol data-plane failure.
+CASE_TIMEOUT = BACKEND_INSTALL_DEADLINE + STARTUP_DEADLINE + 60.0
 
 
 def _session(port=None):  # type: (object) -> requests.Session
@@ -97,21 +101,43 @@ def test_environment_contract_is_reported_without_secrets():
         assert uri not in described
 
 
-def test_sentinel_is_unreachable_without_the_proxy():
-    """The negative control: this must fail before any proxy assertion counts.
+def _assert_sentinel_is_isolated():
+    """Fail unless the sentinel is unreachable without a proxy.
 
-    If the sentinel were reachable directly, every data-plane assertion below
-    would pass without proving that traffic traversed a proxy at all.
+    Every positive assertion in this module depends on this being true, so it is
+    a precondition of each data-plane case rather than a separate test that
+    ordering, `-k` filtering, or parallel execution could drop.
     """
 
-    with pytest.raises((socket.gaierror, socket.timeout, OSError)):
+    try:
         connection = socket.create_connection(
             (CONTRACT.sentinel_host, CONTRACT.sentinel_port), timeout=5.0
         )
+    except OSError as error:
+        # Distinguish isolation from an unrelated local failure: a resolvable
+        # name that refuses the connection would mean the sentinel joined the
+        # client network, which is the failure this control exists to catch.
+        assert isinstance(error, (socket.gaierror, socket.timeout, ConnectionError, TimeoutError)), (
+            "sentinel is isolated for an unexpected reason: %s" % type(error).__name__
+        )
+    else:
         connection.close()
-
+        raise AssertionError(
+            "sentinel is directly reachable; no data-plane assertion would prove anything"
+        )
     with pytest.raises(requests.RequestException):
         _session().get(CONTRACT.sentinel_url, timeout=(3.0, 5.0))
+
+
+@pytest.fixture
+def isolated_sentinel():
+    """Bind the negative control to each case that relies on it."""
+
+    _assert_sentinel_is_isolated()
+
+
+def test_sentinel_is_unreachable_without_the_proxy():
+    _assert_sentinel_is_isolated()
 
 
 def test_subscription_source_serves_bounded_base64_uri_lines():
@@ -133,40 +159,48 @@ def _fixture_body():  # type: () -> bytes
     return body
 
 
-def _publish_subscription(home):  # type: (object) -> None
-    """Publish the fixture source body through the public add command.
+def _publish_subscription(home, scheme):  # type: (object, str) -> str
+    """Publish exactly one node so no alternate can serve the request.
+
+    Publishing all three nodes together would leave the runtime's recovery sweep
+    free to substitute another protocol: a health blip against its public quorum
+    targets makes it restart and try the next node in the same record, and the
+    case would still reach the sentinel while the protocol under test carried
+    nothing. A single-node subscription removes that possibility structurally
+    rather than relying on recovery not triggering.
 
     The product refuses to persist a source that is not HTTPS and does not
     resolve to a global address, which is exactly what an in-network fixture is.
-    That guard is deliberate and is asserted separately below, so the body is
-    supplied through the bounded file source instead. The classification,
-    inventory, and runtime path under test are identical either way.
+    That guard is deliberate and asserted separately, so the body is supplied
+    through the bounded file source instead.
     """
 
-    body = _fixture_body()
-    feed = home.parent / "fixture-source"
+    uri = CONTRACT.nodes[scheme]
+    feed = home.parent / ("fixture-%s" % scheme)
     feed.parent.mkdir(parents=True, exist_ok=True)
-    feed.write_bytes(body)
-    result = _run(["subscription", "add", "e2e", "--file", str(feed), "--json"], home)
+    feed.write_bytes((uri + "\n").encode("utf-8"))
+    result = _run(["subscription", "add", scheme, "--file", str(feed), "--json"], home)
     assert result.returncode == 0, _redacted(result.stdout.decode("utf-8", "replace"))
+    return scheme
 
 
 def _node_id(home, scheme):  # type: (object, str) -> str
     """Resolve the exact node identity for one scheme, never a random pick."""
 
-    result = _run(["node", "list", "e2e", "--json"], home)
+    result = _run(["node", "list", scheme, "--json"], home)
     assert result.returncode == 0, _redacted(result.stdout.decode("utf-8", "replace"))
     nodes = json.loads(result.stdout.decode("utf-8"))
-    matching = [node for node in nodes if node["scheme"] == scheme]
-    assert len(matching) == 1, "expected exactly one %s node, found %d" % (scheme, len(matching))
-    return matching[0]["id"]
+    assert len(nodes) == 1, "expected a single-node subscription, found %d" % len(nodes)
+    assert nodes[0]["scheme"] == scheme, "published node is %s, not %s" % (nodes[0]["scheme"], scheme)
+    return nodes[0]["id"]
 
 
 class _Server(object):
     """One foreground `jerryproxy server` child, owned for a single test."""
 
-    def __init__(self, home, node_id, port):
+    def __init__(self, home, subscription, node_id, port):
         self.home = home
+        self.subscription = subscription
         self.node_id = node_id
         self.port = port
         self.process = None
@@ -184,7 +218,7 @@ class _Server(object):
                 "jerryproxy",
                 "server",
                 "--subscription",
-                "e2e",
+                self.subscription,
                 "--node",
                 self.node_id,
                 "--port",
@@ -202,7 +236,14 @@ class _Server(object):
         self._reader = threading.Thread(target=self._pump, name="e2e-server-log")
         self._reader.daemon = True
         self._reader.start()
-        self._wait_ready()
+        try:
+            self._wait_ready()
+        except BaseException:
+            # __exit__ never runs when __enter__ raises, so a failed readiness
+            # wait would otherwise leave a live proxy child holding the home
+            # lock and its listener for the rest of the session.
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def _pump(self):
@@ -227,26 +268,39 @@ class _Server(object):
             pass
 
     def _wait_ready(self):
+        """Wait for the product to declare readiness, not merely for a bind.
+
+        The backend binds its listener before the session runs its startup health
+        quorum, and a missed quorum stops and relaunches the child. Connecting on
+        the first accept therefore races that restart and yields a spurious
+        connection error, so the child's own readiness record is the gate.
+        """
+
         deadline = time.monotonic() + STARTUP_DEADLINE
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 raise AssertionError(
                     "server exited during startup: %s" % _redacted(self._drain())
                 )
-            try:
-                connection = socket.create_connection(("127.0.0.1", self.port), timeout=1.0)
-            except OSError:
-                time.sleep(0.5)
-                continue
-            connection.close()
-            return
-        raise AssertionError("server did not open its listener within the deadline")
+            if "proxy listener ready at" in self._drain():
+                return
+            time.sleep(0.5)
+        raise AssertionError(
+            "server did not report readiness within the deadline: %s" % _redacted(self._drain())
+        )
 
     def _drain(self):
         with self._lock:
             return b"".join(self._lines).decode("utf-8", "replace")
 
+    def raw_output(self):  # type: () -> str
+        """Return the child's output unredacted, for leak assertions only."""
+
+        return self._drain()
+
     def diagnostics(self):  # type: () -> str
+        """Return a redacted rendering, safe to place in a failure message."""
+
         return _redacted(self._drain())
 
     def __exit__(self, exception_type, exception, traceback):
@@ -256,6 +310,7 @@ class _Server(object):
             try:
                 self.process.wait(timeout=30.0)
             except subprocess.TimeoutExpired:
+                # A child that ignores termination is escalated to a hard kill.
                 self.process.kill()
                 self.process.wait(timeout=10.0)
         if self._reader is not None:
@@ -276,7 +331,7 @@ def warm_home(tmp_path_factory):
     result = _run(
         ["backend", "install", CONTRACT.backend, CONTRACT.backend_version],
         root,
-        timeout=600.0,
+        timeout=BACKEND_INSTALL_DEADLINE,
     )
     assert result.returncode == 0, _redacted(result.stdout.decode("utf-8", "replace"))
     return root
@@ -300,34 +355,39 @@ def unused_port():
 
 @pytest.mark.timeout(CASE_TIMEOUT)
 @pytest.mark.parametrize("scheme", ["ss", "vmess", "vless"])
-def test_each_protocol_reaches_the_private_sentinel(scheme, home, unused_port):
+def test_each_protocol_reaches_the_private_sentinel(scheme, home, unused_port, isolated_sentinel):
     """Traffic must traverse the selected protocol to obtain the run nonce."""
 
-    _publish_subscription(home)
+    subscription = _publish_subscription(home, scheme)
     node_id = _node_id(home, scheme)
 
-    with _Server(home, node_id, unused_port) as server:
+    with _Server(home, subscription, node_id, unused_port) as server:
         answer = _sentinel_answer(unused_port)
 
         assert answer["banner"] == _contract.SENTINEL_BANNER
         assert answer["marker"] == CONTRACT.marker, "sentinel returned an unexpected nonce"
-        # The listener must not leak the node URI or the nonce into diagnostics.
-        diagnostics = server.diagnostics()
-        assert CONTRACT.marker not in diagnostics
-        assert CONTRACT.nodes[scheme] not in diagnostics
+        # Assert against the child's raw output. Asserting against the redacted
+        # rendering would be circular: that rendering strips the very strings
+        # being looked for, so the check could never fail.
+        raw = server.raw_output()
+        assert CONTRACT.marker not in raw, "the run nonce reached the child's output"
+        assert CONTRACT.nodes[scheme] not in raw, "the node URI reached the child's output"
+        # A single-node subscription leaves no alternate, so recovery must never
+        # have substituted another node for the protocol under test.
+        assert "trying an alternate node" not in raw, server.diagnostics()
 
 
 @pytest.mark.timeout(CASE_TIMEOUT)
-def test_public_internet_is_reachable_through_each_node(home, unused_port):
+def test_public_internet_is_reachable_through_each_node(home, unused_port, isolated_sentinel):
     """Opt-in public egress: bounded targets, per-target result, no score."""
 
     if not CONTRACT.public_probes:
         pytest.skip("%s is not set; public egress is opt-in" % _contract.PUBLIC_PROBES)
 
-    _publish_subscription(home)
+    subscription = _publish_subscription(home, "ss")
     node_id = _node_id(home, "ss")
     results = {}
-    with _Server(home, node_id, unused_port):
+    with _Server(home, subscription, node_id, unused_port):
         for target in CONTRACT.public_probes:
             try:
                 response = _session(unused_port).get(target, timeout=REQUEST_TIMEOUT)
@@ -341,13 +401,14 @@ def test_public_internet_is_reachable_through_each_node(home, unused_port):
     assert reachable, "no public target was reachable through the proxy: %s" % results
 
 
-def test_an_in_network_source_url_is_refused_by_the_transport_guards(home):
-    """The source guards must hold against a real private container network.
+def test_an_in_network_source_url_is_refused_before_any_fetch(home):
+    """The plaintext source the fixture serves must never be persistable.
 
-    Unit tests cover this with injected resolvers; here the address really is a
-    private container address reached over a real Docker network, so this is the
-    guard working end to end rather than in a fixture. A test-only bypass is
-    never introduced to make the fetch succeed.
+    The fixture is plain HTTP, so the scheme gate rejects it before the
+    private-address guard is ever consulted; this asserts that exact gate rather
+    than claiming to cover both. The point is that no test-only bypass exists to
+    make an in-network source succeed, so the lane cannot weaken the product to
+    suit its own fixture.
     """
 
     result = _run(
@@ -356,7 +417,7 @@ def test_an_in_network_source_url_is_refused_by_the_transport_guards(home):
     output = _redacted(result.stdout.decode("utf-8", "replace"))
 
     assert result.returncode != 0, "an in-network HTTP source must not be persisted"
-    assert "must use HTTPS" in output or "not public" in output, output
+    assert "must use HTTPS" in output, output
     # A refused source must leave no subscription behind.
     listed = _run(["subscription", "list", "--json"], home)
     assert listed.returncode == 0, _redacted(listed.stdout.decode("utf-8", "replace"))

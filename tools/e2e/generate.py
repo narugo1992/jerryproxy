@@ -29,6 +29,40 @@ CAMOUFLAGE_SNI = "www.example.test"
 VLESS_FLOW = "xtls-rprx-vision"
 
 
+def write_environment(path, exports):  # type: (str, dict) -> None
+    """Write both env formats the harness needs, because they disagree.
+
+    ``docker --env-file`` parses each line literally, so a quote would become
+    part of the value. A POSIX shell sourcing the same line needs the quotes,
+    because a VLESS URI contains ``&`` and an unquoted line is parsed as
+    asynchronous assignments that leave the variable unset with no error.
+
+    One file cannot satisfy both, so ``path`` is written literally for Docker
+    and ``path`` with a ``.sh`` suffix is written quoted for shells. The harness
+    self-check imports this function so it verifies the real writer rather than
+    a second copy of these rules.
+    """
+
+    path = os.path.abspath(path)
+    _private_write(
+        path,
+        "".join("%s=%s\n" % (item, exports[item]) for item in sorted(exports)).encode("utf-8"),
+    )
+    _private_write(
+        shell_environment_path(path),
+        "".join(
+            "%s='%s'\n" % (item, exports[item].replace("'", "'\\''"))
+            for item in sorted(exports)
+        ).encode("utf-8"),
+    )
+
+
+def shell_environment_path(path):  # type: (str) -> str
+    """Return the shell-sourceable companion of a Docker env file."""
+
+    return "%s.sh" % os.path.abspath(path)
+
+
 def _private_write(path, payload):  # type: (str, bytes) -> None
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -99,7 +133,7 @@ def _server_config(inbound):  # type: (dict) -> dict
     """One protocol inbound, a direct outbound, and no controller listener."""
 
     return {
-        "log": {"loglevel": "debug"},
+        "log": {"loglevel": "info"},
         "inbounds": [inbound],
         "outbounds": [{"protocol": "freedom", "tag": "direct"}],
     }
@@ -218,10 +252,7 @@ def main():  # type: () -> int
         "JERRYPROXY_E2E_VMESS_NODE": vmess_uri,
         "JERRYPROXY_E2E_VLESS_NODE": vless_uri,
     }
-    _private_write(
-        os.path.abspath(arguments.env_file),
-        "".join("%s=%s\n" % (name, value) for name, value in sorted(exports.items())).encode("utf-8"),
-    )
+    write_environment(arguments.env_file, exports)
     # Names only: the workflow log must not carry generated credentials.
     sys.stdout.write("generated %d configs and %d exports\n" % (len(configs), len(exports)))
     return 0

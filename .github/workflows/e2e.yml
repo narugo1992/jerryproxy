@@ -48,6 +48,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Verify the harness invariants offline
+        run: |
+          set -euo pipefail
+          # Cheap and deterministic, so a broken redaction or an exposed port
+          # fails before any image is pulled or credential generated.
+          make e2e_check
+
       - name: Resolve the pinned proxy release from the repository catalog
         id: pinned
         run: |
@@ -68,10 +75,10 @@ jobs:
           "$RUNNER_TEMP/xray/xray" version
 
       - name: Pull and verify the digest-pinned images
-          # Pulling explicitly means a digest mismatch fails here with a clear
-          # cause, rather than surfacing later as a confusing startup error.
         run: |
           set -euo pipefail
+          # Pulling explicitly means a digest mismatch fails here with a clear
+          # cause, rather than surfacing later as a confusing startup error.
           for image in "$E2E_PYTHON_IMAGE" "$E2E_NGINX_IMAGE" "$E2E_ALPINE_IMAGE"; do
             docker pull -q "$image"
             expected="${image##*@}"
@@ -106,7 +113,7 @@ jobs:
       - name: Start the two-network topology
         run: |
           set -euo pipefail
-          set -a; . "$RUNNER_TEMP/e2e.env"; set +a
+          set -a; . "$RUNNER_TEMP/e2e.env.sh"; set +a
           export E2E_TOOLS="$PWD/tools/e2e" E2E_GENERATED="$RUNNER_TEMP/generated"
           docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" up -d
           docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" ps
@@ -114,7 +121,7 @@ jobs:
       - name: Wait for protocol readiness
         run: |
           set -euo pipefail
-          set -a; . "$RUNNER_TEMP/e2e.env"; set +a
+          set -a; . "$RUNNER_TEMP/e2e.env.sh"; set +a
           # depends_on only orders creation. Prove each listener actually accepts
           # a connection and that the sentinel answers on the private network.
           for probe in "sentinel 8080 private" "subscription 8081 client" \
@@ -150,15 +157,26 @@ jobs:
             grep -q "^$name=" "$RUNNER_TEMP/e2e.env" || { echo "::error::$name was not generated"; missing=1; }
           done
           [ "$missing" = "0" ]
-          # The runner must not be able to see the sentinel directly; if it can,
-          # every data-plane assertion afterwards would prove nothing.
+          # Probe the injected target rather than a duplicated literal: a
+          # hardcoded host/port would keep printing "verified" after the
+          # topology moved, which is exactly when the check must fail.
+          set -a; . "$RUNNER_TEMP/e2e.env.sh"; set +a
+          host="$JERRYPROXY_E2E_SENTINEL_HOST"; port="$JERRYPROXY_E2E_SENTINEL_PORT"
+          if docker run --rm --network jerryproxy-e2e-private "$E2E_PYTHON_IMAGE" \
+               python -c "import socket,sys;socket.create_connection((sys.argv[1],int(sys.argv[2])),timeout=5).close()" \
+               "$host" "$port" >/dev/null 2>&1; then
+            echo "sentinel answers on private-net: $host:$port"
+          else
+            echo "::error::$host:$port is not reachable on private-net; the probe target is wrong"
+            exit 1
+          fi
           if docker run --rm --network jerryproxy-e2e-client "$E2E_PYTHON_IMAGE" \
-               python -c "import socket;socket.create_connection(('sentinel',8080),timeout=4).close()" \
-               >/dev/null 2>&1; then
+               python -c "import socket,sys;socket.create_connection((sys.argv[1],int(sys.argv[2])),timeout=4).close()" \
+               "$host" "$port" >/dev/null 2>&1; then
             echo "::error::sentinel is reachable from client-net; the isolation is broken"
             exit 1
           fi
-          echo "isolation verified: sentinel unreachable from client-net"
+          echo "isolation verified: $host:$port unreachable from client-net"
 
       - name: Run the end-to-end lane
         run: |
@@ -184,14 +202,18 @@ jobs:
         if: failure()
         run: |
           set -uo pipefail
-          set -a; . "$RUNNER_TEMP/e2e.env" 2>/dev/null || true; set +a
+          set -a; . "$RUNNER_TEMP/e2e.env.sh" 2>/dev/null || true; set +a
           export E2E_TOOLS="$PWD/tools/e2e" E2E_GENERATED="$RUNNER_TEMP/generated"
+          # Redact every generated value, not only the nonce: the servers log
+          # access records, so a UUID, password, key, or short id could
+          # otherwise reach the published workflow log.
+          python tools/e2e/redact.py \
+            --env-file "$RUNNER_TEMP/e2e.env" --output "$RUNNER_TEMP/redact.sed"
           for service in sentinel subscription ss-server vmess-server vless-server camouflage; do
             echo "===== $service ====="
-            # Redact the run nonce before anything is published.
             docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" \
               logs --tail 120 "$service" 2>&1 \
-              | sed -e "s/${JERRYPROXY_E2E_MARKER:-__absent__}/[REDACTED MARKER]/g" \
+              | sed -f "$RUNNER_TEMP/redact.sed" \
               | head -c 20000
           done
 
@@ -199,10 +221,11 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          set -a; . "$RUNNER_TEMP/e2e.env" 2>/dev/null || true; set +a
+          set -a; . "$RUNNER_TEMP/e2e.env.sh" 2>/dev/null || true; set +a
           export E2E_TOOLS="$PWD/tools/e2e" E2E_GENERATED="$RUNNER_TEMP/generated"
           docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" down --volumes --remove-orphans
-          rm -rf "$RUNNER_TEMP/generated" "$RUNNER_TEMP/e2e.env" "$RUNNER_TEMP/xray"
+          rm -rf "$RUNNER_TEMP/generated" "$RUNNER_TEMP/e2e.env" "$RUNNER_TEMP/e2e.env.sh" \
+            "$RUNNER_TEMP/redact.sed" "$RUNNER_TEMP/xray"
           # A leftover project or private network is a workflow failure.
           if docker network ls --format '{{.Name}}' | grep -qE '^jerryproxy-e2e-(client|private)$'; then
             echo "::error::a test network survived cleanup"
