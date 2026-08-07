@@ -334,7 +334,10 @@ authentication, extraction, process, or permission errors to warnings.
   content for that subscription and format; it does not attest node order,
   list completeness, or which revision a projection belongs to. A fingerprint
   failure is tampering and must stay an `IntegrityError` that no repair path
-  accepts, so every tolerant read must still run that check. A reparse
+  accepts, so every tolerant read must still run that check. Reads classify in
+  order of severity: the fingerprint decides tampering before the reparse
+  decides drift, so forged node content is never reported as recoverable or
+  answered with a repair instruction. A reparse
   mismatch alone is recoverable drift, must raise
   `SubscriptionNodesMismatchError`, and is repaired only by refetching the
   saved source URL and rebuilding the projection; the stored nodes are never
