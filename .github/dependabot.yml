@@ -4,6 +4,27 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    # JerryProxy supports CPython 3.7, so an upgrade whose own requires_python
+    # excludes 3.7 cannot be accepted: every 3.7 matrix cell fails at install
+    # time. The pins in requirements*.txt already express those ceilings; these
+    # entries stop the same rejected upgrade being reproposed every month.
+    #
+    # Remove an entry only together with the ceiling it mirrors, and remove the
+    # whole block when Python 3.7 support is dropped.
+    ignore:
+      # click 8.2 requires >= 3.10.  One click version across the matrix also
+      # keeps rendered --help output comparable between cells.
+      - dependency-name: click
+        versions: [">=8.2"]
+      # pytest-cov 5 requires >= 3.8.
+      - dependency-name: pytest-cov
+        versions: [">=5"]
+      # twine 6 requires >= 3.8.
+      - dependency-name: twine
+        versions: [">=6"]
+      # PyInstaller 6 requires >= 3.8, and the standalone lane builds on 3.7.
+      - dependency-name: pyinstaller
+        versions: [">=6"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
