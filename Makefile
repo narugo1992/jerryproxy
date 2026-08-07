@@ -1,4 +1,4 @@
-.PHONY: help install_dev package build build_linux clean test unittest e2e lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check archive_corpus archive_corpus_check relay_health_sync relay_health_check relay_health_wiki relay_health_gate check
+.PHONY: help install_dev package build build_linux clean test unittest e2e e2e_check lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check archive_corpus archive_corpus_check relay_health_sync relay_health_check relay_health_wiki relay_health_gate check
 
 PYTHON ?= $(shell which python)
 PYTHON37 ?= python3.7
@@ -56,6 +56,7 @@ help:
 	@echo "  make test         - Alias for make unittest"
 	@echo "  make unittest     - Run pytest with coverage (excludes the E2E lane)"
 	@echo "  make e2e           - Run the Docker-backed end-to-end lane"
+	@echo "  make e2e_check     - Verify the harness assets offline"
 	@echo "                      RANGE_DIR=<path>"
 	@echo "  make python37     - Run unit tests through python3.7"
 	@echo "  make lint         - Run ruff checks"
@@ -132,6 +133,10 @@ python37:
 # Requires the JERRYPROXY_E2E_* contract; skips with one reason without it.
 e2e:
 	pytest "${E2E_TEST_DIR}" -sv -m e2e
+
+# Offline invariants of the harness assets: no Docker, no network.
+e2e_check:
+	cd ${TOOLS_DIR}/e2e && $(PYTHON) check.py
 
 lint:
 	ruff check ${SRC_DIR} ${TEST_DIR} ${TOOLS_DIR} jerryproxy_cli.py setup.py auto_rst.py auto_rst_top_index.py
