@@ -88,6 +88,12 @@ once when policy permits. Automatic failover never rewrites the saved node
 preference. The bearer URL, UUIDs, Reality keys, and backend raw output are
 never printed as one unredacted blob.
 
+When the stored nodes no longer match their source bytes, startup refreshes
+that subscription's saved URL exactly once and then continues; a projection
+that is still inconsistent, a subscription with no saved URL, or a failed
+refresh stops the session and names the command to run. Repaired nodes get new
+identities, so an explicit `--node NODE_ID` may need `node list NAME` again.
+
 \b
 Forms:
   jerryproxy server

@@ -6,6 +6,11 @@ from . import _common
 
 _HELP = """Validate one stored subscription's immutable source and NodeSet shape without fetching or mutating.
 
+Validation fails when the stored nodes no longer match the source bytes. Repair
+that with `subscription refresh NAME`, which refetches the saved URL and
+rebuilds the nodes. A fingerprint failure instead reports tampering and is
+never repaired automatically.
+
 Use `validate NAME` for scripts. Omitting NAME opens a selector in a real TTY;
 JSON and non-interactive calls require NAME.
 """

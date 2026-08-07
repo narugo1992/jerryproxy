@@ -10,4 +10,4 @@ SubscriptionManager
 -----------------------------------------------------
 
 .. autoclass:: SubscriptionManager
-   :members: __init__,list,get,add,replace,refresh,validate,remove
+   :members: __init__,list,get,add,replace,refresh,repair_node_projection,validate,remove
