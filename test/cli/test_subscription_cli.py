@@ -10,7 +10,10 @@ import jerryproxy.cli._common as cli_common
 import jerryproxy.cli.server as server_module
 import jerryproxy.cli.subscription._common as subscription_common
 from jerryproxy.cli import cli
-from jerryproxy.subscription.model import NodeRecord, SubscriptionRecord
+from jerryproxy.home import JerryProxyPaths
+from jerryproxy.subscription import SubscriptionManager, V2RaySubscriptionParser
+from jerryproxy.subscription.model import NodeRecord, ParsedSubscription, SubscriptionRecord
+from jerryproxy.subscription.transport import FetchedSubscription
 
 SS = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ss\n"
 VMESS = "vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1NTUiLCJuZXQiOiJ0Y3AiLCJwb3J0IjoiNDQzIiwicHMiOiJ2bWVzcyIsInRscyI6InRscyIsInYiOjJ9\n"
@@ -738,3 +741,113 @@ def test_guided_add_source_wizard_ignores_noncanonical_environment(tmp_path, mon
     assert result.exit_code == 2
     assert "no matching subscription environment variables are set" in result.output
     assert "provider.example" not in result.output
+
+
+class _UpgradedParser(V2RaySubscriptionParser):
+    """Stand in for a release that classifies the same bytes differently."""
+
+    def parse(self, body, format_hint="auto"):
+        parsed = super(_UpgradedParser, self).parse(body, format_hint=format_hint)
+        records = tuple((scheme, display + "-upgraded", uri) for scheme, display, uri in parsed.records)
+        return ParsedSubscription(parsed.format, parsed.body, records)
+
+
+def _publish_drifted(home, source_url=None):
+    """Store a projection the shipped parser will no longer reproduce."""
+
+    paths = JerryProxyPaths(home)
+    manager = SubscriptionManager(paths, parser=_UpgradedParser())
+    if source_url is None:
+        return manager.add("main", None, body=SS.encode("ascii"), format_hint="uri-lines")
+    return manager.add("main", source_url, format_hint="uri-lines")
+
+
+def test_read_only_commands_name_the_repair_for_a_drifted_projection(tmp_path):
+    runner = CliRunner()
+    home = tmp_path / "home"
+    _publish_drifted(home)
+
+    for arguments in (
+        ("subscription", "list"),
+        ("subscription", "show", "main"),
+        ("subscription", "validate", "main"),
+        ("node", "list", "main"),
+    ):
+        result = _invoke(runner, home, *arguments)
+        assert result.exit_code == 1, result.output
+        assert "jerryproxy subscription refresh main" in str(result.exception)
+
+
+def test_guided_node_selection_repairs_a_drifted_projection(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(SS.encode("ascii"), "https://provider.example/secret"),
+    )
+    _publish_drifted(home, source_url="https://provider.example/secret")
+    captured = {}
+    monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
+    monkeypatch.setattr(cli_common, "select", lambda message, choices, **kwargs: choices[0].value)
+
+    @click.command("probe")
+    @click.pass_context
+    def probe(context):
+        captured["node"] = cli_common.select_subscription_node(context, "main", "Select a node:")
+
+    cli.add_command(probe)
+    try:
+        result = _invoke(CliRunner(), home, "probe")
+    finally:
+        cli.commands.pop("probe", None)
+
+    # The guided flow must not be a dead end for the very state it repairs.
+    assert result.exit_code == 0, result.output
+    assert captured["node"] == SubscriptionManager(JerryProxyPaths(home)).get("main").nodes[0].node_id
+
+
+def test_guided_node_selection_reports_an_unrepairable_projection(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _publish_drifted(home)
+    monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
+
+    @click.command("probe")
+    @click.pass_context
+    def probe(context):
+        cli_common.select_subscription_node(context, "main", "Select a node:")
+
+    cli.add_command(probe)
+    try:
+        result = _invoke(CliRunner(), home, "probe")
+    finally:
+        cli.commands.pop("probe", None)
+
+    assert result.exit_code == 1
+    assert "jerryproxy subscription replace main" in str(result.exception)
+
+
+def test_guided_subscription_menu_lists_a_drifted_record(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _publish_drifted(home)
+    monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
+    offered = {}
+
+    def capture(message, choices, **kwargs):
+        offered["names"] = [choice.value for choice in choices]
+        return choices[0].value
+
+    monkeypatch.setattr(cli_common, "select", capture)
+
+    @click.command("probe")
+    @click.pass_context
+    def probe(context):
+        cli_common.select_subscription(context, "Select:")
+
+    cli.add_command(probe)
+    try:
+        result = _invoke(CliRunner(), home, "probe")
+    finally:
+        cli.commands.pop("probe", None)
+
+    # A drifted record must remain selectable, or it can never be repaired.
+    assert result.exit_code == 0, result.output
+    assert offered["names"] == ["main"]

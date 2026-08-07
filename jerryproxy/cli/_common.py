@@ -8,6 +8,7 @@ from InquirerPy.base.control import Choice
 from tabulate import tabulate
 
 from ..backend import BackendManager, iter_backends
+from ..errors import SubscriptionNodesMismatchError
 from ..home import JerryProxyPaths
 from ..subscription import SubscriptionManager
 from ..subscription.redaction import terminal_safe_text
@@ -116,9 +117,15 @@ def select_backend(message, names=None):  # type: (str, Optional[Iterable[str]])
 
 
 def select_subscription(context, message, enabled_only=False):  # type: (click.Context, str, bool) -> str
-    """Select one stored subscription using only credential-free metadata."""
+    """Select one stored subscription using only credential-free metadata.
 
-    records = subscriptions(context).list()
+    The menu renders names, formats, and counts rather than node semantics, so
+    it lists records whose node projection drifted from their source bytes.
+    Otherwise one drifted record would hide every subscription and leave the
+    user unable to select the one that needs repairing.
+    """
+
+    records = subscriptions(context).list(allow_node_mismatch=True)
     if enabled_only:
         records = tuple(record for record in records if record.enabled)
     if not records:
@@ -142,9 +149,21 @@ def select_subscription(context, message, enabled_only=False):  # type: (click.C
 
 
 def select_subscription_node(context, subscription_name, message):  # type: (click.Context, str, str) -> str
-    """Select one node while displaying only its stable public projection."""
+    """Select one node while displaying only its stable public projection.
 
-    record = subscriptions(context).get(subscription_name)
+    A node menu consumes node semantics, so a projection that drifted from its
+    source bytes is rebuilt once before the menu renders; otherwise the guided
+    flow would be a dead end for exactly the state it needs to repair.  A
+    consistent record is read as before and contacts no source.
+    """
+
+    manager = subscriptions(context)
+    try:
+        record = manager.get(subscription_name)
+    except SubscriptionNodesMismatchError:
+        # The manager owns the single bounded repair and fails with the exact
+        # next command when the drift cannot be recovered automatically.
+        record = manager.repair_node_projection(subscription_name)
     choices = [
         Choice(
             node.node_id,

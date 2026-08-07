@@ -99,6 +99,20 @@ state, health policy, failover, and redacted output. Adding a new subscription
 container or runtime core therefore adds an adapter/driver instead of a second
 selection or locking path.
 
+Because the parser is an injected adapter, its classification of one immutable
+source body can legitimately change between releases. Durable state records
+both the source bytes and the projection derived from them, so an upgrade can
+leave a stored projection that a fresh parse no longer reproduces. Two
+independent checks separate that case from an attack: a keyed home fingerprint
+proves the projection was written by this home, and the reparse proves it still
+matches the bytes. A fingerprint failure is an integrity failure. A reparse
+mismatch alone is recoverable drift, reported as
+``SubscriptionNodesMismatchError``, and repaired by refetching the saved source
+and rebuilding the projection. Store reads that never consume node semantics —
+journal recovery, history pruning, and the pre-reads of publication and removal
+— tolerate that drift so one drifted record cannot block unrelated
+subscriptions or its own repair.
+
 Backend protocol schemas remain owned by the external cores. Python may build
 top-level configs and bounded subscription containers, but must not become a
 second implementation of VMess, VLESS, REALITY, or other protocol fields.

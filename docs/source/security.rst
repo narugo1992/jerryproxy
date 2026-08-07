@@ -124,6 +124,14 @@ Current URI-runtime invariants:
   JerryProxy-owned records have no owner prefix;
 * health recovery uses bounded restart/alternate/refresh steps and preserves
   the saved node preference;
+* every stored node carries a keyed home fingerprint over its subscription,
+  format, scheme, endpoint, URI, and occurrence, so node content this home
+  never wrote is rejected as tampering before any repair path runs, while a
+  projection that merely stopped matching its source bytes is repaired by one
+  bounded refresh of the saved source and never by trusting the stored nodes;
+  that fingerprint is per node and does not by itself attest node order, list
+  completeness, or revision, so every consumer of node semantics either
+  reparses the source bytes or repairs first;
 * managed downloads enforce time, size, and redirect policy.
 
 JerryProxy does not bundle external backends. Their upstream licenses and

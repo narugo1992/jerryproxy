@@ -328,6 +328,26 @@ authentication, extraction, process, or permission errors to warnings.
 - `jerryproxy.subscription` owns bounded source transport, URI classification,
   private revision publication, and sanitized node inventory. It must not
   normalize protocol-specific credentials/settings into a second core.
+- A stored node projection is protected by the keyed home fingerprint and
+  separately revalidated by reparsing its digest-protected source bytes. The
+  fingerprint is per node and attests only that this home wrote that node
+  content for that subscription and format; it does not attest node order,
+  list completeness, or which revision a projection belongs to. A fingerprint
+  failure is tampering and must stay an `IntegrityError` that no repair path
+  accepts, so every tolerant read must still run that check. A reparse
+  mismatch alone is recoverable drift, must raise
+  `SubscriptionNodesMismatchError`, and is repaired only by refetching the
+  saved source URL and rebuilding the projection; the stored nodes are never
+  trusted or partially reused during repair. Store reads that do not
+  consume node semantics tolerate that drift explicitly, so one drifted record
+  can never block journal recovery, history pruning, its own repair, or an
+  unrelated subscription. One bounded repair belongs to the subscription
+  manager; the CLI and the runtime session call it rather than reimplementing
+  it. A guided flow must repair before it consumes node semantics and must
+  still list a drifted record so it remains selectable, while read-only
+  commands stay strict and name the repair command. A foreground session
+  repairs at most one drift per start, revalidates the result, and otherwise
+  fails with the exact next command; it must never loop.
 - `jerryproxy.subscription.interfaces` owns the stable `ProxyNode`,
   `NodeSource`, and `SubscriptionParser` contracts. A subscription parser is
   an injected adapter; adding a new container must not add protocol branches to

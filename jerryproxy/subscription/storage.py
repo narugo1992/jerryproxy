@@ -19,6 +19,7 @@ from ..errors import (
     ArchiveError,
     IntegrityError,
     SubscriptionFetchError,
+    SubscriptionNodesMismatchError,
     SubscriptionParseError,
     SubscriptionStateError,
 )
@@ -519,9 +520,15 @@ def _restore_record_locked(paths, quarantine, expected_identity, parser):  # typ
 
     if is_path_alias(quarantine) or not quarantine.is_file():
         raise IntegrityError("subscription removal quarantine is invalid")
-    record = _record_from_value(_read_json(quarantine), parser=parser)
+    # Rollback restores the exact quarantined bytes and only reads the record's
+    # name and node identities, so recoverable projection drift must not strand
+    # an interrupted removal.  The journal identity match proves these are the
+    # bytes this transaction isolated, and the keyed fingerprint check proves
+    # the node identities about to be unretired are this home's own.
+    record = _record_from_value(_read_json(quarantine), parser=parser, allow_node_mismatch=True)
     if not identity_matches(quarantine, expected_identity):
         raise IntegrityError("subscription removal quarantine identity changed")
+    _validate_record_identity_if_present(paths, record)
     destination = _record_path(paths, record.name)
     if os.path.lexists(str(destination)):
         raise IntegrityError("subscription removal rollback destination already exists")
@@ -562,6 +569,20 @@ def _remove_quarantine_locked(paths, operation, expected_identity):  # type: (ob
         raise SubscriptionStateError("subscription removal quarantine cleanup failed") from error
 
 
+def _node_mismatch_error(name):  # type: (str) -> SubscriptionNodesMismatchError
+    """Report recoverable drift together with the command that repairs it.
+
+    The name has already passed :func:`validate_subscription_name`, so it is
+    bounded ASCII and safe to render.  No source bytes, URL, or node material
+    is included.
+    """
+
+    return SubscriptionNodesMismatchError(
+        "subscription nodes do not match source bytes: %s; "
+        "run `jerryproxy subscription refresh %s` to rebuild them" % (name, name)
+    )
+
+
 def _node_from_value(value):  # type: (dict) -> NodeRecord
     required = ("id", "scheme", "display", "uri", "occurrence", "fingerprint")
     if not isinstance(value, dict) or any(key not in value for key in required):
@@ -594,7 +615,21 @@ def _node_from_value(value):  # type: (dict) -> NodeRecord
     return NodeRecord(node_id, value["scheme"], value["display"], value["uri"], occurrence, fingerprint)
 
 
-def _record_from_value(value, parser=None):  # type: (dict, Optional[SubscriptionParser]) -> SubscriptionRecord
+def _record_from_value(value, parser=None, allow_node_mismatch=False):
+    # type: (dict, Optional[SubscriptionParser], bool) -> SubscriptionRecord
+    """Validate one durable record, optionally tolerating node-projection drift.
+
+    ``allow_node_mismatch`` relaxes exactly one check: the fresh reparse of the
+    digest-protected source bytes no longer has to reproduce the stored node
+    projection.  Every other check in this function still applies, and every
+    caller pairs it with :func:`_validate_record_identity_if_present`, whose
+    keyed per-node fingerprint means a tolerant read cannot accept node content
+    this home never wrote for this subscription and format.  That fingerprint
+    is per node: it does not attest the order, completeness, or revision of the
+    node list, so a tolerant read is only safe where the caller does not
+    consume node semantics.
+    """
+
     required = ("name", "id", "revision", "format", "enabled", "updated_at", "body", "nodes")
     if not isinstance(value, dict) or any(key not in value for key in required):
         raise SubscriptionStateError("subscription state is incomplete")
@@ -661,10 +696,10 @@ def _record_from_value(value, parser=None):  # type: (dict, Optional[Subscriptio
         # The digest-protected source must remain parseable before its private
         # node projection can be trusted.
         raise SubscriptionStateError("subscription source bytes cannot be revalidated") from error
-    expected = tuple(parsed.records)
-    actual = tuple((node.scheme, node.display, node.uri) for node in nodes)
-    if actual != expected:
-        raise SubscriptionStateError("subscription nodes do not match source bytes")
+    if not allow_node_mismatch and tuple(parsed.records) != tuple(
+        (node.scheme, node.display, node.uri) for node in nodes
+    ):
+        raise _node_mismatch_error(value["name"])
     return SubscriptionRecord(
         value["name"],
         value["id"],
@@ -676,6 +711,27 @@ def _record_from_value(value, parser=None):  # type: (dict, Optional[Subscriptio
         source_url,
         body,
     )
+
+
+def _require_node_projection(record, parser):  # type: (SubscriptionRecord, SubscriptionParser) -> None
+    """Reject a record whose stored projection no longer matches its source.
+
+    This repeats the strict half of :func:`_record_from_value` for a record
+    that was already read tolerantly, so a caller can locate one subscription
+    among drifted neighbours and still refuse to consume a drifted selection.
+    """
+
+    try:
+        parsed = parser.parse(
+            record.body,
+            format_hint="auto" if record.format == "base64-uri-lines" else "uri-lines",
+        )
+    except (SubscriptionFetchError, SubscriptionParseError, SubscriptionStateError, ValueError) as error:
+        # A tolerant read already accepted these bytes; a parse failure here is
+        # still corrupt private state rather than recoverable drift.
+        raise SubscriptionStateError("subscription source bytes cannot be revalidated") from error
+    if tuple(parsed.records) != tuple((node.scheme, node.display, node.uri) for node in record.nodes):
+        raise _node_mismatch_error(record.name)
 
 
 def _record_value(record):  # type: (SubscriptionRecord) -> dict
@@ -739,7 +795,15 @@ def _materialize_record_fingerprints_locked(paths, record):  # type: (object, Su
 
 
 def _history_records_locked(paths, parser):  # type: (object, object) -> list
-    """Read and validate bounded last-good generations in the private namespace."""
+    """Read and validate bounded last-good generations in the private namespace.
+
+    History entries are addressed by subscription ID and revision, are never
+    returned to a caller, and are only inventoried or pruned, so their node
+    projection is always read tolerantly.  Repairing a drifted subscription
+    archives the drifted generation it replaced; a strict read here would let
+    that archive break every later inventory of an already repaired home.  The
+    keyed fingerprint check below still rejects foreign state.
+    """
 
     if not paths.subscriptions.exists():
         return []
@@ -755,7 +819,7 @@ def _history_records_locked(paths, parser):  # type: (object, object) -> list
             raise IntegrityError("subscription history filename is invalid")
         if any(char not in "0123456789abcdef" for char in parts[0] + parts[1]):
             raise IntegrityError("subscription history filename is invalid")
-        record = _record_from_value(_read_json(path), parser=parser)
+        record = _record_from_value(_read_json(path), parser=parser, allow_node_mismatch=True)
         _validate_record_identity_if_present(paths, record)
         if record.subscription_id != parts[0] or record.revision != parts[1]:
             raise IntegrityError("subscription history identity does not match its filename")
@@ -820,7 +884,7 @@ class SubscriptionStore(object):
         if not isinstance(self.parser, SubscriptionParser):
             raise TypeError("parser must implement SubscriptionParser")
 
-    def _records_without_recovery_locked(self):  # type: () -> list
+    def _records_without_recovery_locked(self, allow_node_mismatch=False):  # type: (bool) -> list
         if not self.paths.subscriptions.exists():
             return []
         if is_path_alias(self.paths.subscriptions) or not self.paths.subscriptions.is_dir():
@@ -837,8 +901,14 @@ class SubscriptionStore(object):
                 continue
             if is_path_alias(path) or not path.is_file() or path.suffix != ".json":
                 raise IntegrityError("subscription namespace contains unexpected content")
-            record = _record_from_value(_read_json(path), parser=self.parser)
+            # Read tolerantly, then classify in order of severity: the keyed
+            # fingerprint decides tampering before the reparse decides drift,
+            # so forged node content can never be reported as recoverable or
+            # be answered with a repair instruction.
+            record = _record_from_value(_read_json(path), parser=self.parser, allow_node_mismatch=True)
             _validate_record_identity_if_present(self.paths, record)
+            if not allow_node_mismatch:
+                _require_node_projection(record, self.parser)
             if path.stem != record.name:
                 raise SubscriptionStateError("subscription filename does not match its name")
             records.append(record)
@@ -850,7 +920,10 @@ class SubscriptionStore(object):
         journal = _read_publication_journal_locked(self.paths)
         if journal is None:
             return
-        records = self._records_without_recovery_locked()
+        # Journal recovery compares subscription IDs, name digests, and
+        # revisions only.  Mandatory recovery runs on every acquired lock, so a
+        # recoverable node-projection drift must never make it unreachable.
+        records = self._records_without_recovery_locked(allow_node_mismatch=True)
         if journal["kind"] == "publish":
             matches = [
                 record
@@ -910,29 +983,40 @@ class SubscriptionStore(object):
                     )
         _clear_publication_journal_locked(self.paths)
 
-    def _records_locked(self):  # type: (object) -> list
+    def _records_locked(self, allow_node_mismatch=False):  # type: (bool) -> list
         self._recover_publication_journal_locked()
-        records = self._records_without_recovery_locked()
+        records = self._records_without_recovery_locked(allow_node_mismatch=allow_node_mismatch)
         _history_records_locked(self.paths, self.parser)
         return records
 
-    def _list_locked(self):  # type: () -> tuple
+    def _list_locked(self, allow_node_mismatch=False):  # type: (bool) -> tuple
         """Read records while the caller owns the home-wide operation lock."""
 
-        return tuple(self._records_locked())
+        return tuple(self._records_locked(allow_node_mismatch=allow_node_mismatch))
 
-    def list(self):  # type: () -> tuple
-        """Read all records without creating an absent home."""
+    def list(self, allow_node_mismatch=False):  # type: (bool) -> tuple
+        """Read all records without creating an absent home.
+
+        ``allow_node_mismatch`` returns records whose stored node projection
+        drifted from their source bytes.  Callers that render only
+        credential-free record metadata use it so one drifted record cannot
+        hide the whole inventory; callers that consume node semantics must not.
+        """
 
         if not self.paths._validate_existing_layout():
             return ()
         with JerryProxyOperationLock(self.paths, initialize=False):
-            return self._list_locked()
+            return self._list_locked(allow_node_mismatch=allow_node_mismatch)
 
-    def _get_locked(self, name):  # type: (str) -> SubscriptionRecord
+    def _get_locked(self, name, allow_node_mismatch=False):  # type: (str, bool) -> SubscriptionRecord
         validate_subscription_name(name)
-        for record in self._records_locked():
+        # Other subscriptions are only enumerated to locate this one, so their
+        # projection drift must not mask the requested record.  The selected
+        # record itself is revalidated strictly unless the caller opts out.
+        for record in self._records_locked(allow_node_mismatch=True):
             if record.name == name:
+                if not allow_node_mismatch:
+                    _require_node_projection(record, self.parser)
                 return record
         raise SubscriptionStateError("subscription not found: %s" % name)
 
@@ -953,7 +1037,10 @@ class SubscriptionStore(object):
         path = _record_path(self.paths, record.name)
         existing = None
         if path.exists():
-            existing = _record_from_value(_read_json(path), parser=self.parser)
+            # The generation being replaced contributes only its revision and
+            # identity to this transaction, so publication must stay available
+            # while its projection is drifted and awaiting repair.
+            existing = _record_from_value(_read_json(path), parser=self.parser, allow_node_mismatch=True)
             _validate_record_identity_if_present(self.paths, existing)
         if existing is not None and not replace:
             raise SubscriptionStateError("subscription already exists: %s" % record.name)
@@ -961,7 +1048,9 @@ class SubscriptionStore(object):
             raise SubscriptionStateError("subscription changed during update")
         if existing is not None and existing.subscription_id != record.subscription_id:
             raise SubscriptionStateError("subscription identity changed during replacement")
-        if existing is None and len(self._records_locked()) >= MAXIMUM_SUBSCRIPTIONS:
+        # The safety bound counts records; a drifted neighbour still occupies a
+        # slot and must not turn an unrelated publication into a hard failure.
+        if existing is None and len(self._records_locked(allow_node_mismatch=True)) >= MAXIMUM_SUBSCRIPTIONS:
             raise SubscriptionStateError("subscription count exceeds the safety bound")
         _validate_record_identity_if_present(self.paths, record)
         if existing is not None and existing.revision != record.revision:
@@ -996,7 +1085,12 @@ class SubscriptionStore(object):
         path = _record_path(self.paths, name)
         if not path.exists():
             raise SubscriptionStateError("subscription not found: %s" % name)
-        record = _record_from_value(_read_json(path), parser=self.parser)
+        # Removal retires this record's node identities and discards it, so a
+        # drifted projection must remain deletable rather than permanent.  The
+        # keyed fingerprint check still applies: retiring a forged identity
+        # would let foreign state reserve this home's node ID space.
+        record = _record_from_value(_read_json(path), parser=self.parser, allow_node_mismatch=True)
+        _validate_record_identity_if_present(self.paths, record)
         record_identity = _capture_record_identity(path)
         operation = secrets.token_hex(16)
         journal = {

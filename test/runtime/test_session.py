@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from jerryproxy.errors import BackendNotInstalledError, RuntimeSessionError, SubscriptionStateError
+from jerryproxy.errors import (
+    BackendNotInstalledError,
+    RuntimeSessionError,
+    SubscriptionNodesMismatchError,
+    SubscriptionStateError,
+)
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.runtime import (
     HealthSnapshot,
@@ -18,8 +23,10 @@ from jerryproxy.runtime import (
     RuntimeSession,
 )
 from jerryproxy.runtime.health import RecoveryDeadline
+from jerryproxy.subscription import SingleNodeSource, SubscriptionManager, V2RaySubscriptionParser
+from jerryproxy.subscription.model import ParsedSubscription
 from jerryproxy.subscription.storage import build_record
-from jerryproxy.subscription.transport import parse_subscription_body
+from jerryproxy.subscription.transport import FetchedSubscription, parse_subscription_body
 
 URI_TEMPLATE = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@192.0.2.1:%d#node-%d\n"
 
@@ -689,3 +696,161 @@ def test_failed_recovery_candidate_does_not_replace_effective_node(tmp_path):
     assert not runtime._try_candidate(second, deadline)
     assert runtime.node.node_id == first.node_id
     runtime.stop()
+
+
+def _drifted(record):
+    """Return a record whose stored projection no longer matches its source.
+
+    A JerryProxy upgrade can change how a node display is derived from the same
+    digest-protected bytes.  Nothing is tampered with, but a fresh parse then
+    stops reproducing the persisted projection.
+    """
+
+    nodes = tuple(replace(node, display="stale-%s" % node.display) for node in record.nodes)
+    return replace(record, nodes=nodes)
+
+
+class DriftingSubscriptionManager(FakeSubscriptionManager):
+    """Serve a drifted record and delegate repair like the real manager does."""
+
+    def __init__(self, drifted, repaired=None, failure=None):
+        super(DriftingSubscriptionManager, self).__init__(drifted)
+        self.repaired = repaired
+        self.failure = failure
+        self.repair_calls = 0
+
+    def _repair_node_projection_locked(self, name):
+        # The session owns the home lock, so it must reach the private locked
+        # helper rather than a public entry point that would take it again.
+        assert name == self.record.name
+        self.repair_calls += 1
+        if self.failure is not None:
+            raise self.failure
+        return self.repaired
+
+
+def test_startup_repairs_a_drifted_node_projection_exactly_once(tmp_path):
+    healthy = _record(nodes=1, source_url="https://provider.example/secret")
+    manager = DriftingSubscriptionManager(_drifted(healthy), repaired=healthy)
+    events = []
+    runtime = _session(
+        tmp_path,
+        manager.record,
+        FakeProbe([True]),
+        manager=manager,
+        log_sink=lambda *event: events.append(event),
+    )
+
+    runtime.start("main", install_missing=False)
+
+    # Exactly one repair, and the session continues with the repaired record.
+    assert manager.repair_calls == 1
+    assert runtime.subscription.nodes[0].display == healthy.nodes[0].display
+    assert runtime.node.node_id == healthy.nodes[0].node_id
+    assert any(
+        level == "WARN" and "no longer matches its source bytes" in message
+        for _source, level, message in events
+    )
+    assert any(
+        level == "INFO" and "refreshed; continuing startup" in message
+        for _source, level, message in events
+    )
+    runtime.stop()
+
+
+def test_startup_does_not_repair_a_consistent_subscription(tmp_path):
+    healthy = _record(nodes=1, source_url="https://provider.example/secret")
+    manager = DriftingSubscriptionManager(healthy, repaired=healthy)
+    runtime = _session(tmp_path, healthy, FakeProbe([True]), manager=manager)
+
+    runtime.start("main", node_id=healthy.nodes[0].node_id, install_missing=False)
+
+    # A consistent projection must never contact the source during startup.
+    assert manager.repair_calls == 0
+    runtime.stop()
+
+
+def test_startup_stops_when_a_drift_repair_fails(tmp_path):
+    drifted = _drifted(_record(nodes=1, source_url="https://provider.example/secret"))
+    manager = DriftingSubscriptionManager(
+        drifted,
+        failure=SubscriptionStateError(
+            "subscription nodes do not match source bytes: main; refreshing its saved source failed, "
+            "so run `jerryproxy subscription refresh main` or replace the source"
+        ),
+    )
+    runtime = _session(tmp_path, drifted, FakeProbe([True]), manager=manager)
+
+    with pytest.raises(SubscriptionStateError, match="subscription refresh main") as failure:
+        runtime.start("main", install_missing=False)
+
+    # One attempt only; the session must not retry a repair that already failed.
+    assert manager.repair_calls == 1
+    assert "provider.example" not in str(failure.value)
+
+
+def test_startup_names_the_node_listing_command_for_a_vanished_node(tmp_path):
+    record = _record(nodes=2)
+    runtime = _session(tmp_path, record, FakeProbe([True]))
+
+    with pytest.raises(SubscriptionStateError, match="node list main"):
+        runtime.start("main", node_id="f" * 32, install_missing=False)
+
+
+def test_direct_node_source_keeps_a_plain_missing_node_message(tmp_path):
+    """A direct-node source has no subscription, so it names no listing command."""
+
+    record = _record(nodes=1)
+    source = SingleNodeSource(record.nodes[0])
+    runtime = _session(tmp_path, record, FakeProbe([True]))
+
+    with pytest.raises(SubscriptionStateError) as failure:
+        runtime._select_node(source, node_id="f" * 32)
+
+    assert "node list" not in str(failure.value)
+    assert runtime._select_node(source) is record.nodes[0]
+
+
+class _UpgradedParser(V2RaySubscriptionParser):
+    """Stand in for a release that classifies the same bytes differently."""
+
+    def parse(self, body, format_hint="auto"):
+        parsed = super(_UpgradedParser, self).parse(body, format_hint=format_hint)
+        records = tuple((scheme, display + "-upgraded", uri) for scheme, display, uri in parsed.records)
+        return ParsedSubscription(parsed.format, parsed.body, records)
+
+
+def test_startup_repairs_drift_through_the_session_home_lock(tmp_path, monkeypatch):
+    """Repair must reach the manager's locked helper, not a second acquisition.
+
+    The session already owns the home-wide lock, so a repair that took the lock
+    again would fail closed on every real drifted start while a fake manager
+    kept the suite green.
+    """
+
+    body = URI_TEMPLATE.encode("ascii") % (443, 0)
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(body, "https://provider.example/secret"),
+    )
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    # Publish through an upgraded parser so the shipped parser sees real drift.
+    SubscriptionManager(paths, parser=_UpgradedParser()).add(
+        "main", "https://provider.example/secret", format_hint="uri-lines"
+    )
+    shipped = SubscriptionManager(paths)
+    with pytest.raises(SubscriptionNodesMismatchError):
+        shipped.get("main")
+
+    runtime = _session(tmp_path, None, FakeProbe([True]), manager=shipped)
+    runtime.start("main", install_missing=False)
+    selected = runtime.subscription
+    node = runtime.node
+    # The session holds the home lock until it stops, so any public read here
+    # would fail closed; that is exactly the contract this test protects.
+    runtime.stop()
+
+    repaired = shipped.get("main")
+    assert not selected.nodes[0].display.endswith("-upgraded")
+    assert selected.revision == repaired.revision
+    assert node.node_id == repaired.nodes[0].node_id

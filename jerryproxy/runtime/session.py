@@ -19,6 +19,7 @@ from ..errors import (
     JerryProxyError,
     RuntimeSessionError,
     SubscriptionError,
+    SubscriptionNodesMismatchError,
     SubscriptionStateError,
 )
 from ..home import is_path_alias
@@ -26,7 +27,8 @@ from ..lock import JerryProxyOperationLock
 from ..subscription import SubscriptionManager
 from ..subscription.interfaces import NodeSource
 from ..subscription.redaction import redact_text, terminal_safe_text
-from ..subscription.storage import _ensure_extension_directory
+from ..subscription.storage import _ensure_extension_directory, _require_node_projection
+from ..subscription.transport import MIHOMO_SUBSCRIPTION_PARSER
 from .health import ConnectivityProbe, RecoveryDeadline, RecoveryPolicy
 from .interfaces import RuntimeDriver
 from .mihomo import (
@@ -232,22 +234,76 @@ class RuntimeSession(object):
         if lock is not None:
             lock.__exit__(None, None, None)
 
-    def _select_subscription(self, name=None):
+    def _locked_records(self, allow_node_mismatch=False):  # type: (bool) -> tuple
+        """Read the inventory through the session's already-held home lock."""
+
         list_locked = getattr(self.subscription_manager, "_list_locked", None)
-        records = list_locked() if list_locked is not None else self.subscription_manager.list()
+        if list_locked is None:
+            return tuple(self.subscription_manager.list())
+        return tuple(list_locked(allow_node_mismatch=allow_node_mismatch))
+
+    def _check_node_projection(self, record):  # type: (object) -> None
+        """Reject a record whose stored projection drifted from its source."""
+
+        parser = getattr(self.subscription_manager, "parser", None) or MIHOMO_SUBSCRIPTION_PARSER
+        _require_node_projection(record, parser)
+
+    def _locked_refresh(self, name):  # type: (str) -> object
+        refresh_locked = getattr(self.subscription_manager, "_refresh_locked", None)
+        if refresh_locked is None:
+            return self.subscription_manager.refresh(name)
+        return refresh_locked(name)
+
+    def _locked_repair(self, name):  # type: (str) -> object
+        """Repair one drifted projection through the already-held home lock."""
+
+        repair_locked = getattr(self.subscription_manager, "_repair_node_projection_locked", None)
+        if repair_locked is None:
+            return self.subscription_manager.repair_node_projection(name)
+        return repair_locked(name)
+
+    def _select_subscription(self, name=None):
+        # Neighbouring records are only enumerated to choose one, so their node
+        # projection drift must not decide which subscription this session gets.
+        records = self._locked_records(allow_node_mismatch=True)
         if name is not None:
             for record in records:
                 if record.name == name:
                     if not record.enabled:
                         raise SubscriptionStateError("subscription is disabled: %s" % name)
-                    return record
+                    return self._resolve_subscription(record)
             raise SubscriptionStateError("subscription not found: %s" % name)
         enabled = [record for record in records if record.enabled]
         if len(enabled) != 1:
             if not enabled:
                 raise SubscriptionStateError("no enabled subscription is available")
             raise SubscriptionStateError("multiple subscriptions require --subscription NAME")
-        return enabled[0]
+        return self._resolve_subscription(enabled[0])
+
+    def _resolve_subscription(self, record):  # type: (object) -> object
+        """Return a strictly revalidated record, repairing one node drift.
+
+        A stored projection can stop matching its source bytes after a parser
+        upgrade even though nothing was tampered with.  That state would
+        otherwise block every start, so the manager's single repair path
+        refreshes the saved source once and revalidates the result.  Tampering
+        fails the keyed home fingerprint earlier and never reaches this path.
+        """
+
+        try:
+            self._check_node_projection(record)
+            return record
+        except SubscriptionNodesMismatchError:
+            # Recoverable drift: rebuild the projection from the saved source.
+            pass
+        self._log(
+            "WARN",
+            "subscription %s no longer matches its source bytes; refreshing the saved source once"
+            % terminal_safe_text(record.name),
+        )
+        repaired = self._locked_repair(record.name)
+        self._log("INFO", "subscription %s refreshed; continuing startup" % terminal_safe_text(record.name))
+        return repaired
 
     @staticmethod
     def _select_node(record, node_id=None):
@@ -258,7 +314,16 @@ class RuntimeSession(object):
             for node in nodes:
                 if node.node_id == node_id:
                     return node
-            raise SubscriptionStateError("node not found: %s" % node_id)
+            # A repaired or refreshed projection reissues node identities, so
+            # name the command that lists the current ones.  A direct-node
+            # source has no subscription to list and keeps the plain message.
+            source_name = getattr(record, "name", None)
+            if not source_name:
+                raise SubscriptionStateError("node not found: %s" % node_id)
+            raise SubscriptionStateError(
+                "node not found: %s; run `jerryproxy node list %s` for current node identities"
+                % (node_id, source_name)
+            )
         if len(nodes) != 1:
             raise SubscriptionStateError("multiple nodes require --node NODE_ID")
         return nodes[0]
@@ -636,11 +701,7 @@ class RuntimeSession(object):
                 raise RuntimeSessionError("proxy recovery deadline exhausted")
             self._log("INFO", "health recovery action: refreshing the subscription source")
             try:
-                refresh_locked = getattr(self.subscription_manager, "_refresh_locked", None)
-                if refresh_locked is not None:
-                    refreshed = refresh_locked(self.subscription.name)
-                else:
-                    refreshed = self.subscription_manager.refresh(self.subscription.name)
+                refreshed = self._locked_refresh(self.subscription.name)
             except SubscriptionError:
                 # Refresh is best effort; the last-known-good record remains
                 # effective and the original source URL is never rendered.

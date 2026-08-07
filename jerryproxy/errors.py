@@ -86,5 +86,17 @@ class SubscriptionStateError(SubscriptionError):
     """Raised when persisted subscription state is invalid or incomplete."""
 
 
+class SubscriptionNodesMismatchError(SubscriptionStateError):
+    """Raised when a stored node projection differs from its source bytes.
+
+    This is recoverable drift rather than tampering: the keyed home
+    fingerprint already proved this home wrote that node content, so a fresh
+    parse of the same digest-protected bytes simply no longer reproduces the
+    stored projection.  Refreshing the saved source rebuilds it.  Node content
+    this home never wrote fails the fingerprint check and raises
+    :class:`IntegrityError` instead, which no repair path accepts.
+    """
+
+
 class RuntimeSessionError(JerryProxyError):
     """Raised when a foreground backend session cannot start or stop safely."""

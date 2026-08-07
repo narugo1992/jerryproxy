@@ -486,6 +486,22 @@ alternate-node attempts, and one optional subscription refresh within the
 configured recovery deadline. Automatic recovery never rewrites the saved node
 preference.
 
+A stored subscription can also drift: after an upgrade changes how the same
+source bytes are classified, the persisted nodes stop matching those bytes.
+That state is recoverable rather than hostile, because the keyed home
+fingerprint already proved JerryProxy wrote those nodes itself. `server`
+therefore refreshes that subscription's saved URL exactly once, revalidates,
+and continues. It stops and names the next command when the subscription has
+no saved URL, when the refresh fails, or when the rebuilt nodes are still
+inconsistent; it never retries in a loop. The guided node menu repairs the same
+way before it renders, and the guided subscription menu still lists a drifted
+record so it can be selected and repaired at all. `subscription refresh NAME`
+performs the repair on demand. Rebuilt nodes receive new identities, so an
+explicit `--node NODE_ID` may need `node list NAME` again. Read-only commands
+stay strict and name the repair command instead of showing an inconsistent
+projection. A projection that fails the fingerprint check is reported as
+tampering and is never repaired automatically.
+
 ## Roadmap
 
 - [x] Establish the Python 3.7+ package, CLI, tests, docs, and CI skeleton.

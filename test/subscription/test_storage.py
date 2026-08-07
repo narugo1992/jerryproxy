@@ -8,10 +8,16 @@ import pytest
 
 import jerryproxy.subscription.manager as manager_module
 import jerryproxy.subscription.storage as storage_module
-from jerryproxy.errors import IntegrityError, SubscriptionFetchError, SubscriptionStateError
+from jerryproxy.errors import (
+    IntegrityError,
+    SubscriptionFetchError,
+    SubscriptionNodesMismatchError,
+    SubscriptionStateError,
+)
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.subscription import SingleNodeSource, SubscriptionManager, V2RaySubscriptionParser
 from jerryproxy.subscription.manager import _read_fetch_result, _write_fetch_result
+from jerryproxy.subscription.model import ParsedSubscription
 from jerryproxy.subscription.storage import build_record
 from jerryproxy.subscription.transport import FetchedSubscription, parse_subscription_body
 
@@ -93,8 +99,19 @@ def test_private_state_rejects_node_projection_tampering(tmp_path):
     value = json.loads(path.read_text(encoding="utf-8"))
     value["nodes"][0]["uri"] = "ss://YWVzLTI1Ni1nY206YXR0YWNrQDE5Mi4wLjIuMjo0NDM"
     path.write_text(json.dumps(value), encoding="utf-8")
-    with pytest.raises(SubscriptionStateError, match="do not match source"):
-        manager.get("main")
+    # A forged projection fails the keyed home fingerprint, which classifies it
+    # as tampering rather than the recoverable drift that refresh repairs.  No
+    # read path may downgrade it, so repair must refuse it as well.
+    for operation in (manager.get, manager.refresh, manager.repair_node_projection, manager.remove):
+        with pytest.raises(IntegrityError, match="fingerprint does not match"):
+            operation("main")
+    # Inventory reads must classify tampering before drift; reporting a forged
+    # projection as recoverable would answer an attack with a repair command.
+    with pytest.raises(IntegrityError, match="fingerprint does not match"):
+        manager.list()
+    # Removal retires node identities into the home tombstones, so accepting a
+    # forged projection would let foreign IDs reserve this home's ID space.
+    assert not (paths.nodes / "tombstones.json").exists()
 
 
 def test_fingerprinted_subscription_rejects_a_missing_identity_key(tmp_path):
@@ -682,3 +699,284 @@ def test_single_node_source_reuses_the_subscription_node_contract(tmp_path):
     source = SingleNodeSource(record.nodes[0])
     assert tuple(source.iter_nodes()) == (record.nodes[0],)
     assert source.node.public()["id"] == record.nodes[0].node_id
+
+
+class _DriftingParser(V2RaySubscriptionParser):
+    """Simulate a parser upgrade that renames one container's node displays.
+
+    A JerryProxy upgrade can legitimately change how a node display is derived
+    from the same bounded source bytes.  The persisted projection then stops
+    matching a fresh parse even though nobody tampered with private state.
+    """
+
+    def __init__(self, drifting_body, replacement="drifted"):
+        self.drifting_body = drifting_body
+        self.replacement = replacement
+
+    def parse(self, body, format_hint="auto"):
+        parsed = super(_DriftingParser, self).parse(body, format_hint=format_hint)
+        if body != self.drifting_body:
+            return parsed
+        records = tuple((scheme, self.replacement, uri) for scheme, _display, uri in parsed.records)
+        return ParsedSubscription(parsed.format, parsed.body, records)
+
+
+def test_node_projection_drift_is_a_distinct_recoverable_state_error(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    SubscriptionManager(paths).add("main", None, body=SS, format_hint="uri-lines")
+
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    with pytest.raises(SubscriptionNodesMismatchError) as drift:
+        upgraded.get("main")
+    assert issubclass(SubscriptionNodesMismatchError, SubscriptionStateError)
+    # Every read path reports the repair command, so a user is never left with
+    # an inconsistency and no next step.
+    assert "jerryproxy subscription refresh main" in str(drift.value)
+    with pytest.raises(SubscriptionNodesMismatchError, match="subscription refresh main"):
+        upgraded.validate("main")
+    with pytest.raises(SubscriptionNodesMismatchError, match="subscription refresh main"):
+        upgraded.list()
+
+
+def test_node_projection_drift_does_not_block_other_subscriptions(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    stock = SubscriptionManager(paths)
+    stock.add("main", None, body=SS, format_hint="uri-lines")
+
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    added = upgraded.add("other", None, body=VMESS, format_hint="uri-lines")
+
+    assert added.name == "other"
+    assert upgraded.get("other").node_count == 1
+    assert upgraded.remove("other").name == "other"
+
+
+def test_refresh_rebuilds_a_drifted_node_projection_from_the_saved_source(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(SS, "https://provider.example/secret"),
+    )
+    stock = SubscriptionManager(paths)
+    original = stock.add("main", "https://provider.example/secret", format_hint="uri-lines")
+
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    with pytest.raises(SubscriptionNodesMismatchError):
+        upgraded.get("main")
+
+    repaired = upgraded.refresh("main")
+
+    assert repaired.subscription_id == original.subscription_id
+    assert repaired.nodes[0].display == "drifted"
+    assert repaired.node_count == original.node_count
+    # Node identities reconcile through the keyed fingerprint, which covers the
+    # display, so a repaired projection issues fresh node IDs.  Callers holding
+    # an old ID must be told it is gone rather than silently redirected.
+    assert repaired.nodes[0].node_id != original.nodes[0].node_id
+    assert upgraded.get("main").revision == repaired.revision
+
+
+def test_failed_refresh_preserves_a_drifted_record_without_repairing_it(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(SS, "https://provider.example/secret"),
+    )
+    stock = SubscriptionManager(paths)
+    original = stock.add("main", "https://provider.example/secret", format_hint="uri-lines")
+
+    def fail(*args, **kwargs):
+        raise SubscriptionFetchError("subscription source fetch failed")
+
+    monkeypatch.setattr("jerryproxy.subscription.manager.fetch_subscription", fail)
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    with pytest.raises(SubscriptionFetchError):
+        upgraded.refresh("main")
+
+    assert stock.get("main").revision == original.revision
+    assert stock.get("main").nodes[0].display == original.nodes[0].display
+
+
+def test_drift_recovery_still_requires_a_saved_source_url(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    SubscriptionManager(paths).add("main", None, body=SS, format_hint="uri-lines")
+
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    with pytest.raises(SubscriptionStateError, match="no remote source URL"):
+        upgraded.refresh("main")
+
+
+def test_drifted_neighbour_does_not_block_removing_or_repairing_others(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(VMESS, "https://provider.example/other"),
+    )
+    stock = SubscriptionManager(paths)
+    stock.add("main", None, body=SS, format_hint="uri-lines")
+    stock.add("other", "https://provider.example/other", format_hint="uri-lines")
+
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+
+    assert upgraded.refresh("other").name == "other"
+    assert upgraded.remove("main").name == "main"
+    assert [record.name for record in upgraded.list()] == ["other"]
+
+
+def test_repair_returns_a_consistent_record_without_contacting_the_source(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(SS, "https://provider.example/secret"),
+    )
+    manager = SubscriptionManager(paths)
+    original = manager.add("main", "https://provider.example/secret", format_hint="uri-lines")
+
+    def fail(*args, **kwargs):
+        raise AssertionError("a consistent record must not refetch its source")
+
+    monkeypatch.setattr("jerryproxy.subscription.manager.fetch_subscription", fail)
+    assert manager.repair_node_projection("main").revision == original.revision
+
+
+def test_repair_rebuilds_a_drifted_projection_and_revalidates_it(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(SS, "https://provider.example/secret"),
+    )
+    SubscriptionManager(paths).add("main", "https://provider.example/secret", format_hint="uri-lines")
+
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    repaired = upgraded.repair_node_projection("main")
+
+    assert repaired.nodes[0].display == "drifted"
+    assert upgraded.get("main").revision == repaired.revision
+
+
+def test_repair_stops_when_the_rebuilt_projection_is_still_inconsistent(tmp_path, monkeypatch):
+    """A parser that never agrees with itself must not drive an endless repair."""
+
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(SS, "https://provider.example/secret"),
+    )
+    SubscriptionManager(paths).add("main", "https://provider.example/secret", format_hint="uri-lines")
+
+    class UnstableParser(V2RaySubscriptionParser):
+        def __init__(self):
+            self.calls = 0
+
+        def parse(self, body, format_hint="auto"):
+            parsed = super(UnstableParser, self).parse(body, format_hint=format_hint)
+            self.calls += 1
+            return ParsedSubscription(
+                parsed.format,
+                parsed.body,
+                tuple((scheme, "call-%d" % self.calls, uri) for scheme, _display, uri in parsed.records),
+            )
+
+    unstable = SubscriptionManager(paths, parser=UnstableParser())
+    with pytest.raises(SubscriptionNodesMismatchError):
+        unstable.repair_node_projection("main")
+
+
+def test_repair_without_a_saved_source_url_names_the_replace_command(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    SubscriptionManager(paths).add("main", None, body=SS, format_hint="uri-lines")
+
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    with pytest.raises(SubscriptionStateError, match="subscription replace main"):
+        upgraded.repair_node_projection("main")
+
+
+def test_repair_preserves_the_previous_generation_when_the_refetch_fails(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(SS, "https://provider.example/secret"),
+    )
+    stock = SubscriptionManager(paths)
+    original = stock.add("main", "https://provider.example/secret", format_hint="uri-lines")
+
+    def fail(*args, **kwargs):
+        raise SubscriptionFetchError("subscription source fetch failed")
+
+    monkeypatch.setattr("jerryproxy.subscription.manager.fetch_subscription", fail)
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    with pytest.raises(SubscriptionStateError, match="subscription refresh main") as failure:
+        upgraded.repair_node_projection("main")
+
+    assert "provider.example" not in str(failure.value)
+    assert stock.get("main").revision == original.revision
+
+
+def test_repair_refuses_a_forged_projection(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    manager.add("main", None, body=SS, format_hint="uri-lines")
+
+    state = paths.subscriptions / "main.json"
+    value = json.loads(state.read_text(encoding="utf-8"))
+    value["nodes"][0]["display"] = "192.0.2.99:443"
+    state.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(IntegrityError, match="fingerprint does not match"):
+        manager.repair_node_projection("main")
+
+
+def test_repairing_a_changed_source_leaves_the_inventory_readable(tmp_path, monkeypatch):
+    """Publishing a repair archives the drifted generation it replaced.
+
+    That rollback generation is addressed by ID and revision and is never
+    returned to a caller, so it must not make every later inventory fail with
+    the very error the completed repair just resolved.
+    """
+
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(SS, "https://provider.example/secret"),
+    )
+    SubscriptionManager(paths).add("main", "https://provider.example/secret", format_hint="uri-lines")
+
+    # The provider now serves different bytes, so the repair changes revision
+    # and the drifted generation is archived rather than overwritten.
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(VMESS, "https://provider.example/secret"),
+    )
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    repaired = upgraded.repair_node_projection("main")
+
+    assert any(path.name.startswith(".history-") for path in paths.subscriptions.iterdir())
+    assert [record.revision for record in upgraded.list()] == [repaired.revision]
+    assert upgraded.get("main").revision == repaired.revision
+
+
+def test_interrupted_removal_rollback_rejects_a_forged_quarantine(tmp_path, monkeypatch):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    manager.add("main", None, body=SS, format_hint="uri-lines")
+
+    original_stage = storage_module._stage_record_locked
+    staged = {}
+
+    def stage_and_forge(paths_argument, path, operation, expected_identity):
+        quarantine = original_stage(paths_argument, path, operation, expected_identity)
+        value = json.loads(quarantine.read_text(encoding="utf-8"))
+        value["nodes"][0]["uri"] = "ss://YWVzLTI1Ni1nY206YXR0YWNrQDE5Mi4wLjIuMjo0NDM"
+        quarantine.write_text(json.dumps(value), encoding="utf-8")
+        staged["path"] = quarantine
+        raise SubscriptionStateError("interrupted after staging")
+
+    monkeypatch.setattr(storage_module, "_stage_record_locked", stage_and_forge)
+    with pytest.raises(SubscriptionStateError, match="interrupted after staging"):
+        manager.remove("main")
+    monkeypatch.undo()
+
+    # Rollback must not unretire node identities read from forged bytes.
+    assert staged["path"].exists()
+    with pytest.raises(IntegrityError):
+        manager.list()

@@ -127,6 +127,12 @@ SubscriptionStateError
 .. autoclass:: SubscriptionStateError
 
 
+SubscriptionNodesMismatchError
+-----------------------------------------------------
+
+.. autoclass:: SubscriptionNodesMismatchError
+
+
 RuntimeSessionError
 -----------------------------------------------------
 

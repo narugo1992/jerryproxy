@@ -12,10 +12,16 @@ import time
 
 from ..backend.durable import flush_directory
 from ..backend.removal import _secure_remove_tree
-from ..errors import SubscriptionError, SubscriptionFetchError, SubscriptionParseError, SubscriptionStateError
+from ..errors import (
+    SubscriptionError,
+    SubscriptionFetchError,
+    SubscriptionNodesMismatchError,
+    SubscriptionParseError,
+    SubscriptionStateError,
+)
 from ..lock import JerryProxyOperationLock
 from .interfaces import SubscriptionParser
-from .storage import SubscriptionStore, build_record, validate_subscription_name
+from .storage import SubscriptionStore, _require_node_projection, build_record, validate_subscription_name
 from .transport import MIHOMO_SUBSCRIPTION_PARSER, FetchedSubscription, fetch_subscription, validate_source_url
 
 _DEFAULT_FETCH_SUBSCRIPTION = fetch_subscription
@@ -236,17 +242,17 @@ class SubscriptionManager(object):
         self.store = SubscriptionStore(paths, parser=self.parser)
         self._fetch_cleanup = _FetchCleanupSupervisor()
 
-    def list(self):  # type: () -> tuple
-        return self.store.list()
+    def list(self, allow_node_mismatch=False):  # type: (bool) -> tuple
+        return self.store.list(allow_node_mismatch=allow_node_mismatch)
 
-    def _list_locked(self):  # type: () -> tuple
-        return self.store._list_locked()
+    def _list_locked(self, allow_node_mismatch=False):  # type: (bool) -> tuple
+        return self.store._list_locked(allow_node_mismatch=allow_node_mismatch)
 
     def get(self, name):  # type: (str) -> SubscriptionRecord
         return self.store.get(name)
 
-    def _get_locked(self, name):  # type: (str) -> SubscriptionRecord
-        return self.store._get_locked(name)
+    def _get_locked(self, name, allow_node_mismatch=False):  # type: (str, bool) -> SubscriptionRecord
+        return self.store._get_locked(name, allow_node_mismatch=allow_node_mismatch)
 
     def _fetch_remote(self, source_url, allow_http, format_hint):  # type: (str, bool, str) -> object
         # Injected sessions and monkeypatched transports are deterministic test
@@ -410,9 +416,11 @@ class SubscriptionManager(object):
             source_url, body, format_hint, allow_http
         )
         parsed = self.parser.parse(body, format_hint)
+        # Only node identities are reserved here, so an unrelated drifted
+        # subscription must not block adding a new one.
         current_ids = {
             node.node_id
-            for record in self.store._list_locked()
+            for record in self.store._list_locked(allow_node_mismatch=True)
             for node in record.nodes
         }
         record = build_record(
@@ -434,7 +442,10 @@ class SubscriptionManager(object):
 
     def _replace_locked(self, name, source_url=None, body=None, format_hint="auto", allow_http=False):
         validate_subscription_name(name)
-        previous = self.store._get_locked(name)
+        # Replacement discards the stored projection entirely and rebuilds it
+        # from freshly parsed bytes, so it is the repair path for a drifted
+        # record and must be able to read one.
+        previous = self.store._get_locked(name, allow_node_mismatch=True)
         body_source = body is not None
         body, source_url, format_hint = self._source_body(
             source_url, body, format_hint, allow_http
@@ -442,7 +453,7 @@ class SubscriptionManager(object):
         parsed = self.parser.parse(body, format_hint)
         current_ids = {
             node.node_id
-            for record in self.store._list_locked()
+            for record in self.store._list_locked(allow_node_mismatch=True)
             if record.name != name
             for node in record.nodes
         }
@@ -459,16 +470,67 @@ class SubscriptionManager(object):
         return self.store._publish_locked(record, replace=True, expected_revision=previous.revision)
 
     def refresh(self, name):  # type: (str) -> SubscriptionRecord
-        """Refresh the exact persisted URL and preserve the last good record on failure."""
+        """Refresh the exact persisted URL and preserve the last good record on failure.
+
+        Refreshing is also the repair for a record whose stored node projection
+        no longer matches its source bytes: the saved URL is fetched again and
+        the projection is rebuilt, so the drifted generation is replaced rather
+        than trusted.  A failed refresh leaves the previous generation intact.
+        """
 
         with JerryProxyOperationLock(self.paths):
             return self._refresh_locked(name)
 
     def _refresh_locked(self, name):  # type: (str) -> SubscriptionRecord
-        previous = self.store._get_locked(name)
+        # Only the saved source URL is carried forward; the drifted projection
+        # is discarded and rebuilt by the replacement below.
+        previous = self.store._get_locked(name, allow_node_mismatch=True)
         if not previous.source_url:
-            raise SubscriptionStateError("subscription has no remote source URL")
+            raise SubscriptionStateError(
+                "subscription has no remote source URL: %s; "
+                "run `jerryproxy subscription replace %s` to supply the source again" % (name, name)
+            )
         return self._replace_locked(name, source_url=previous.source_url, format_hint="auto")
+
+    def repair_node_projection(self, name):  # type: (str) -> SubscriptionRecord
+        """Return one record, rebuilding a drifted node projection once.
+
+        A consistent record is returned untouched and no source is contacted.
+        A record whose stored nodes no longer match its source bytes is
+        repaired by one refresh of the saved URL and then revalidated, so the
+        caller always receives a strictly consistent record or an error naming
+        the next command.  Tampering fails the keyed fingerprint earlier and is
+        never repaired here.
+        """
+
+        with JerryProxyOperationLock(self.paths):
+            return self._repair_node_projection_locked(name)
+
+    def _repair_node_projection_locked(self, name):  # type: (str) -> SubscriptionRecord
+        try:
+            return self.store._get_locked(name)
+        except SubscriptionNodesMismatchError:
+            # Recoverable drift: rebuild from the saved source below.
+            pass
+        drifted = self.store._get_locked(name, allow_node_mismatch=True)
+        if not drifted.source_url:
+            raise SubscriptionStateError(
+                "subscription nodes do not match source bytes: %s; it has no saved source URL, "
+                "so run `jerryproxy subscription replace %s` to supply the source again" % (name, name)
+            )
+        try:
+            repaired = self._refresh_locked(name)
+        except SubscriptionError as error:
+            # The previous generation is preserved.  Report the next action
+            # rather than retrying a repair that already failed.
+            raise SubscriptionStateError(
+                "subscription nodes do not match source bytes: %s; refreshing its saved source failed, "
+                "so run `jerryproxy subscription refresh %s` or replace the source" % (name, name)
+            ) from error
+        # Exactly one automatic repair: a projection that is still inconsistent
+        # raises out of this call instead of refreshing again.
+        _require_node_projection(repaired, self.parser)
+        return repaired
 
     def validate(self, name):  # type: (str) -> SubscriptionRecord
         """Re-parse the private source bytes without changing state."""
