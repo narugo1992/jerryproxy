@@ -16,6 +16,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -169,7 +170,9 @@ class _Server(object):
         self.node_id = node_id
         self.port = port
         self.process = None
-        self.output = b""
+        self._lines = []
+        self._lock = threading.Lock()
+        self._reader = None
 
     def __enter__(self):
         environment = dict(os.environ)
@@ -196,8 +199,32 @@ class _Server(object):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
+        self._reader = threading.Thread(target=self._pump, name="e2e-server-log")
+        self._reader.daemon = True
+        self._reader.start()
         self._wait_ready()
         return self
+
+    def _pump(self):
+        """Drain the child's merged output continuously.
+
+        Reading to EOF while the child is alive would block forever, because a
+        foreground server keeps its stream open. That turns a working data plane
+        into an unexplained timeout, so the stream is consumed line by line in
+        the background instead.
+        """
+
+        stream = self.process.stdout
+        if stream is None:
+            return
+        try:
+            for line in iter(stream.readline, b""):
+                with self._lock:
+                    if len(self._lines) < 4096:
+                        self._lines.append(line)
+        except (OSError, ValueError):
+            # The pipe closes when the child exits; nothing further to drain.
+            pass
 
     def _wait_ready(self):
         deadline = time.monotonic() + STARTUP_DEADLINE
@@ -216,14 +243,8 @@ class _Server(object):
         raise AssertionError("server did not open its listener within the deadline")
 
     def _drain(self):
-        if self.process.stdout is None:
-            return ""
-        try:
-            self.output += self.process.stdout.read() or b""
-        except (OSError, ValueError):
-            # The child's pipe may already be closed after termination.
-            pass
-        return self.output.decode("utf-8", "replace")
+        with self._lock:
+            return b"".join(self._lines).decode("utf-8", "replace")
 
     def diagnostics(self):  # type: () -> str
         return _redacted(self._drain())
@@ -237,7 +258,8 @@ class _Server(object):
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=10.0)
-        self._drain()
+        if self._reader is not None:
+            self._reader.join(timeout=10.0)
         return False
 
 

@@ -508,6 +508,7 @@ make relay_health_wiki
 make relay_health_gate
 make check
 python3.7 -m pytest test -m unittest
+pytest test -m e2e
 ```
 
 Unit tests must be deterministic and network-free. Test behavior through public
@@ -521,6 +522,25 @@ assert the resulting public behavior. Model GitHub responses locally because
 unit tests must not depend on external network availability. Real backend
 integration tests belong in an explicit credential-free integration lane and
 must pin versions and asset digests.
+
+That lane lives under `test/e2e`, is selected by the `e2e` marker, and is never
+collected by `make unittest` or counted toward unit coverage. Its correctness
+oracle is network isolation: a sentinel service publishes no port, joins only an
+internal Docker network the test container never joins, and answers with a
+per-run nonce injected at startup, so obtaining that nonce proves traffic
+traversed the proxy under test. A constant marker is not acceptable, because a
+test could assert it without connecting to anything, and a negative control must
+prove the sentinel is unreachable directly before any positive assertion counts.
+The workflow owns every Docker action, digest-pins each image, and builds proxy
+fixtures from the exact release the packaged catalog already pins. Tests read
+only environment variables and service names; they must not import a Docker
+library, run the Docker CLI, read Compose files, or inspect container metadata,
+and they must not trust ambient proxy configuration. A missing or malformed
+environment is a module-level skip locally, but the workflow preflight fails a
+mandatory run so a broken setup can never be reported as a harmless skip. The
+lane must never weaken a product guard to make a fixture succeed: where an
+in-network source cannot satisfy the HTTPS and public-address requirements, the
+test asserts the refusal instead.
 
 The product unit-test boundary is the `jerryproxy` package. Do not create a
 `test/tools` package, import repository maintenance modules from tests, or
