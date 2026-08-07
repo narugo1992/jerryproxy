@@ -489,7 +489,9 @@ preference.
 A stored subscription can also drift: after an upgrade changes how the same
 source bytes are classified, the persisted nodes stop matching those bytes.
 That state is recoverable rather than hostile, because the keyed home
-fingerprint already proved JerryProxy wrote those nodes itself. `server`
+fingerprint already proved JerryProxy wrote that node content for that
+subscription itself. Reads check that fingerprint before they check the
+projection, so tampering is never mistaken for drift. `server`
 therefore refreshes that subscription's saved URL exactly once, revalidates,
 and continues. It stops and names the next command when the subscription has
 no saved URL, when the refresh fails, or when the rebuilt nodes are still

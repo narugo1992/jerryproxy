@@ -306,8 +306,11 @@ class SubscriptionManager(object):
                 cancel_gate.set()
                 _stop_fetch_process(process)
                 startup_thread.join(_FETCH_STOP_SECONDS)
+                # Only the cleanup block below may decide to retain the worker
+                # tree.  Deciding it here would freeze a stale liveness reading:
+                # a starter that finishes during the raise would leave a
+                # secret-bearing tree that is neither deleted nor supervised.
                 if startup_thread.is_alive():
-                    preserve_worker_tree = True
                     raise SubscriptionFetchError("subscription source worker startup deadline exhausted")
                 raise SubscriptionFetchError("subscription source worker startup failed")
             if startup_error:

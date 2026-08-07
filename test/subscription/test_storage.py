@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import threading
 import time
 
@@ -346,15 +347,21 @@ def test_remote_worker_start_has_a_bounded_deadline(tmp_path, monkeypatch):
     monkeypatch.setattr(manager_module.multiprocessing, "get_context", lambda name: Context())
     monkeypatch.setattr(manager_module, "_FETCH_START_SECONDS", 0.01)
     monkeypatch.setattr(manager_module, "_FETCH_STOP_SECONDS", 0.05)
-    with pytest.raises(SubscriptionFetchError, match="startup (failed|deadline)"):
+    with pytest.raises(SubscriptionFetchError) as failure:
         manager._fetch_remote("https://provider.example/sub", False, "uri-lines")
+    assert re.search(r"startup (failed|deadline)|worker cleanup", str(failure.value))
     cleanup_deadline = time.monotonic() + max(
         1.0,
         manager_module._FETCH_LATE_CLEANUP_SECONDS + manager_module._FETCH_STOP_SECONDS,
     )
     while time.monotonic() < cleanup_deadline and tuple(paths.runtimes.glob(".subscription-fetch-*")):
         time.sleep(0.01)
-    assert not tuple(paths.runtimes.glob(".subscription-fetch-*"))
+    # A secret-bearing worker tree is either gone or explicitly retained as
+    # recovery evidence.  Retaining one silently is the failure this guards:
+    # scheduling decides which branch runs, but never whether the caller is
+    # told.
+    if tuple(paths.runtimes.glob(".subscription-fetch-*")):
+        assert "retained" in str(failure.value)
 
 
 def test_late_worker_start_is_owned_by_an_independent_cleanup_supervisor(tmp_path, monkeypatch):
