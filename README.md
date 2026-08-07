@@ -486,6 +486,14 @@ alternate-node attempts, and one optional subscription refresh within the
 configured recovery deadline. Automatic recovery never rewrites the saved node
 preference.
 
+Nodes are listed with the label their provider put in the URI fragment, so
+several endpoints of one protocol stay distinguishable. That fragment is
+generic URI syntax rather than protocol semantics, so reading it keeps protocol
+interpretation with the backend; a record without a usable fragment, such as
+VMess with its Base64 payload, shows its scheme instead. Labels are decoded,
+redacted, made terminal-safe, and truncated, and they are never used to select
+a node — `--node NODE_ID` remains the exact selector.
+
 A stored subscription can also drift: after an upgrade changes how the same
 source bytes are classified, the persisted nodes stop matching those bytes.
 That state is recoverable rather than hostile, because the keyed home

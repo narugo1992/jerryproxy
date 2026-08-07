@@ -123,7 +123,7 @@ Interactive forms:
 Non-interactive forms must provide both `--subscription NAME` and `--node
 NODE_ID`. JSONL output and `-y/--yes` never infer missing targets; they fail
 with a usage error instead. Selection labels contain only subscription format,
-node count, node scheme, endpoint display, and the stable node ID.
+node count, node scheme, the provider's node label, and the stable node ID.
 
 The listener is an open mixed proxy on `127.0.0.1` by default; use `--protocol`
 to select mixed, HTTP, or SOCKS5, `--auth` to opt into generated local

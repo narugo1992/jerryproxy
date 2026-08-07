@@ -8,7 +8,7 @@ import ipaddress
 import re
 import socket
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -22,9 +22,13 @@ from ..errors import SubscriptionFetchError, SubscriptionParseError
 from .audit import MIHOMO_PARSER_IDENTITY
 from .interfaces import SubscriptionParser
 from .model import ParsedSubscription
+from .redaction import redact_text, terminal_safe_text
 
 MAXIMUM_BODY_BYTES = 8 * 1024 * 1024
 MAXIMUM_URL_BYTES = 16 * 1024
+# Node labels are provider-controlled text kept well below the stored display
+# bound so one long label can never reject an otherwise valid subscription.
+MAXIMUM_LABEL_CHARACTERS = 64
 MAXIMUM_URI_BYTES = 16 * 1024
 MAXIMUM_RECORDS = 4096
 MAXIMUM_REDIRECTS = 3
@@ -345,9 +349,36 @@ def _looks_like_uri_lines(value):  # type: (bytes) -> bool
 
 
 def _display_for_uri(uri):  # type: (str) -> str
-    # The complete URI is an opaque backend-owned record.  Never inspect its
-    # authority, query, Base64 envelope, UUID, or protocol options here.
-    return "%s node" % uri.split(":", 1)[0].lower()
+    """Return a bounded, credential-free label for one opaque URI record.
+
+    A fragment is generic RFC 3986 syntax rather than protocol semantics, and
+    subscription providers use it as the node's human label, so it is taken
+    verbatim without inspecting the authority, query, Base64 envelope, UUID, or
+    any protocol option.  A record with no usable fragment falls back to its
+    scheme; VMess keeps that fallback because its label lives inside a Base64
+    payload only the backend may interpret.
+
+    The label is provider-controlled text, so it is percent-decoded as UTF-8,
+    whitespace-folded, redacted, escaped for terminal safety, and truncated
+    well below the stored display bound.  Redaction is defence in depth: a
+    fragment is conventionally a human name, but nothing stops a provider from
+    putting credential-shaped text there.  The label is a display value only
+    and never participates in node selection or backend configuration.
+    """
+
+    fallback = "%s node" % uri.split(":", 1)[0].lower()
+    _, separator, fragment = uri.partition("#")
+    if not separator:
+        return fallback
+    try:
+        label = unquote(fragment, errors="strict")
+    except UnicodeDecodeError:
+        # A fragment that is not UTF-8 percent-encoding is not a usable label.
+        return fallback
+    label = terminal_safe_text(redact_text(" ".join(label.split())))
+    if not label:
+        return fallback
+    return label[:MAXIMUM_LABEL_CHARACTERS]
 
 
 def _validate_uri_line(line):  # type: (str) -> Tuple[str, str, str]

@@ -13,6 +13,7 @@ from jerryproxy.errors import (
     IntegrityError,
     SubscriptionFetchError,
     SubscriptionNodesMismatchError,
+    SubscriptionParseError,
     SubscriptionStateError,
 )
 from jerryproxy.home import JerryProxyPaths
@@ -987,3 +988,30 @@ def test_interrupted_removal_rollback_rejects_a_forged_quarantine(tmp_path, monk
     assert staged["path"].exists()
     with pytest.raises(IntegrityError):
         manager.list()
+
+
+def test_unparseable_source_bytes_are_corrupt_state_rather_than_drift(tmp_path):
+    """A strict recheck that cannot parse is corruption, not recoverable drift.
+
+    The tolerant read already accepted these bytes, so a later parse failure
+    means the parser itself is unusable here; answering that with a refresh
+    instruction would be wrong.
+    """
+
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    SubscriptionManager(paths).add("main", None, body=SS, format_hint="uri-lines")
+
+    class SecondCallFailsParser(V2RaySubscriptionParser):
+        def __init__(self):
+            self.calls = 0
+
+        def parse(self, body, format_hint="auto"):
+            self.calls += 1
+            if self.calls > 1:
+                raise SubscriptionParseError("parser became unusable")
+            return super(SecondCallFailsParser, self).parse(body, format_hint=format_hint)
+
+    manager = SubscriptionManager(paths, parser=SecondCallFailsParser())
+    with pytest.raises(SubscriptionStateError, match="cannot be revalidated") as failure:
+        manager.get("main")
+    assert not isinstance(failure.value, SubscriptionNodesMismatchError)
