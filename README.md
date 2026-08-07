@@ -8,7 +8,8 @@ home directory all use the same name: `jerryproxy`.
 > **Work in progress:** the first runtime slice is implemented: bounded
 > `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, and VLESS URI
 > lines, sanitized home-local state, and a synchronous Mihomo 1.19.29
-> foreground server with bounded health diagnostics. The CLI binds an open
+> foreground server with bounded health diagnostics and bounded recovery from
+> subscription state drift. The CLI binds an open
 > listener to `127.0.0.1` by default; `--auth` enables generated local
 > credentials and `--bind-all` explicitly selects `0.0.0.0`. Native profiles,
 > other core drivers, and the historical `v2raycli` compatibility layer remain

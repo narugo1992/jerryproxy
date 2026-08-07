@@ -29,6 +29,10 @@ open on `127.0.0.1` by default, with optional generated local credentials via
 subscription state below `JERRYPROXY_HOME`, probes the global health quorum,
 restarts the current node once, sweeps deterministic alternates, and may
 refresh the retained source once without rewriting the saved preference.
+Nodes are labelled from their URI fragment. A stored node projection that no
+longer matches its source bytes is recoverable drift rather than tampering, and
+one bounded refresh of the saved source repairs it before startup; that is a
+separate mechanism from the running-session health recovery above.
 Native profiles, the other runtime cores, controller, measurement/ranking
 system, and historical `v2raycli` compatibility remain planned. README and docs
 must keep that boundary truthful.
