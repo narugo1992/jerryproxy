@@ -1,0 +1,78 @@
+# Two-network topology for the JerryProxy end-to-end lane.
+#
+# The isolation is the point: `sentinel` and `camouflage` join only
+# `private-net` and publish no port, while the proxy servers bridge both
+# networks. The pytest runner joins `client-net` only, so it can reach the proxy
+# servers but cannot reach the sentinel except through one of them. That is why
+# obtaining the sentinel nonce proves the data plane carried the traffic.
+#
+# GitHub's `jobs.<id>.services` cannot express this, because it attaches the job
+# container and every service to one network.
+services:
+  sentinel:
+    image: ${E2E_PYTHON_IMAGE}
+    command: ["python", "/srv/sentinel.py"]
+    environment:
+      JERRYPROXY_E2E_MARKER: ${JERRYPROXY_E2E_MARKER:?the run nonce is required}
+      JERRYPROXY_E2E_SENTINEL_PORT: "8080"
+    volumes:
+      - ${E2E_TOOLS}/sentinel.py:/srv/sentinel.py:ro
+    networks:
+      - private-net
+
+  camouflage:
+    image: ${E2E_NGINX_IMAGE}
+    volumes:
+      - ${E2E_GENERATED}/camouflage.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${E2E_GENERATED}/camouflage.crt:/etc/nginx/tls/camouflage.crt:ro
+      - ${E2E_GENERATED}/camouflage.key:/etc/nginx/tls/camouflage.key:ro
+    networks:
+      - private-net
+
+  subscription:
+    image: ${E2E_PYTHON_IMAGE}
+    command: ["python", "/srv/subscription.py"]
+    environment:
+      JERRYPROXY_E2E_FEED: /feed/subscription
+      JERRYPROXY_E2E_SUBSCRIPTION_PORT: "8081"
+    volumes:
+      - ${E2E_TOOLS}/subscription.py:/srv/subscription.py:ro
+      - ${E2E_GENERATED}/subscription:/feed/subscription:ro
+    networks:
+      - client-net
+
+  ss-server:
+    image: jerryproxy-e2e-xray:pinned
+    command: ["run", "-c", "/etc/xray/config.json"]
+    volumes:
+      - ${E2E_GENERATED}/ss-server.json:/etc/xray/config.json:ro
+    networks:
+      - client-net
+      - private-net
+
+  vmess-server:
+    image: jerryproxy-e2e-xray:pinned
+    command: ["run", "-c", "/etc/xray/config.json"]
+    volumes:
+      - ${E2E_GENERATED}/vmess-server.json:/etc/xray/config.json:ro
+    networks:
+      - client-net
+      - private-net
+
+  vless-server:
+    image: jerryproxy-e2e-xray:pinned
+    command: ["run", "-c", "/etc/xray/config.json"]
+    volumes:
+      - ${E2E_GENERATED}/vless-server.json:/etc/xray/config.json:ro
+    depends_on:
+      - camouflage
+    networks:
+      - client-net
+      - private-net
+
+networks:
+  client-net:
+    name: jerryproxy-e2e-client
+  private-net:
+    name: jerryproxy-e2e-private
+    internal: true

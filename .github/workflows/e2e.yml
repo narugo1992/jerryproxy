@@ -1,0 +1,210 @@
+name: End-to-End Data Plane
+
+# Proves that SS, VMess, and VLESS Reality each carry traffic to a private
+# sentinel through JerryProxy. The sentinel publishes no port and lives on an
+# internal network the test container never joins, so obtaining its per-run
+# nonce is only possible by actually traversing a proxy.
+#
+# This workflow owns Docker entirely. Pytest receives environment variables and
+# service names and never imports a Docker library or runs the Docker CLI, so
+# the product's unit matrix stays deterministic and network-free.
+
+on:
+  pull_request:
+    paths:
+      - "jerryproxy/**"
+      - "test/e2e/**"
+      - "tools/e2e/**"
+      - ".github/workflows/e2e.yml"
+      - "requirements*.txt"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Digest-pinned images; a mutable tag would make the lane irreproducible.
+  E2E_PYTHON_IMAGE: python@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+  E2E_NGINX_IMAGE: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+  E2E_ALPINE_IMAGE: alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+  COMPOSE_PROJECT: jerryproxy-e2e
+
+jobs:
+  data-plane:
+    name: Data plane through Docker
+    # Service-container topologies of this shape are Linux-only.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Resolve the pinned proxy release from the repository catalog
+        id: pinned
+        run: |
+          set -euo pipefail
+          python -m pip install -q -e .
+          for field in version asset sha256 url; do
+            printf '%s=%s\n' "$field" "$(python tools/e2e/pinned.py --field "$field")" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Fetch and verify the pinned proxy release
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/xray"
+          curl -fsSL -o "$RUNNER_TEMP/xray/asset.zip" '${{ steps.pinned.outputs.url }}'
+          echo '${{ steps.pinned.outputs.sha256 }}  '"$RUNNER_TEMP/xray/asset.zip" | sha256sum -c -
+          unzip -j -o "$RUNNER_TEMP/xray/asset.zip" xray -d "$RUNNER_TEMP/xray"
+          chmod 0755 "$RUNNER_TEMP/xray/xray"
+          "$RUNNER_TEMP/xray/xray" version
+
+      - name: Build the proxy server image from that release
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg E2E_BASE_IMAGE="$E2E_ALPINE_IMAGE" \
+            --build-arg XRAY_VERSION='${{ steps.pinned.outputs.version }}' \
+            --build-arg XRAY_ASSET='${{ steps.pinned.outputs.asset }}' \
+            --build-arg XRAY_SHA256='${{ steps.pinned.outputs.sha256 }}' \
+            -f tools/e2e/Dockerfile.xray -t jerryproxy-e2e-xray:pinned tools/e2e
+
+      - name: Generate per-run credentials, configs, and the sentinel nonce
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$RUNNER_TEMP/generated"
+          python tools/e2e/generate.py \
+            --output "$RUNNER_TEMP/generated" \
+            --xray "$RUNNER_TEMP/xray/xray" \
+            --env-file "$RUNNER_TEMP/e2e.env"
+          # Names only: generated values are bearer-like and never logged.
+          cut -d= -f1 "$RUNNER_TEMP/e2e.env"
+
+      - name: Start the two-network topology
+        run: |
+          set -euo pipefail
+          set -a; . "$RUNNER_TEMP/e2e.env"; set +a
+          export E2E_TOOLS="$PWD/tools/e2e" E2E_GENERATED="$RUNNER_TEMP/generated"
+          docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" up -d
+          docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" ps
+
+      - name: Wait for protocol readiness
+        run: |
+          set -euo pipefail
+          set -a; . "$RUNNER_TEMP/e2e.env"; set +a
+          # depends_on only orders creation. Prove each listener actually accepts
+          # a connection and that the sentinel answers on the private network.
+          for probe in "sentinel 8080 private" "subscription 8081 client" \
+                       "ss-server 10001 client" "vmess-server 10002 client" \
+                       "vless-server 10003 client" "camouflage 8443 private"; do
+            set -- $probe
+            host=$1; port=$2; net=$3
+            for attempt in $(seq 1 30); do
+              if docker run --rm --network "jerryproxy-e2e-$net" "$E2E_PYTHON_IMAGE" \
+                   python -c "import socket,sys;socket.create_connection(('$host',$port),timeout=3).close()" \
+                   >/dev/null 2>&1; then
+                echo "ready: $host:$port on $net"
+                break
+              fi
+              if [ "$attempt" = "30" ]; then
+                echo "::error::$host:$port did not become ready on $net"
+                exit 1
+              fi
+              sleep 2
+            done
+          done
+
+      - name: Preflight the injected contract
+        run: |
+          set -euo pipefail
+          # A broken setup must fail here rather than surface as a harmless skip.
+          missing=0
+          for name in V2RAY_SUBSCRIPTION JERRYPROXY_E2E_SENTINEL_HOST \
+                      JERRYPROXY_E2E_SENTINEL_PORT JERRYPROXY_E2E_MARKER \
+                      JERRYPROXY_E2E_BACKEND JERRYPROXY_E2E_BACKEND_VERSION \
+                      JERRYPROXY_E2E_SS_NODE JERRYPROXY_E2E_VMESS_NODE \
+                      JERRYPROXY_E2E_VLESS_NODE; do
+            grep -q "^$name=" "$RUNNER_TEMP/e2e.env" || { echo "::error::$name was not generated"; missing=1; }
+          done
+          [ "$missing" = "0" ]
+          # The runner must not be able to see the sentinel directly; if it can,
+          # every data-plane assertion afterwards would prove nothing.
+          if docker run --rm --network jerryproxy-e2e-client "$E2E_PYTHON_IMAGE" \
+               python -c "import socket;socket.create_connection(('sentinel',8080),timeout=4).close()" \
+               >/dev/null 2>&1; then
+            echo "::error::sentinel is reachable from client-net; the isolation is broken"
+            exit 1
+          fi
+          echo "isolation verified: sentinel unreachable from client-net"
+
+      - name: Run the end-to-end lane
+        run: |
+          set -euo pipefail
+          # Only the in-network service names bypass any ambient proxy; backend
+          # bootstrap still reaches GitHub normally.
+          NO_PROXY_LIST="localhost,127.0.0.1,::1,sentinel,subscription,ss-server,vmess-server,vless-server,camouflage"
+          docker run --rm --network jerryproxy-e2e-client \
+            --env-file "$RUNNER_TEMP/e2e.env" \
+            -e JERRYPROXY_E2E_ENFORCE=1 \
+            -e JERRYPROXY_E2E_PUBLIC_PROBES='https://www.gstatic.com/generate_204,https://cloudflare.com/cdn-cgi/trace' \
+            -e no_proxy="$NO_PROXY_LIST" -e NO_PROXY="$NO_PROXY_LIST" \
+            -v "$PWD":/src:ro -w /work \
+            "$E2E_PYTHON_IMAGE" bash -c '
+              set -euo pipefail
+              mkdir -p /work/repo && cp -r /src/. /work/repo/
+              cd /work/repo
+              pip install -q -e . -r requirements-test.txt
+              python -m pytest test/e2e -m e2e -p no:cacheprovider -v
+            '
+
+      - name: Capture bounded service logs on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          set -a; . "$RUNNER_TEMP/e2e.env" 2>/dev/null || true; set +a
+          export E2E_TOOLS="$PWD/tools/e2e" E2E_GENERATED="$RUNNER_TEMP/generated"
+          for service in sentinel subscription ss-server vmess-server vless-server camouflage; do
+            echo "===== $service ====="
+            # Redact the run nonce before anything is published.
+            docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" \
+              logs --tail 120 "$service" 2>&1 \
+              | sed -e "s/${JERRYPROXY_E2E_MARKER:-__absent__}/[REDACTED MARKER]/g" \
+              | head -c 20000
+          done
+
+      - name: Tear down the topology
+        if: always()
+        run: |
+          set -uo pipefail
+          set -a; . "$RUNNER_TEMP/e2e.env" 2>/dev/null || true; set +a
+          export E2E_TOOLS="$PWD/tools/e2e" E2E_GENERATED="$RUNNER_TEMP/generated"
+          docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" down --volumes --remove-orphans
+          rm -rf "$RUNNER_TEMP/generated" "$RUNNER_TEMP/e2e.env" "$RUNNER_TEMP/xray"
+          # A leftover project or private network is a workflow failure.
+          if docker network ls --format '{{.Name}}' | grep -qE '^jerryproxy-e2e-(client|private)$'; then
+            echo "::error::a test network survived cleanup"
+            exit 1
+          fi
+          echo "cleanup verified"
+
+  e2e-gate:
+    name: E2E gate
+    needs: [data-plane]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the data-plane job to succeed
+        run: |
+          if [ '${{ needs.data-plane.result }}' != 'success' ]; then
+            echo "::error::data plane result: ${{ needs.data-plane.result }}"
+            exit 1
+          fi
+          echo "data plane verified"
