@@ -50,7 +50,7 @@ def node_list(context, subscription, as_json):
     click.echo(
         tabulate(
             rows,
-            headers=["SUBSCRIPTION", "NODE", "SCHEME", "ENDPOINT"],
+            headers=["SUBSCRIPTION", "NODE", "SCHEME", "LABEL"],
             tablefmt="plain",
             disable_numparse=True,
         )

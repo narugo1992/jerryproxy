@@ -525,7 +525,7 @@ def _restore_record_locked(paths, quarantine, expected_identity, parser):  # typ
     # an interrupted removal.  The journal identity match proves these are the
     # bytes this transaction isolated, and the keyed fingerprint check proves
     # the node identities about to be unretired are this home's own.
-    record = _record_from_value(_read_json(quarantine), parser=parser, allow_node_mismatch=True)
+    record = _record_from_value(_read_json(quarantine), parser=parser)
     if not identity_matches(quarantine, expected_identity):
         raise IntegrityError("subscription removal quarantine identity changed")
     _validate_record_identity_if_present(paths, record)
@@ -615,19 +615,16 @@ def _node_from_value(value):  # type: (dict) -> NodeRecord
     return NodeRecord(node_id, value["scheme"], value["display"], value["uri"], occurrence, fingerprint)
 
 
-def _record_from_value(value, parser=None, allow_node_mismatch=False):
-    # type: (dict, Optional[SubscriptionParser], bool) -> SubscriptionRecord
-    """Validate one durable record, optionally tolerating node-projection drift.
+def _record_from_value(value, parser=None):  # type: (dict, Optional[SubscriptionParser]) -> SubscriptionRecord
+    """Validate the structure and integrity of one durable record.
 
-    ``allow_node_mismatch`` relaxes exactly one check: the fresh reparse of the
-    digest-protected source bytes no longer has to reproduce the stored node
-    projection.  Every other check in this function still applies, and every
-    caller pairs it with :func:`_validate_record_identity_if_present`, whose
-    keyed per-node fingerprint means a tolerant read cannot accept node content
-    this home never wrote for this subscription and format.  That fingerprint
-    is per node: it does not attest the order, completeness, or revision of the
-    node list, so a tolerant read is only safe where the caller does not
-    consume node semantics.
+    This deliberately stops short of requiring the stored node projection to
+    match a fresh parse of the source bytes, because that single check is the
+    one a caller may legitimately relax.  Reads therefore compose two explicit
+    steps: :func:`_validate_record_identity_if_present` decides tampering, and
+    :func:`_require_node_projection` decides drift.  Ordering matters — forged
+    node content must never be reported as recoverable — and a caller that
+    does not consume node semantics simply omits the second step.
     """
 
     required = ("name", "id", "revision", "format", "enabled", "updated_at", "body", "nodes")
@@ -688,18 +685,14 @@ def _record_from_value(value, parser=None, allow_node_mismatch=False):
             raise SubscriptionStateError("subscription source URL is invalid") from error
     parser = parser or MIHOMO_SUBSCRIPTION_PARSER
     try:
-        parsed = parser.parse(
+        parser.parse(
             body,
             format_hint="auto" if value["format"] == "base64-uri-lines" else "uri-lines",
         )
     except (SubscriptionFetchError, SubscriptionParseError, SubscriptionStateError, ValueError) as error:
-        # The digest-protected source must remain parseable before its private
-        # node projection can be trusted.
+        # The digest-protected source must remain parseable at all before any
+        # caller can trust or rebuild the projection derived from it.
         raise SubscriptionStateError("subscription source bytes cannot be revalidated") from error
-    if not allow_node_mismatch and tuple(parsed.records) != tuple(
-        (node.scheme, node.display, node.uri) for node in nodes
-    ):
-        raise _node_mismatch_error(value["name"])
     return SubscriptionRecord(
         value["name"],
         value["id"],
@@ -819,7 +812,7 @@ def _history_records_locked(paths, parser):  # type: (object, object) -> list
             raise IntegrityError("subscription history filename is invalid")
         if any(char not in "0123456789abcdef" for char in parts[0] + parts[1]):
             raise IntegrityError("subscription history filename is invalid")
-        record = _record_from_value(_read_json(path), parser=parser, allow_node_mismatch=True)
+        record = _record_from_value(_read_json(path), parser=parser)
         _validate_record_identity_if_present(paths, record)
         if record.subscription_id != parts[0] or record.revision != parts[1]:
             raise IntegrityError("subscription history identity does not match its filename")
@@ -905,7 +898,7 @@ class SubscriptionStore(object):
             # fingerprint decides tampering before the reparse decides drift,
             # so forged node content can never be reported as recoverable or
             # be answered with a repair instruction.
-            record = _record_from_value(_read_json(path), parser=self.parser, allow_node_mismatch=True)
+            record = _record_from_value(_read_json(path), parser=self.parser)
             _validate_record_identity_if_present(self.paths, record)
             if not allow_node_mismatch:
                 _require_node_projection(record, self.parser)
@@ -1040,7 +1033,7 @@ class SubscriptionStore(object):
             # The generation being replaced contributes only its revision and
             # identity to this transaction, so publication must stay available
             # while its projection is drifted and awaiting repair.
-            existing = _record_from_value(_read_json(path), parser=self.parser, allow_node_mismatch=True)
+            existing = _record_from_value(_read_json(path), parser=self.parser)
             _validate_record_identity_if_present(self.paths, existing)
         if existing is not None and not replace:
             raise SubscriptionStateError("subscription already exists: %s" % record.name)
@@ -1089,7 +1082,7 @@ class SubscriptionStore(object):
         # drifted projection must remain deletable rather than permanent.  The
         # keyed fingerprint check still applies: retiring a forged identity
         # would let foreign state reserve this home's node ID space.
-        record = _record_from_value(_read_json(path), parser=self.parser, allow_node_mismatch=True)
+        record = _record_from_value(_read_json(path), parser=self.parser)
         _validate_record_identity_if_present(self.paths, record)
         record_identity = _capture_record_identity(path)
         operation = secrets.token_hex(16)

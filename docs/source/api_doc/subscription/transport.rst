@@ -20,6 +20,13 @@ MAXIMUM\_URL\_BYTES
    :no-value:
 
 
+MAXIMUM\_LABEL\_CHARACTERS
+-----------------------------------------------------
+
+.. autodata:: MAXIMUM_LABEL_CHARACTERS
+   :no-value:
+
+
 MAXIMUM\_URI\_BYTES
 -----------------------------------------------------
 

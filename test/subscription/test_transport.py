@@ -15,7 +15,11 @@ from jerryproxy.subscription import (
     subscription_field_disposition_manifest,
 )
 from jerryproxy.subscription.manager import SubscriptionManager
-from jerryproxy.subscription.transport import fetch_subscription, parse_subscription_body
+from jerryproxy.subscription.transport import (
+    MAXIMUM_LABEL_CHARACTERS,
+    fetch_subscription,
+    parse_subscription_body,
+)
 
 SS = b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ss\n"
 VMESS = b"vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1NTUiLCJuZXQiOiJ0Y3AiLCJwb3J0IjoiNDQzIiwicHMiOiJ2bWVzcyIsInRscyI6InRscyIsInYiOjJ9\n"
@@ -30,7 +34,9 @@ def test_plain_and_base64_uri_lines_are_classified_separately():
     assert plain.format == "uri-lines"
     assert decoded.format == "base64-uri-lines"
     assert [item[0] for item in plain.records] == ["ss", "vmess", "vless"]
-    assert plain.records[0][1] == "ss node"
+    # The SS record carries "#ss" as its fragment; VMess carries no fragment
+    # and keeps the scheme fallback.
+    assert plain.records[0][1] == "ss"
     assert plain.records[1][1] == "vmess node"
 
 
@@ -341,3 +347,88 @@ def test_fetch_wraps_request_timeout_and_restores_state():
     assert session.trust_env is True
     assert session.proxies == {"https": "http://proxy.invalid"}
     assert session.cookies == {"session": "secret"}
+
+
+def test_node_label_comes_from_the_fragment_so_nodes_are_distinguishable():
+    """Three endpoints of one scheme must not collapse into one label."""
+
+    body = (
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#tokyo-01\n"
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4yOjQ0Mw#osaka-02\n"
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4zOjQ0Mw#seoul-03\n"
+    )
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+
+    assert [record[1] for record in parsed.records] == ["tokyo-01", "osaka-02", "seoul-03"]
+    # The label is derived only; the record still carries the exact source URI.
+    assert parsed.records[0][2].endswith("#tokyo-01")
+
+
+def test_node_label_falls_back_to_the_scheme_without_a_usable_fragment():
+    body = (
+        b"vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1"
+        b"NS01NTU1NTU1NTU1NTUiLCJuZXQiOiJ0Y3AiLCJwb3J0IjoiNDQzIiwicHMiOiJ2bWVzcyIsInRscyI6InRs"
+        b"cyIsInYiOjJ9\n"
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#\n"
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4yOjQ0Mw#%20%09%20\n"
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4zOjQ0Mw#%FF%FE\n"
+    )
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+
+    # VMess keeps its label inside a Base64 payload this layer must not decode;
+    # empty, whitespace-only, and non-UTF-8 fragments are not usable labels.
+    assert [record[1] for record in parsed.records] == [
+        "vmess node",
+        "ss node",
+        "ss node",
+        "ss node",
+    ]
+
+
+def test_node_label_decodes_utf8_and_folds_whitespace():
+    body = b"ss://YWJj#%F0%9F%87%B0%F0%9F%87%B7%20%20Seoul%0A%09Premium\n"
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+
+    assert parsed.records[0][1] == "\U0001F1F0\U0001F1F7 Seoul Premium"
+
+
+def test_node_label_never_exposes_credentials_or_control_sequences():
+    body = (
+        b"ss://YWJj#pbk%3DleakedPublicKey\n"
+        b"ss://YWJk#password%3Dhunter2\n"
+        b"ss://YWJl#node-11111111-1111-1111-1111-111111111111\n"
+        b"ss://YWJm#%1B%5B31mred%1B%5B0m\n"
+    )
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+    labels = [record[1] for record in parsed.records]
+
+    assert labels[0] == "pbk=[REDACTED]"
+    assert labels[1] == "password=[REDACTED]"
+    assert labels[2] == "node-[REDACTED UUID]"
+    # Terminal escapes are rendered visibly rather than emitted to the terminal.
+    assert labels[3] == "\\u001b[31mred\\u001b[0m"
+    assert not any("leakedPublicKey" in label or "hunter2" in label for label in labels)
+
+
+def test_node_label_ignores_the_authority_and_query_entirely():
+    """A label must never be built from credential-bearing URI components."""
+
+    body = (
+        b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?"
+        b"type=tcp&security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&"
+        b"sid=0123456789abcdef#osaka\n"
+    )
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+
+    assert parsed.records[0][1] == "osaka"
+    # The opaque record still round-trips exactly for the backend.
+    assert parsed.records[0][2] == body.decode("ascii").strip()
+
+
+def test_node_label_is_bounded_far_below_the_stored_display_limit():
+    body = b"ss://YWJj#" + b"x" * 4096 + b"\n"
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+    label = parsed.records[0][1]
+
+    assert len(label) == MAXIMUM_LABEL_CHARACTERS
+    assert len(label.encode("utf-8")) < 512

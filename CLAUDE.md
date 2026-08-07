@@ -328,6 +328,14 @@ authentication, extraction, process, or permission errors to warnings.
 - `jerryproxy.subscription` owns bounded source transport, URI classification,
   private revision publication, and sanitized node inventory. It must not
   normalize protocol-specific credentials/settings into a second core.
+- A node's displayed label may be derived only from the URI fragment, which is
+  generic RFC 3986 syntax, never from the authority, query, or a protocol
+  envelope such as the VMess Base64 payload. A record with no usable fragment
+  falls back to its scheme. The fragment is provider-controlled text, so a
+  label must be percent-decoded as UTF-8, whitespace-folded, redacted, made
+  terminal-safe, and bounded well below the stored display limit. A label is a
+  display value only; it must never select a node or reach a backend
+  configuration.
 - A stored node projection is protected by the keyed home fingerprint and
   separately revalidated by reparsing its digest-protected source bytes. The
   fingerprint is per node and attests only that this home wrote that node

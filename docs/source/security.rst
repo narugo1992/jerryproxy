@@ -109,6 +109,12 @@ home lock, but an external observer can see an intermediate pair before then.
 Current URI-runtime invariants:
 
 * subscription URLs never appear in argv or displayed logs;
+* a node's displayed label comes only from the URI fragment, which is generic
+  RFC 3986 syntax rather than protocol semantics; the authority, query, and any
+  Base64 envelope are never inspected to build it. The fragment is
+  provider-controlled text, so the label is percent-decoded as UTF-8,
+  whitespace-folded, redacted, escaped for terminal safety, and truncated. It
+  is a display value only and never selects a node or configures a backend;
 * the generated Mihomo provider, access descriptor, and session files are
   owner-only below ``JERRYPROXY_HOME``;
 * the public foreground listener binds to ``127.0.0.1`` by default; ``--auth``
@@ -125,7 +131,7 @@ Current URI-runtime invariants:
 * health recovery uses bounded restart/alternate/refresh steps and preserves
   the saved node preference;
 * every stored node carries a keyed home fingerprint over its subscription,
-  format, scheme, endpoint, URI, and occurrence, so node content this home
+  format, scheme, label, URI, and occurrence, so node content this home
   never wrote is rejected as tampering before any repair path runs, while a
   projection that merely stopped matching its source bytes is repaired by one
   bounded refresh of the saved source and never by trusting the stored nodes;

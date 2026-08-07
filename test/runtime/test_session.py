@@ -854,3 +854,113 @@ def test_startup_repairs_drift_through_the_session_home_lock(tmp_path, monkeypat
     assert not selected.nodes[0].display.endswith("-upgraded")
     assert selected.revision == repaired.revision
     assert node.node_id == repaired.nodes[0].node_id
+
+
+def test_health_recovery_refreshes_through_the_session_home_lock(tmp_path, monkeypatch):
+    """Recovery refresh must reach the private locked helper, like repair does.
+
+    A public refresh would take the home lock the session already owns, so this
+    covers the branch a fake manager cannot exercise.
+    """
+
+    first = URI_TEMPLATE.encode("ascii") % (443, 0)
+    second = URI_TEMPLATE.encode("ascii") % (444, 1)
+    serve = {"body": first}
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(serve["body"], "https://provider.example/secret"),
+    )
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    record = manager.add("main", "https://provider.example/secret", format_hint="uri-lines")
+
+    # Fail the startup quorum, then every probe, so recovery exhausts the node
+    # sweep and reaches the source refresh.
+    class Clock(object):
+        def __init__(self):
+            self.value = 0.0
+
+        def __call__(self):
+            return self.value
+
+        def sleep(self, delay):
+            self.value += max(0.2, delay)
+
+    clock = Clock()
+    policy = RecoveryPolicy(
+        health_interval=1.0,
+        startup_retry_delays=(0.0,),
+        recovery_deadline=5.0,
+        same_node_delay=0.0,
+        alternate_delays=(0.0, 0.0),
+    )
+    runtime = _session(
+        tmp_path,
+        record,
+        FakeProbe([True]),
+        manager=manager,
+        policy=policy,
+        clock=clock,
+        sleeper=clock.sleep,
+    )
+    runtime.start("main", node_id=record.nodes[0].node_id, install_missing=False)
+    serve["body"] = second
+    runtime.health_probe = FakeProbe([False] * 40)
+    runtime._next_health_at = clock.value
+
+    with pytest.raises(RuntimeSessionError):
+        runtime.wait()
+    runtime.stop()
+
+    assert manager.get("main").revision != record.revision
+
+
+def test_startup_selects_the_only_enabled_subscription(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jerryproxy.subscription.manager.fetch_subscription",
+        lambda *args, **kwargs: FetchedSubscription(URI_TEMPLATE.encode("ascii") % (443, 0), "https://p.example/s"),
+    )
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    record = manager.add("main", "https://p.example/s", format_hint="uri-lines")
+
+    runtime = _session(tmp_path, record, FakeProbe([True]), manager=manager)
+    # Neither --subscription nor --node: one enabled subscription with one node
+    # is unambiguous and must not require operands.
+    runtime.start(install_missing=False)
+
+    assert runtime.subscription.name == "main"
+    assert runtime.node.node_id == record.nodes[0].node_id
+    runtime.stop()
+
+
+def test_a_subscription_source_without_locked_helpers_stays_replaceable(tmp_path):
+    """The session must not require a manager's private locked helpers.
+
+    Lock ownership belongs to the session, so an injected source that exposes
+    only the public contract keeps working; it simply does not participate in
+    the already-held-lock optimisation.
+    """
+
+    healthy = _record(nodes=1, source_url="https://provider.example/secret")
+    drifted = _drifted(healthy)
+
+    class PublicOnlySubscriptionSource(object):
+        def __init__(self):
+            self.repair_calls = 0
+
+        def list(self):
+            return (drifted,)
+
+        def repair_node_projection(self, name):
+            assert name == "main"
+            self.repair_calls += 1
+            return healthy
+
+    source = PublicOnlySubscriptionSource()
+    runtime = _session(tmp_path, drifted, FakeProbe([True]), manager=source)
+    runtime.start("main", install_missing=False)
+
+    assert source.repair_calls == 1
+    assert runtime.node.node_id == healthy.nodes[0].node_id
+    runtime.stop()

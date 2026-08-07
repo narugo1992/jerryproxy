@@ -145,7 +145,7 @@ def emit_nodes(nodes):  # type: (tuple) -> None
                 ]
                 for node in nodes
             ],
-            headers=["NODE", "SCHEME", "ENDPOINT"],
+            headers=["NODE", "SCHEME", "LABEL"],
             tablefmt="plain",
             disable_numparse=True,
         )

@@ -251,9 +251,6 @@ class SubscriptionManager(object):
     def get(self, name):  # type: (str) -> SubscriptionRecord
         return self.store.get(name)
 
-    def _get_locked(self, name, allow_node_mismatch=False):  # type: (str, bool) -> SubscriptionRecord
-        return self.store._get_locked(name, allow_node_mismatch=allow_node_mismatch)
-
     def _fetch_remote(self, source_url, allow_http, format_hint):  # type: (str, bool, str) -> object
         # Injected sessions and monkeypatched transports are deterministic test
         # boundaries; production's default transport runs in a spawned worker.
