@@ -67,6 +67,21 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/xray/xray"
           "$RUNNER_TEMP/xray/xray" version
 
+      - name: Pull and verify the digest-pinned images
+          # Pulling explicitly means a digest mismatch fails here with a clear
+          # cause, rather than surfacing later as a confusing startup error.
+        run: |
+          set -euo pipefail
+          for image in "$E2E_PYTHON_IMAGE" "$E2E_NGINX_IMAGE" "$E2E_ALPINE_IMAGE"; do
+            docker pull -q "$image"
+            expected="${image##*@}"
+            actual="$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
+            case "$actual" in
+              *"$expected") echo "verified ${image%%@*} at ${expected:0:19}..." ;;
+              *) echo "::error::digest mismatch for ${image%%@*}"; exit 1 ;;
+            esac
+          done
+
       - name: Build the proxy server image from that release
         run: |
           set -euo pipefail
