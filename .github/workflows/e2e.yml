@@ -208,7 +208,9 @@ jobs:
           # access records, so a UUID, password, key, or short id could
           # otherwise reach the published workflow log.
           python tools/e2e/redact.py \
-            --env-file "$RUNNER_TEMP/e2e.env" --output "$RUNNER_TEMP/redact.sed"
+            --env-file "$RUNNER_TEMP/e2e.env" \
+            --secrets-file "$RUNNER_TEMP/e2e.env.secrets" \
+            --output "$RUNNER_TEMP/redact.sed"
           for service in sentinel subscription ss-server vmess-server vless-server camouflage; do
             echo "===== $service ====="
             docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" \
@@ -225,7 +227,7 @@ jobs:
           export E2E_TOOLS="$PWD/tools/e2e" E2E_GENERATED="$RUNNER_TEMP/generated"
           docker compose -f tools/e2e/docker-compose.yml -p "$COMPOSE_PROJECT" down --volumes --remove-orphans
           rm -rf "$RUNNER_TEMP/generated" "$RUNNER_TEMP/e2e.env" "$RUNNER_TEMP/e2e.env.sh" \
-            "$RUNNER_TEMP/redact.sed" "$RUNNER_TEMP/xray"
+            "$RUNNER_TEMP/e2e.env.secrets" "$RUNNER_TEMP/redact.sed" "$RUNNER_TEMP/xray"
           # A leftover project or private network is a workflow failure.
           if docker network ls --format '{{.Name}}' | grep -qE '^jerryproxy-e2e-(client|private)$'; then
             echo "::error::a test network survived cleanup"
