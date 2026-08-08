@@ -125,3 +125,15 @@ docs/build/
 /relay_health_targets.json
 /relay_health_latest.json
 /Relay-Health.md
+
+# Backend release archives and extracted binaries. Working on the data-plane
+# fixtures means downloading these locally, and one of them was committed once
+# because `git add -A` collected a download that landed in the wrong directory.
+# The repository must never carry a backend binary.
+*.zip
+*.tar.gz
+*.tgz
+/xray
+/mihomo
+/sing-box
+/v2ray
