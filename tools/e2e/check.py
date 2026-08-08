@@ -1,11 +1,13 @@
-"""Offline self-check for the end-to-end harness assets.
+"""Offline checks for the data-plane fixtures.
 
-These invariants are easy to verify without Docker and expensive to discover in
+These invariants are cheap to verify without Docker and expensive to discover in
 CI, so they are checked here rather than trusted:
 
-1. every generated value is removed from a captured log by the redaction script;
-2. the generated environment file survives shell sourcing intact;
-3. the topology exposes no port and keeps the sentinel off the client network.
+1. the sentinel and camouflage services publish no port, which is the only
+   reason a test cannot reach the nonce without going through a proxy;
+2. every value the provisioner emits can be removed from a captured log;
+3. the workflow references only outputs the provisioner emits, and supplies
+   every variable the fixture images require.
 
 Run through ``make e2e_check``. Nothing here contacts a network or starts Docker.
 """
@@ -17,259 +19,195 @@ import subprocess
 import sys
 import tempfile
 
-from generate import (
-    redaction_values,
-    redaction_values_path,
-    shell_environment_path,
-    write_environment,
-    write_redaction_values,
-)
+import provision
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "images"))
+import xray_entrypoint  # noqa: E402 - path is set immediately above
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-COMPOSE = os.path.join(HERE, "docker-compose.yml")
-WORKFLOW = os.path.join(HERE, "..", "..", ".github", "workflows", "e2e.yml")
+WORKFLOW = os.path.join(HERE, "..", "..", ".github", "workflows", "test.yml")
+IMAGES = os.path.join(HERE, "images")
 PRIVATE_ONLY_SERVICES = ("sentinel", "camouflage")
 
-# Synthetic values shaped like the generator's real output.
-SAMPLE = {
-    "V2RAY_SUBSCRIPTION": "http://subscription:8081/subscription",
-    "JERRYPROXY_E2E_SENTINEL_HOST": "sentinel",
-    "JERRYPROXY_E2E_SENTINEL_PORT": "8080",
-    "JERRYPROXY_E2E_BACKEND": "mihomo",
-    "JERRYPROXY_E2E_BACKEND_VERSION": "1.19.29",
-    "JERRYPROXY_E2E_MARKER": "a1b2c3d4" * 6,
-    "JERRYPROXY_E2E_SS_NODE": (
-        "ss://YWVzLTI1Ni1nY206c3ludGhldGljc2FtcGxlcGFzc3dvcmQ@ss-server:10001#e2e-ss"
-    ),
-    "JERRYPROXY_E2E_VMESS_NODE": (
-        "vmess://eyJhZGQiOiJ2bWVzcy1zZXJ2ZXIiLCJpZCI6IjEyMzQ1Njc4LWFiY2QtZWZhYi0xMjM0LTU2Nzg5MGFiY2RlZiJ9"
-    ),
-    "JERRYPROXY_E2E_VLESS_NODE": (
-        "vless://12345678-abcd-efab-1234-567890abcdef@vless-server:10003"
-        "?type=tcp&security=reality&flow=xtls-rprx-vision&sni=www.example.test"
-        "&fp=chrome&pbk=SYNTHETICREALITYPUBLICKEYSAMPLE&sid=0f1e2d3c4b5a6978#e2e-vless"
-    ),
-}
-SECRET_NAMES = ("JERRYPROXY_E2E_MARKER",) + tuple(
-    name for name in SAMPLE if name.endswith("_NODE")
-)
-# Secrets that exist only inside an encoded field, or that no client ever
-# receives. A server echoing its rejected configuration can still print them,
-# so redaction must cover them even though no export contains them.
-# Synthetic stand-ins for the values the generator produces. Passing them
-# through the generator's own classifier means dropping one there is caught,
-# while comparing the result back against this mapping means narrowing the
-# classifier is caught too — a shared definition alone cannot detect that,
-# because the check would narrow with it.
+# Synthetic stand-ins shaped like the provisioner's real output. Comparing this
+# mapping against what the provisioner emits catches both dropping a value and
+# narrowing the set: a shared definition alone cannot detect the latter, because
+# the check would narrow along with it.
 SUPPLIED_SECRETS = {
+    "marker": "a1b2c3d4" * 6,
     "ss_password": "c3ludGhldGljc2FtcGxlcGFzc3dvcmQ=",
     "vmess_id": "12345678-abcd-efab-1234-567890abcdef",
     "vless_id": "abcdef12-3456-7890-abcd-ef1234567890",
-    "reality_private_key": "SYNTHETICREALITYPRIVATEKEYSAMPLEVALUE",
-    "reality_public_key": "SYNTHETICREALITYPUBLICKEYSAMPLEVALUE",
+    "reality_private_key": "SYNTHETICREALITYPRIVATEKEYSAMPLE",
+    "reality_public_key": "SYNTHETICREALITYPUBLICKEYSAMPLEV",
     "short_id": "0f1e2d3c4b5a6978",
-    "marker": "a1b2c3d4" * 6,
+    "ss_node": "ss://c3ludGhldGljc2FtcGxldXNlcmluZm8@127.0.0.1:10001#e2e-ss",
+    "vmess_node": "vmess://eyJhZGQiOiIxMjcuMC4wLjEiLCJpZCI6ImFiY2RlZiJ9",
+    "vless_node": (
+        "vless://abcdef12-3456-7890-abcd-ef1234567890@127.0.0.1:10003"
+        "?type=tcp&security=reality&pbk=SYNTHETICREALITYPUBLICKEYSAMPLEV&sid=0f1e2d3c4b5a6978#e2e"
+    ),
 }
-ENCODED_ONLY_SECRETS = redaction_values(**SUPPLIED_SECRETS)
 
 
-def _write_env(path):  # type: (str) -> None
-    # Use the generator's own writers: a second copy of these rules here would
-    # keep passing after the real writer regressed.
-    write_environment(path, SAMPLE)
-    write_redaction_values(path, ENCODED_ONLY_SECRETS)
+def _workflow():  # type: () -> str
+    with open(WORKFLOW, "r", encoding="utf-8") as stream:
+        return stream.read()
 
 
-def _check_redaction(env_file):  # type: (str) -> list
-    """Every generated secret must be gone; diagnostics must stay readable."""
-
-    script = os.path.join(os.path.dirname(env_file), "redact.sed")
-    subprocess.run(
-        [
-            sys.executable,
-            os.path.join(HERE, "redact.py"),
-            "--env-file",
-            env_file,
-            "--secrets-file",
-            redaction_values_path(env_file),
-            "--output",
-            script,
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
+def _service_block(text, service):  # type: (str, str) -> str
+    parts = text.split("    services:", 1)
+    if len(parts) < 2:
+        return ""
+    body = parts[1].split("\n    steps:", 1)[0]
+    found = re.search(
+        r"^      %s:\n((?:        .*\n|\n)*)" % re.escape(service), body, re.MULTILINE
     )
-    secrets = list(ENCODED_ONLY_SECRETS.values())
-    for name in SECRET_NAMES:
-        value = SAMPLE[name]
-        secrets.append(value)
-        secrets.extend(part for part in re.split(r"[:/@?&#=,;]+", value) if len(part) >= 16)
-    sample_log = "\n".join(secrets + ["listening on sentinel:8080 for mihomo 1.19.29"])
-    rendered = subprocess.run(
-        ["sed", "-f", script], input=sample_log.encode("utf-8"), stdout=subprocess.PIPE, check=True
-    ).stdout.decode("utf-8")
+    return found.group(1) if found else ""
+
+
+def _check_private_services_publish_nothing():  # type: () -> list
+    """`ports` is the isolation boundary, so these services must not have one.
+
+    A job on the runner reaches a service only through a published port. Giving
+    the sentinel one would let a test fetch the nonce with no proxy involved,
+    and every data-plane assertion would then prove nothing.
+    """
+
+    text = _workflow()
     failures = []
-    lookup = {value: name for name, value in ENCODED_ONLY_SECRETS.items()}
-    lookup.update((SAMPLE[name], name) for name in SECRET_NAMES)
-    for secret in secrets:
-        if secret in rendered:
-            # Name the value that survived, never the value itself.
+    for service in PRIVATE_ONLY_SERVICES:
+        block = _service_block(text, service)
+        if not block:
+            failures.append("service %s is missing from the workflow" % service)
+        elif re.search(r"^\s*ports:", block, re.MULTILINE):
             failures.append(
-                "redaction left a generated value in the log: %s" % lookup.get(secret, "a node token")
+                "service %s publishes a port, so the runner could reach it without a proxy"
+                % service
             )
+    return failures
+
+
+def _check_every_value_stays_emitted():  # type: () -> list
+    """Nothing supplied here may quietly stop being emitted by the provisioner."""
+
+    dropped = sorted(set(SUPPLIED_SECRETS) - set(provision.OUTPUT_NAMES))
+    return [
+        "the provisioner no longer emits %s, so redaction would never cover it" % name
+        for name in dropped
+    ]
+
+
+def _check_redaction():  # type: () -> list
+    """Every emitted value must disappear from a captured log."""
+
+    directory = tempfile.mkdtemp(prefix="jerryproxy-e2e-redact-")
+    secrets_file = os.path.join(directory, "secrets")
+    script = os.path.join(directory, "redact.sed")
+    try:
+        with open(secrets_file, "w", encoding="utf-8") as stream:
+            for name in sorted(SUPPLIED_SECRETS):
+                stream.write("%s=%s\n" % (name, SUPPLIED_SECRETS[name]))
+        subprocess.run(
+            [
+                sys.executable,
+                os.path.join(HERE, "redact.py"),
+                "--env-file",
+                secrets_file,
+                "--output",
+                script,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        values = []
+        for name in sorted(SUPPLIED_SECRETS):
+            value = SUPPLIED_SECRETS[name]
+            values.append(value)
+            values.extend(part for part in re.split(r"[:/@?&#=,;]+", value) if len(part) >= 16)
+        sample = "\n".join(values + ["listening on sentinel:8080 for mihomo 1.19.29"])
+        rendered = subprocess.run(
+            ["sed", "-f", script],
+            input=sample.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.decode("utf-8")
+    finally:
+        for name in os.listdir(directory):
+            os.unlink(os.path.join(directory, name))
+        os.rmdir(directory)
+
+    lookup = {value: name for name, value in SUPPLIED_SECRETS.items()}
+    failures = [
+        "redaction left a value in the log: %s" % lookup.get(value, "an embedded token")
+        for value in values
+        if value in rendered
+    ]
     if "sentinel:8080" not in rendered or "mihomo" not in rendered:
         failures.append("redaction removed the service information a failure log needs")
     return failures
 
 
-def _check_shell_safety(env_file):  # type: (str) -> list
-    """A sourced env file must yield every value, not silently drop one.
+def _check_workflow_matches_the_provisioner():  # type: () -> list
+    """The workflow may reference only outputs the provisioner emits.
 
-    A node URI contains ``&``; unquoted, ``set -a; . env`` parses the line as
-    asynchronous assignments and the variable ends up unset with no error.
+    Renaming an output without updating the workflow yields an empty service
+    environment variable, and the fixture then fails at start complaining about
+    a missing credential rather than about the rename that caused it.
     """
 
-    reader = (
-        'set -euo pipefail; set -a; . "%s"; set +a; '
-        'for name in %s; do '
-        'eval "printf \'%%s=%%s\\n\' \\"$name\\" \\"\\${$name:-__UNSET__}\\""; '
-        "done"
-    ) % (shell_environment_path(env_file), " ".join(sorted(SAMPLE)))
-    result = subprocess.run(["bash", "-c", reader], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    output = result.stdout.decode("utf-8")
-    failures = []
-    if result.returncode != 0:
-        failures.append("sourcing the generated environment file failed")
-    for name, value in sorted(SAMPLE.items()):
-        if "%s=%s" % (name, value) not in output:
-            failures.append("sourcing did not preserve %s" % name)
-    return failures
-
-
-def _removal_command(text):  # type: (str) -> str
-    """Return the teardown step's `rm` command, joining its continuations."""
-
-    marker = "Tear down the topology"
-    if marker not in text:
-        return ""
-    lines = text.split(marker, 1)[1].splitlines()
-    for index, line in enumerate(lines):
-        if "rm -rf" not in line:
-            continue
-        command = line
-        position = index
-        while command.rstrip().endswith("\\") and position + 1 < len(lines):
-            position += 1
-            command = command.rstrip()[:-1] + lines[position]
-        return command
-    return ""
-
-
-def _check_workflow_uses_the_harness():  # type: () -> list
-    """The workflow must actually pass what redaction needs, and clean it up.
-
-    Verifying the tool in isolation is not enough: redaction covered every
-    generated value here while the workflow invoked it without the secrets file,
-    so in the real run those values were never removed. A check that only
-    exercises its own call has nothing to say about the call that matters.
-    """
-
-    try:
-        with open(WORKFLOW, "r", encoding="utf-8") as stream:
-            text = stream.read()
-    except OSError:
-        # A missing workflow means the lane cannot run at all.
-        return ["the end-to-end workflow is missing"]
-    failures = []
-    if "redact.py" not in text:
-        failures.append("the workflow never builds a redaction script")
-    elif "--secrets-file" not in text:
-        failures.append(
-            "the workflow invokes redact.py without --secrets-file, so secrets that "
-            "exist only inside an encoded field would be published"
-        )
-    # Inspect the removal command itself. Searching the whole file, or even the
-    # whole teardown step, cannot detect a missing cleanup: e2e.env.sh is
-    # sourced by five steps including teardown, so its name is present there
-    # regardless of what is deleted.
-    removal = _removal_command(text)
-    if not removal:
-        failures.append("the workflow teardown has no removal command")
-    for companion in ("e2e.env.sh", "e2e.env.secrets"):
-        if companion not in text:
-            failures.append("the workflow never references %s" % companion)
-        elif removal and companion not in removal:
-            failures.append("%s is never deleted by the teardown removal" % companion)
-    return failures
-
-
-def _check_secret_classification():  # type: () -> list
-    """Nothing supplied as a secret may be dropped from the classified set."""
-
-    dropped = sorted(set(SUPPLIED_SECRETS) - set(ENCODED_ONLY_SECRETS))
-    return [
-        "the generator no longer classifies %s as a secret, so log redaction "
-        "would never cover it" % name
-        for name in dropped
+    referenced = set(re.findall(r"needs\.provision\.outputs\.([a-z_0-9]+)", _workflow()))
+    failures = [
+        "the workflow references needs.provision.outputs.%s, which is not emitted" % name
+        for name in sorted(referenced - set(provision.OUTPUT_NAMES))
     ]
-
-
-def _check_docker_env_is_literal(env_file):  # type: (str) -> list
-    """The Docker env file must carry bare values.
-
-    ``docker --env-file`` does no quote processing, so a wrapping quote becomes
-    part of the value and every contract check downstream rejects it. This has
-    happened once already, when quoting was added for shell safety and applied
-    to both files.
-    """
-
-    failures = []
-    with open(env_file, "r", encoding="utf-8") as stream:
-        for line in stream:
-            name, separator, value = line.rstrip("\n").partition("=")
-            if not separator:
-                continue
-            if value[:1] in ("'", '"'):
-                failures.append(
-                    "%s is quoted; docker --env-file would keep the quote in the value" % name
-                )
+    if not referenced:
+        failures.append("the workflow references no provisioner output")
     return failures
 
 
-def _check_topology():  # type: () -> list
-    """No published port anywhere, and the private services stay private."""
+def _check_images_get_what_they_require():  # type: () -> list
+    """Each proxy service must supply the variables its entrypoint demands.
 
-    with open(COMPOSE, "r", encoding="utf-8") as stream:
-        text = stream.read()
+    The requirement set comes from the entrypoint itself rather than from the
+    variable names, because those names overlap: "SS" is a substring of
+    "VMESS", so any name-based inference attributes one protocol's credential
+    to another.
+    """
+
+    text = _workflow()
     failures = []
-    if re.search(r"^\s*ports:", text, re.MULTILINE):
-        failures.append("the topology publishes a port; the sentinel must stay unreachable")
-    if not re.search(r"^\s*internal:\s*true\s*$", text, re.MULTILINE):
-        failures.append("the private network is not declared internal")
-    for service in PRIVATE_ONLY_SERVICES:
-        block = re.search(
-            r"^  %s:\n(?:(?:    .*|\n)*)" % re.escape(service), text, re.MULTILINE
-        )
-        if block is None:
-            failures.append("service %s is missing from the topology" % service)
+    for service in ("ss-server", "vmess-server", "vless-server"):
+        block = _service_block(text, service)
+        if not block:
+            failures.append("service %s is missing from the workflow" % service)
             continue
-        if "client-net" in block.group(0):
-            failures.append("service %s joins client-net and is no longer isolated" % service)
+        supplied = set(re.findall(r"^\s+([A-Z0-9_]+):", block, re.MULTILINE))
+        protocol = re.search(r"E2E_PROTOCOL:\s*(\w+)", block)
+        if protocol is None:
+            failures.append("service %s does not declare E2E_PROTOCOL" % service)
+            continue
+        needed = xray_entrypoint.REQUIRED_BY_PROTOCOL.get(protocol.group(1))
+        if needed is None:
+            failures.append("service %s declares an unknown protocol" % service)
+            continue
+        failures.extend(
+            "service %s does not supply %s, which its entrypoint requires" % (service, name)
+            for name in sorted(set(needed) | {"E2E_PROTOCOL"} - supplied)
+            if name not in supplied
+        )
     return failures
 
 
 def main():  # type: () -> int
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
-    directory = tempfile.mkdtemp(prefix="jerryproxy-e2e-check-")
-    env_file = os.path.join(directory, "e2e.env")
-    _write_env(env_file)
     checks = (
-        ("every supplied secret stays classified", _check_secret_classification()),
-        ("workflow passes what redaction needs", _check_workflow_uses_the_harness()),
-        ("redaction covers every generated value", _check_redaction(env_file)),
-        ("generated environment survives shell sourcing", _check_shell_safety(env_file)),
-        ("docker environment file stays literal", _check_docker_env_is_literal(env_file)),
-        ("topology exposes no port and isolates the sentinel", _check_topology()),
+        ("private services publish no port", _check_private_services_publish_nothing()),
+        ("every provisioned value stays emitted", _check_every_value_stays_emitted()),
+        ("redaction covers every provisioned value", _check_redaction()),
+        ("workflow references only real outputs", _check_workflow_matches_the_provisioner()),
+        ("services supply what their images require", _check_images_get_what_they_require()),
     )
     failed = False
     for label, failures in checks:
@@ -279,9 +217,6 @@ def main():  # type: () -> int
                 sys.stdout.write("FAIL %s: %s\n" % (label, failure))
         else:
             sys.stdout.write("OK   %s\n" % label)
-    for name in os.listdir(directory):
-        os.unlink(os.path.join(directory, name))
-    os.rmdir(directory)
     return 1 if failed else 0
 
 
