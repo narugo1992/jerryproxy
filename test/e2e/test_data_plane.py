@@ -39,8 +39,14 @@ BACKEND_INSTALL_DEADLINE = 420.0
 # backend install pays for it. A cheap early case takes that allowance, keeping
 # every data-plane case at a budget that reflects only its own work; charging
 # the install to all of them would exceed the workflow's job timeout in total.
+COMMAND_DEADLINE = 60.0
 INSTALL_CASE_TIMEOUT = BACKEND_INSTALL_DEADLINE + 60.0
-CASE_TIMEOUT = STARTUP_DEADLINE + 180.0
+# Must exceed the sum of this case's own declared bounds, not merely its typical
+# duration: the isolation fixture, two local CLI calls, startup, the sentinel
+# fetch, and teardown's terminate/kill/join sequence.
+CASE_TIMEOUT = (
+    20.0 + 2 * COMMAND_DEADLINE + STARTUP_DEADLINE + 20.0 + 50.0 + 120.0
+)
 
 
 def _session(port=None):  # type: (object) -> requests.Session
@@ -79,7 +85,7 @@ def _sentinel_answer(port):  # type: (int) -> dict
     return json.loads(body.decode("utf-8"))
 
 
-def _run(arguments, home, extra_environment=None, timeout=120.0):
+def _run(arguments, home, extra_environment=None, timeout=COMMAND_DEADLINE):
     """Invoke the installed CLI as a user would, with a private home."""
 
     environment = dict(os.environ)
@@ -145,16 +151,20 @@ def test_sentinel_is_unreachable_without_the_proxy():
 
 
 @pytest.mark.timeout(INSTALL_CASE_TIMEOUT)
-def test_the_exact_backend_installs_once_for_the_lane(warm_home):
+def test_the_exact_backend_installs_once_for_the_lane(tmp_path_factory):
     """Own the one-time backend install, and its cost, explicitly.
 
-    Requesting the session-wide warm home from a data-plane case would charge
-    the install to that case's budget and report an install failure as a
-    protocol failure. Naming it here keeps the attribution honest and lets the
-    protocol cases carry a budget that reflects only their own work.
+    Performing the install from a data-plane case would charge it to that case's
+    budget and report an install failure as a protocol failure.
     """
 
-    assert (warm_home / "bin").is_dir(), "the backend was not published into the warm home"
+    root = _install_backend(tmp_path_factory)
+
+    # Assert the immutable version directory, not `bin`, which home
+    # initialization creates whether or not anything was installed.
+    published = root / "backends" / CONTRACT.backend / CONTRACT.backend_version
+    assert published.is_dir(), "the exact backend version was not published"
+    assert any(published.iterdir()), "the published version directory is empty"
 
 
 def test_subscription_source_serves_bounded_base64_uri_lines():
@@ -348,15 +358,25 @@ class _Server(object):
         return False
 
 
-@pytest.fixture(scope="session")
-def warm_home(tmp_path_factory):
+_INSTALLED_HOME = []
+INSTALL_OWNER = "test_the_exact_backend_installs_once_for_the_lane"
+
+
+def _install_backend(tmp_path_factory):  # type: (object) -> object
     """Install the exact backend once for the whole lane.
 
-    Bootstrapping the release per case would download it once per protocol and
-    dominate the run. Installing once and copying keeps every case on its own
-    isolated home while the download happens a single time.
+    Bootstrapping per case would download the release once per protocol and
+    dominate the run, so it happens once and each case copies the result.
+
+    Ownership is explicit rather than incidental: only INSTALL_OWNER performs
+    it, and a case that finds no installed home skips with a reason. Letting
+    whichever case ran first perform it instead would charge that case a
+    several-minute download against a budget sized for its own work, and report
+    the resulting timeout as a protocol failure.
     """
 
+    if _INSTALLED_HOME:
+        return _INSTALLED_HOME[0]
     root = tmp_path_factory.mktemp("backend") / "home"
     result = _run(
         ["backend", "install", CONTRACT.backend, CONTRACT.backend_version],
@@ -364,13 +384,19 @@ def warm_home(tmp_path_factory):
         timeout=BACKEND_INSTALL_DEADLINE,
     )
     assert result.returncode == 0, _redacted(result.stdout.decode("utf-8", "replace"))
+    _INSTALLED_HOME.append(root)
     return root
 
 
 @pytest.fixture
-def home(tmp_path, warm_home):
+def home(tmp_path):
+    if not _INSTALLED_HOME:
+        pytest.skip(
+            "the backend is not installed for this run; include %s in the selection "
+            "or run the whole lane" % INSTALL_OWNER
+        )
     target = tmp_path / "jerryproxy-home"
-    shutil.copytree(str(warm_home), str(target), symlinks=True)
+    shutil.copytree(str(_INSTALLED_HOME[0]), str(target), symlinks=True)
     return target
 
 

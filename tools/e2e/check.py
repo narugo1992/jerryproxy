@@ -145,6 +145,25 @@ def _check_shell_safety(env_file):  # type: (str) -> list
     return failures
 
 
+def _removal_command(text):  # type: (str) -> str
+    """Return the teardown step's `rm` command, joining its continuations."""
+
+    marker = "Tear down the topology"
+    if marker not in text:
+        return ""
+    lines = text.split(marker, 1)[1].splitlines()
+    for index, line in enumerate(lines):
+        if "rm -rf" not in line:
+            continue
+        command = line
+        position = index
+        while command.rstrip().endswith("\\") and position + 1 < len(lines):
+            position += 1
+            command = command.rstrip()[:-1] + lines[position]
+        return command
+    return ""
+
+
 def _check_workflow_uses_the_harness():  # type: () -> list
     """The workflow must actually pass what redaction needs, and clean it up.
 
@@ -168,11 +187,18 @@ def _check_workflow_uses_the_harness():  # type: () -> list
             "the workflow invokes redact.py without --secrets-file, so secrets that "
             "exist only inside an encoded field would be published"
         )
+    # Inspect the removal command itself. Searching the whole file, or even the
+    # whole teardown step, cannot detect a missing cleanup: e2e.env.sh is
+    # sourced by five steps including teardown, so its name is present there
+    # regardless of what is deleted.
+    removal = _removal_command(text)
+    if not removal:
+        failures.append("the workflow teardown has no removal command")
     for companion in ("e2e.env.sh", "e2e.env.secrets"):
         if companion not in text:
             failures.append("the workflow never references %s" % companion)
-        elif text.count(companion) < 2:
-            failures.append("%s is used but never removed in teardown" % companion)
+        elif removal and companion not in removal:
+            failures.append("%s is never deleted by the teardown removal" % companion)
     return failures
 
 
