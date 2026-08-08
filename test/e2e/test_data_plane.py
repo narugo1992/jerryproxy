@@ -94,11 +94,7 @@ def _run(arguments, home, extra_environment=None, timeout=120.0):
     )
 
 
-@pytest.mark.timeout(INSTALL_CASE_TIMEOUT)
-def test_environment_contract_is_reported_without_secrets(warm_home):
-    # Requesting the warm home here charges the one-time backend install to this
-    # cheap case rather than to whichever data-plane case happens to run first.
-    assert warm_home.is_dir()
+def test_environment_contract_is_reported_without_secrets():
     described = CONTRACT.describe()
 
     assert CONTRACT.backend == "mihomo"
@@ -146,6 +142,19 @@ def isolated_sentinel():
 
 def test_sentinel_is_unreachable_without_the_proxy():
     _assert_sentinel_is_isolated()
+
+
+@pytest.mark.timeout(INSTALL_CASE_TIMEOUT)
+def test_the_exact_backend_installs_once_for_the_lane(warm_home):
+    """Own the one-time backend install, and its cost, explicitly.
+
+    Requesting the session-wide warm home from a data-plane case would charge
+    the install to that case's budget and report an install failure as a
+    protocol failure. Naming it here keeps the attribution honest and lets the
+    protocol cases carry a budget that reflects only their own work.
+    """
+
+    assert (warm_home / "bin").is_dir(), "the backend was not published into the warm home"
 
 
 def test_subscription_source_serves_bounded_base64_uri_lines():
