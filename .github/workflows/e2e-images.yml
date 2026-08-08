@@ -8,18 +8,10 @@ name: E2E Images
 # Images are tagged with the commit they were built from, so a test run always
 # names exactly the fixture sources in that tree, and consumed by digest.
 
+# Called by the test workflow only. Adding an event trigger here would run this
+# under two identities at once, and a ref-scoped concurrency group cannot tell
+# them apart — the two runs cancel each other.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "tools/e2e/images/**"
-      - "jerryproxy/data/xray.json"
-      - ".github/workflows/e2e-images.yml"
-  pull_request:
-    paths:
-      - "tools/e2e/images/**"
-      - "jerryproxy/data/xray.json"
-      - ".github/workflows/e2e-images.yml"
   workflow_call:
     outputs:
       xray:
@@ -39,10 +31,6 @@ on:
 permissions:
   contents: read
   packages: write
-
-concurrency:
-  group: e2e-images-${{ github.ref }}
-  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
