@@ -282,7 +282,7 @@ class _Server(object):
                 raise AssertionError(
                     "server exited during startup: %s" % _redacted(self._drain())
                 )
-            if "proxy listener ready at" in self._drain():
+            if self._readiness_seen():
                 return
             time.sleep(0.5)
         raise AssertionError(
@@ -294,9 +294,22 @@ class _Server(object):
             return b"".join(self._lines).decode("utf-8", "replace")
 
     def raw_output(self):  # type: () -> str
-        """Return the child's output unredacted, for leak assertions only."""
+        """Return the child's output with all whitespace removed.
 
-        return self._drain()
+        Human startup output is rendered with Rich, which wraps at the console
+        width and indents continuations. A plain substring search over that text
+        would not find a value the wrapper split across lines, so a leak
+        assertion would silently become unfailable. URIs and the hex nonce
+        contain no whitespace of their own, so removing all of it restores any
+        value the renderer broke apart.
+        """
+
+        return "".join(self._drain().split())
+
+    def _readiness_seen(self):  # type: () -> bool
+        """Match the readiness record across a wrapped line."""
+
+        return "proxy listener ready at" in " ".join(self._drain().split())
 
     def diagnostics(self):  # type: () -> str
         """Return a redacted rendering, safe to place in a failure message."""
@@ -369,12 +382,13 @@ def test_each_protocol_reaches_the_private_sentinel(scheme, home, unused_port, i
         # Assert against the child's raw output. Asserting against the redacted
         # rendering would be circular: that rendering strips the very strings
         # being looked for, so the check could never fail.
+        # Compare whitespace-free forms so a Rich-wrapped value is still found.
         raw = server.raw_output()
-        assert CONTRACT.marker not in raw, "the run nonce reached the child's output"
-        assert CONTRACT.nodes[scheme] not in raw, "the node URI reached the child's output"
+        assert "".join(CONTRACT.marker.split()) not in raw, "the run nonce reached the output"
+        assert "".join(CONTRACT.nodes[scheme].split()) not in raw, "the node URI reached the output"
         # A single-node subscription leaves no alternate, so recovery must never
         # have substituted another node for the protocol under test.
-        assert "trying an alternate node" not in raw, server.diagnostics()
+        assert "tryinganalternatenode" not in raw, server.diagnostics()
 
 
 @pytest.mark.timeout(CASE_TIMEOUT)
