@@ -56,7 +56,13 @@ def build(values):  # type: (dict) -> list
         if not value or name.startswith(PUBLIC_PREFIXES):
             continue
         secrets.add(value)
-        if name.endswith("_NODE"):
+        # A base64 value can appear with its padding stripped, for instance
+        # after a round trip through a URL or a re-encoding layer. Matching only
+        # the padded form would leave the unpadded one in the log.
+        unpadded = value.rstrip("=")
+        if unpadded != value and len(unpadded) >= _MINIMUM_TOKEN:
+            secrets.add(unpadded)
+        if name.upper().endswith("_NODE"):
             secrets.update(
                 part for part in _SEPARATOR.split(value) if len(part) >= _MINIMUM_TOKEN
             )

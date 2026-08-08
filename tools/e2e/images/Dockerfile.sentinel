@@ -1,0 +1,7 @@
+# The private oracle. It publishes no port when declared as a job service, so a
+# runner-hosted test cannot reach it; only the proxy services, which share the
+# job network, can. Its answer carries a nonce supplied at start.
+ARG BASE_IMAGE=python:3.12-alpine
+FROM ${BASE_IMAGE}
+COPY sentinel_entrypoint.py /srv/entrypoint.py
+ENTRYPOINT ["python", "/srv/entrypoint.py"]

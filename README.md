@@ -576,19 +576,20 @@ Every main-branch push and pull request runs the following independent gates:
   verifies the downloaded archives, tests Linux on the seven-distribution
   compatibility matrix documented above, and exercises every packaged CLI
   through `self-check --color` and public read-only commands.
-- a Docker-backed end-to-end lane that proves each protocol actually carries
-  traffic. A sentinel service publishes no port and sits on an internal network
-  the test container never joins, answering only with a nonce generated for that
-  run, so reaching it is possible only through the proxy under test. A negative
-  control first proves the sentinel is unreachable directly, and the proxy
-  fixtures are built from the exact upstream release the packaged catalog pins.
+- a data-plane pass over the unit suite that proves each protocol actually
+  carries traffic. Fixtures run as job services; the sentinel publishes no port,
+  so a runner-hosted job cannot reach it while the proxies can, and it answers
+  only with a nonce generated for that run. A negative control first proves the
+  sentinel is unreachable directly, and the proxy fixtures are built from the
+  exact upstream release the packaged catalog pins.
 
-The end-to-end lane is separate from the unit matrix: `make unittest` stays
-deterministic and network-free, and those tests never count toward unit
-coverage. Run the lane with `pytest test -m e2e`; without the
-`JERRYPROXY_E2E_*` environment contract it skips with one explicit reason
-rather than failing. It never reads a real subscription — the source must be an
-in-network fixture, so an exported provider URL simply skips it.
+Those data-plane cases are part of the unit suite, not a separate lane. They are
+collected by `make unittest` and skip with one explicit reason unless the
+`JERRYPROXY_E2E_*` environment contract is present, so the command stays
+deterministic and network-free anywhere the fixtures do not exist. In CI the
+fixtures are declared as job services, which is what makes the sentinel
+unreachable without a proxy. They never read a real subscription — the source
+must be an in-network fixture, so an exported provider URL simply skips them.
 
 Read [CLAUDE.md](CLAUDE.md) before changing architecture, backend metadata,
 download/extraction code, credential handling, or release workflows.

@@ -1,0 +1,7 @@
+# The TLS endpoint the Reality handshake mirrors. Its certificate is synthetic
+# and regenerated per start; nothing outside the run trusts it.
+ARG BASE_IMAGE=nginx:1.27-alpine
+FROM ${BASE_IMAGE}
+RUN apk add --no-cache openssl
+COPY camouflage_entrypoint.sh /srv/entrypoint.sh
+ENTRYPOINT ["/srv/entrypoint.sh"]

@@ -26,6 +26,12 @@ from jerryproxy.subscription import redact_text
 
 from . import _contract
 
+# These are ordinary unit tests whose precondition is an environment contract.
+# Without it the module skips, which keeps `make unittest` deterministic and
+# network-free on a developer machine and on every platform that has no
+# fixtures; with it, the same command exercises the real data plane.
+pytestmark = pytest.mark.e2e
+
 CONTRACT, SKIP_REASON = _contract.load()
 if CONTRACT is None:
     pytest.skip(SKIP_REASON, allow_module_level=True)

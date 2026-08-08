@@ -41,6 +41,7 @@ SENTINEL_BANNER = "JERRYPROXY-E2E-SENTINEL-v1"
 MAXIMUM_RESPONSE_BYTES = 64 * 1024
 _MARKER = re.compile(r"^[0-9a-f]{32,64}$")
 _SERVICE_HOST = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+_LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 
 class ContractError(Exception):
@@ -70,33 +71,39 @@ def _node_uri(name, scheme):  # type: (str, str) -> str
 
 
 def _subscription_url():  # type: () -> str
-    """Require the in-network fixture source, never a real provider.
+    """Require the local fixture source, never a real provider.
 
-    A developer machine commonly exports a real ``V2RAY_SUBSCRIPTION``, and this
-    lane must never fetch it: real provider subscriptions are excluded from the
-    harness.  Requiring a bare Compose service name makes that structural rather
-    than a matter of care, and a real provider URL simply skips the lane.
+    A developer machine commonly exports a real ``V2RAY_SUBSCRIPTION``, and
+    these tests must never fetch it. The fixture is published to a loopback
+    port, so requiring a loopback target makes that structural rather than a
+    matter of care: a real provider URL simply skips the data-plane cases.
     """
 
     value = _present(SUBSCRIPTION)
     parsed = urlsplit(value)
     if parsed.scheme != "http" or not parsed.hostname:
-        raise ContractError("%s must be the in-network HTTP fixture source" % SUBSCRIPTION)
-    if not _SERVICE_HOST.match(parsed.hostname):
+        raise ContractError("%s must be the local HTTP fixture source" % SUBSCRIPTION)
+    if parsed.hostname not in _LOOPBACK:
         raise ContractError(
-            "%s must target a Compose service name; a real provider subscription is never used"
+            "%s must target a loopback fixture port; a real provider subscription is never used"
             % SUBSCRIPTION
         )
     return value
 
 
 def _sentinel_host():  # type: () -> str
-    """Require a private service-owned target, never a host-published address."""
+    """Require a service-owned target the runner cannot reach directly.
+
+    The sentinel is a job service that publishes no port, so it is addressable
+    only from inside the job network — by service name. A loopback or published
+    address would mean the test could reach it without a proxy, which is exactly
+    what must be impossible.
+    """
 
     value = _present(SENTINEL_HOST).lower()
     if not _SERVICE_HOST.match(value):
-        raise ContractError("%s must be a Compose service name" % SENTINEL_HOST)
-    if value in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"):
+        raise ContractError("%s must be a service name" % SENTINEL_HOST)
+    if value in _LOOPBACK + ("0.0.0.0", "host.docker.internal"):
         raise ContractError("%s must not be a loopback or host-published address" % SENTINEL_HOST)
     return value
 

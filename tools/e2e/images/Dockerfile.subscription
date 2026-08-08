@@ -1,0 +1,5 @@
+# Serves the Base64 URI-line body assembled from the node URIs it is given.
+ARG BASE_IMAGE=python:3.12-alpine
+FROM ${BASE_IMAGE}
+COPY subscription_entrypoint.py /srv/entrypoint.py
+ENTRYPOINT ["python", "/srv/entrypoint.py"]
