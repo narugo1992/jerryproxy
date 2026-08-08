@@ -1,0 +1,24 @@
+# Proxy server fixture, built from the exact official Xray release the packaged
+# catalog already records, so this trusts the same release evidence the product
+# does instead of introducing a second pin.
+ARG BASE_IMAGE=python:3.12-alpine
+FROM ${BASE_IMAGE}
+
+ARG XRAY_VERSION
+ARG XRAY_ASSET
+ARG XRAY_SHA256
+
+RUN set -eu; \
+    apk add --no-cache ca-certificates unzip curl; \
+    curl -fsSL -o /tmp/xray.zip \
+      "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/${XRAY_ASSET}"; \
+    echo "${XRAY_SHA256}  /tmp/xray.zip" | sha256sum -c -; \
+    unzip -j /tmp/xray.zip xray -d /usr/local/bin; \
+    chmod 0755 /usr/local/bin/xray; \
+    rm -f /tmp/xray.zip; \
+    /usr/local/bin/xray version
+
+COPY xray_entrypoint.py /srv/entrypoint.py
+# A protocol inbound is rendered from the environment at start, because service
+# containers exist before any step could mount a generated file.
+ENTRYPOINT ["python", "/srv/entrypoint.py"]

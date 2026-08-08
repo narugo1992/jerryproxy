@@ -166,6 +166,179 @@ jobs:
             junit.xml
             coverage.xml
 
+  provision:
+    name: Data-plane credentials
+    # Service containers read their configuration from `env` at creation time,
+    # before any step can run, so the per-run credentials have to come from an
+    # upstream job's outputs. They are one-run fixture values with no meaning
+    # outside this workflow run.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      marker: ${{ steps.generate.outputs.marker }}
+      ss_password: ${{ steps.generate.outputs.ss_password }}
+      vmess_id: ${{ steps.generate.outputs.vmess_id }}
+      vless_id: ${{ steps.generate.outputs.vless_id }}
+      reality_private_key: ${{ steps.generate.outputs.reality_private_key }}
+      short_id: ${{ steps.generate.outputs.short_id }}
+      ss_node: ${{ steps.generate.outputs.ss_node }}
+      vmess_node: ${{ steps.generate.outputs.vmess_node }}
+      vless_node: ${{ steps.generate.outputs.vless_node }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Fetch the pinned proxy release for key generation
+        run: |
+          set -euo pipefail
+          python -m pip install -q -e .
+          url=$(python tools/e2e/pinned.py --field url)
+          sha=$(python tools/e2e/pinned.py --field sha256)
+          curl -fsSL -o /tmp/xray.zip "$url"
+          echo "$sha  /tmp/xray.zip" | sha256sum -c -
+          unzip -j -o /tmp/xray.zip xray -d /tmp
+          chmod 0755 /tmp/xray
+      - name: Generate one run's credentials
+        id: generate
+        run: python tools/e2e/provision.py --xray /tmp/xray --output "$GITHUB_OUTPUT"
+
+  e2e-images:
+    name: Fixture images
+    # Service containers exist before any step, so the images must already be
+    # in a registry. Building them here would be too late.
+    uses: ./.github/workflows/e2e-images.yml
+    permissions:
+      contents: read
+      packages: write
+
+  unit-data-plane:
+    name: Unit (Linux, data plane)
+    # The same unit suite, run with the environment its data-plane cases need.
+    # Everywhere else those cases skip; here they exercise the real protocols.
+    needs: [provision, e2e-images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      # No `ports`: a runner-hosted job cannot reach a service that publishes
+      # none, while the proxy services share the job network and can. That is
+      # what makes reaching the sentinel proof the traffic went through a proxy.
+      sentinel:
+        image: ${{ needs.e2e-images.outputs.sentinel }}
+        env:
+          JERRYPROXY_E2E_MARKER: ${{ needs.provision.outputs.marker }}
+          JERRYPROXY_E2E_SENTINEL_PORT: "8080"
+      camouflage:
+        image: ${{ needs.e2e-images.outputs.camouflage }}
+        env:
+          E2E_REALITY_SNI: www.example.test
+          E2E_PORT: "8443"
+      subscription:
+        image: ${{ needs.e2e-images.outputs.subscription }}
+        ports:
+          - 18081:8081
+        env:
+          E2E_PORT: "8081"
+          E2E_SS_NODE: ${{ needs.provision.outputs.ss_node }}
+          E2E_VMESS_NODE: ${{ needs.provision.outputs.vmess_node }}
+          E2E_VLESS_NODE: ${{ needs.provision.outputs.vless_node }}
+        options: >-
+          --health-cmd "wget -q -O- http://127.0.0.1:8081/subscription || exit 1"
+          --health-interval 3s --health-retries 20 --health-start-period 3s
+      ss-server:
+        image: ${{ needs.e2e-images.outputs.xray }}
+        ports:
+          - 10001:10001
+        env:
+          E2E_PROTOCOL: ss
+          E2E_PORT: "10001"
+          E2E_SS_PASSWORD: ${{ needs.provision.outputs.ss_password }}
+        options: >-
+          --health-cmd "wget -q -T2 -O- http://127.0.0.1:10001/ 2>&1 | grep -q . || nc -z 127.0.0.1 10001"
+          --health-interval 3s --health-retries 20 --health-start-period 3s
+      vmess-server:
+        image: ${{ needs.e2e-images.outputs.xray }}
+        ports:
+          - 10002:10002
+        env:
+          E2E_PROTOCOL: vmess
+          E2E_PORT: "10002"
+          E2E_VMESS_ID: ${{ needs.provision.outputs.vmess_id }}
+        options: >-
+          --health-cmd "nc -z 127.0.0.1 10002"
+          --health-interval 3s --health-retries 20 --health-start-period 3s
+      vless-server:
+        image: ${{ needs.e2e-images.outputs.xray }}
+        ports:
+          - 10003:10003
+        env:
+          E2E_PROTOCOL: vless
+          E2E_PORT: "10003"
+          E2E_VLESS_ID: ${{ needs.provision.outputs.vless_id }}
+          E2E_REALITY_PRIVATE_KEY: ${{ needs.provision.outputs.reality_private_key }}
+          E2E_REALITY_SHORT_ID: ${{ needs.provision.outputs.short_id }}
+          E2E_REALITY_DEST: camouflage:8443
+          E2E_REALITY_SNI: www.example.test
+        options: >-
+          --health-cmd "nc -z 127.0.0.1 10003"
+          --health-interval 3s --health-retries 20 --health-start-period 3s
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e . -r requirements-test.txt
+      - name: Confirm the sentinel is unreachable from the runner
+        run: |
+          set -uo pipefail
+          # If the runner could reach it, every data-plane assertion below would
+          # pass without proving traffic went through a proxy. Fail the setup
+          # rather than let the suite report a meaningless success.
+          if getent hosts sentinel >/dev/null 2>&1; then
+            echo "::error::the runner resolves the sentinel; the isolation is broken"
+            exit 1
+          fi
+          echo "sentinel is not resolvable from the runner, as required"
+      - name: Run unit tests with the data plane present
+        env:
+          V2RAY_SUBSCRIPTION: http://127.0.0.1:18081/subscription
+          JERRYPROXY_E2E_SENTINEL_HOST: sentinel
+          JERRYPROXY_E2E_SENTINEL_PORT: "8080"
+          JERRYPROXY_E2E_MARKER: ${{ needs.provision.outputs.marker }}
+          JERRYPROXY_E2E_BACKEND: mihomo
+          JERRYPROXY_E2E_BACKEND_VERSION: 1.19.29
+          JERRYPROXY_E2E_SS_NODE: ${{ needs.provision.outputs.ss_node }}
+          JERRYPROXY_E2E_VMESS_NODE: ${{ needs.provision.outputs.vmess_node }}
+          JERRYPROXY_E2E_VLESS_NODE: ${{ needs.provision.outputs.vless_node }}
+          JERRYPROXY_E2E_PUBLIC_PROBES: https://www.gstatic.com/generate_204,https://cloudflare.com/cdn-cgi/trace
+          JERRYPROXY_E2E_ENFORCE: "1"
+        run: >-
+          python -m pytest test -sv -m "unittest and not windows_native"
+          --junitxml=junit.xml -o junit_family=legacy
+          --cov=jerryproxy --cov-report=term-missing --cov-report=xml
+      - name: Upload data-plane coverage to Codecov
+        if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          disable_search: true
+          flags: python
+          name: unit-linux-data-plane
+          fail_ci_if_error: true
+      - name: Capture fixture logs on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          python tools/e2e/redact.py --env-file /dev/null --output /tmp/redact.sed || true
+          for name in sentinel camouflage subscription ss-server vmess-server vless-server; do
+            id=$(docker ps -a --filter "name=$name" --format '{{.ID}}' | head -1)
+            [ -n "$id" ] || continue
+            echo "===== $name ====="
+            docker logs --tail 120 "$id" 2>&1 | head -c 20000
+          done
+
   windows-hardening:
     name: Windows native hardening
     runs-on: windows-2022
@@ -206,7 +379,7 @@ jobs:
   gate:
     name: Code test gate
     if: always()
-    needs: [repository-policy, lint, unit, windows-hardening]
+    needs: [repository-policy, lint, unit, unit-data-plane, windows-hardening]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -214,9 +387,11 @@ jobs:
           POLICY_RESULT: ${{ needs.repository-policy.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          DATA_PLANE_RESULT: ${{ needs.unit-data-plane.result }}
           WINDOWS_HARDENING_RESULT: ${{ needs.windows-hardening.result }}
         run: |
           test "$POLICY_RESULT" = success
           test "$LINT_RESULT" = success
           test "$UNIT_RESULT" = success
+          test "$DATA_PLANE_RESULT" = success
           test "$WINDOWS_HARDENING_RESULT" = success

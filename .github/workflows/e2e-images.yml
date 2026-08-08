@@ -1,0 +1,180 @@
+name: E2E Images
+
+# Publishes the data-plane fixture images to GHCR so the test workflow can
+# declare them as job services. Services are created before any step runs, so
+# the images have to exist in a registry beforehand — building them inside the
+# test job is not an option.
+#
+# Images are tagged with the commit they were built from, so a test run always
+# names exactly the fixture sources in that tree, and consumed by digest.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/e2e/images/**"
+      - "jerryproxy/data/xray.json"
+      - ".github/workflows/e2e-images.yml"
+  pull_request:
+    paths:
+      - "tools/e2e/images/**"
+      - "jerryproxy/data/xray.json"
+      - ".github/workflows/e2e-images.yml"
+  workflow_call:
+    outputs:
+      xray:
+        description: Digest-pinned proxy server image
+        value: ${{ jobs.publish.outputs.xray }}
+      sentinel:
+        description: Digest-pinned private oracle image
+        value: ${{ jobs.publish.outputs.sentinel }}
+      subscription:
+        description: Digest-pinned subscription source image
+        value: ${{ jobs.publish.outputs.subscription }}
+      camouflage:
+        description: Digest-pinned Reality camouflage image
+        value: ${{ jobs.publish.outputs.camouflage }}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: e2e-images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    name: Publish fixture images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      xray: ${{ steps.digests.outputs.xray }}
+      sentinel: ${{ steps.digests.outputs.sentinel }}
+      subscription: ${{ steps.digests.outputs.subscription }}
+      camouflage: ${{ steps.digests.outputs.camouflage }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Resolve the pinned proxy release from the repository catalog
+        id: pinned
+        run: |
+          set -euo pipefail
+          python -m pip install -q -e .
+          for field in version asset sha256; do
+            printf '%s=%s\n' "$field" "$(python tools/e2e/pinned.py --field "$field")" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Every image shares one cache scope per name. `mode=max` keeps
+      # intermediate layers, so a change to one entrypoint rebuilds only that
+      # image's final layer instead of refetching the proxy release.
+      - name: Build and publish the proxy server image
+        id: xray
+        uses: docker/build-push-action@v6
+        with:
+          context: tools/e2e/images
+          file: tools/e2e/images/Dockerfile.xray
+          build-args: |
+            XRAY_VERSION=${{ steps.pinned.outputs.version }}
+            XRAY_ASSET=${{ steps.pinned.outputs.asset }}
+            XRAY_SHA256=${{ steps.pinned.outputs.sha256 }}
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/e2e-xray:${{ github.sha }}
+          push: true
+          cache-from: type=gha,scope=e2e-xray
+          cache-to: type=gha,scope=e2e-xray,mode=max
+          provenance: false
+
+      - name: Build and publish the sentinel image
+        id: sentinel
+        uses: docker/build-push-action@v6
+        with:
+          context: tools/e2e/images
+          file: tools/e2e/images/Dockerfile.sentinel
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/e2e-sentinel:${{ github.sha }}
+          push: true
+          cache-from: type=gha,scope=e2e-sentinel
+          cache-to: type=gha,scope=e2e-sentinel,mode=max
+          provenance: false
+
+      - name: Build and publish the subscription image
+        id: subscription
+        uses: docker/build-push-action@v6
+        with:
+          context: tools/e2e/images
+          file: tools/e2e/images/Dockerfile.subscription
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/e2e-subscription:${{ github.sha }}
+          push: true
+          cache-from: type=gha,scope=e2e-subscription
+          cache-to: type=gha,scope=e2e-subscription,mode=max
+          provenance: false
+
+      - name: Build and publish the camouflage image
+        id: camouflage
+        uses: docker/build-push-action@v6
+        with:
+          context: tools/e2e/images
+          file: tools/e2e/images/Dockerfile.camouflage
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/e2e-camouflage:${{ github.sha }}
+          push: true
+          cache-from: type=gha,scope=e2e-camouflage
+          cache-to: type=gha,scope=e2e-camouflage,mode=max
+          provenance: false
+
+      - name: Report the digests consumers must use
+        id: digests
+        run: |
+          set -euo pipefail
+          # Consume by digest, not by tag: a tag can be moved, a digest cannot,
+          # so a test run is pinned to exactly the fixture it was built against.
+          base="${REGISTRY}/${{ github.repository }}"
+          for name in xray sentinel subscription camouflage; do
+            case "$name" in
+              xray) digest='${{ steps.xray.outputs.digest }}' ;;
+              sentinel) digest='${{ steps.sentinel.outputs.digest }}' ;;
+              subscription) digest='${{ steps.subscription.outputs.digest }}' ;;
+              camouflage) digest='${{ steps.camouflage.outputs.digest }}' ;;
+            esac
+            [ -n "$digest" ] || { echo "::error::$name has no digest"; exit 1; }
+            printf '%s=%s/e2e-%s@%s\n' "$name" "$base" "$name" "$digest" >> "$GITHUB_OUTPUT"
+            printf '%-13s %s\n' "$name" "$digest"
+          done
+
+  prune:
+    name: Bound stored versions
+    needs: publish
+    # Only on main: a pull request's images are needed until the branch is done.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - name: Keep the recent versions and delete the rest
+        uses: actions/delete-package-versions@v5
+        with:
+          # A per-commit tag accumulates one image set per build, so old
+          # versions are pruned rather than allowed to grow without bound.
+          package-names: >-
+            jerryproxy/e2e-xray,
+            jerryproxy/e2e-sentinel,
+            jerryproxy/e2e-subscription,
+            jerryproxy/e2e-camouflage
+          package-type: container
+          min-versions-to-keep: 10
+          delete-only-untagged-versions: false
