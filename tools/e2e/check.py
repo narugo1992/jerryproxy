@@ -27,6 +27,7 @@ from generate import (
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 COMPOSE = os.path.join(HERE, "docker-compose.yml")
+WORKFLOW = os.path.join(HERE, "..", "..", ".github", "workflows", "e2e.yml")
 PRIVATE_ONLY_SERVICES = ("sentinel", "camouflage")
 
 # Synthetic values shaped like the generator's real output.
@@ -144,6 +145,37 @@ def _check_shell_safety(env_file):  # type: (str) -> list
     return failures
 
 
+def _check_workflow_uses_the_harness():  # type: () -> list
+    """The workflow must actually pass what redaction needs, and clean it up.
+
+    Verifying the tool in isolation is not enough: redaction covered every
+    generated value here while the workflow invoked it without the secrets file,
+    so in the real run those values were never removed. A check that only
+    exercises its own call has nothing to say about the call that matters.
+    """
+
+    try:
+        with open(WORKFLOW, "r", encoding="utf-8") as stream:
+            text = stream.read()
+    except OSError:
+        # A missing workflow means the lane cannot run at all.
+        return ["the end-to-end workflow is missing"]
+    failures = []
+    if "redact.py" not in text:
+        failures.append("the workflow never builds a redaction script")
+    elif "--secrets-file" not in text:
+        failures.append(
+            "the workflow invokes redact.py without --secrets-file, so secrets that "
+            "exist only inside an encoded field would be published"
+        )
+    for companion in ("e2e.env.sh", "e2e.env.secrets"):
+        if companion not in text:
+            failures.append("the workflow never references %s" % companion)
+        elif text.count(companion) < 2:
+            failures.append("%s is used but never removed in teardown" % companion)
+    return failures
+
+
 def _check_secret_classification():  # type: () -> list
     """Nothing supplied as a secret may be dropped from the classified set."""
 
@@ -207,6 +239,7 @@ def main():  # type: () -> int
     _write_env(env_file)
     checks = (
         ("every supplied secret stays classified", _check_secret_classification()),
+        ("workflow passes what redaction needs", _check_workflow_uses_the_harness()),
         ("redaction covers every generated value", _check_redaction(env_file)),
         ("generated environment survives shell sourcing", _check_shell_safety(env_file)),
         ("docker environment file stays literal", _check_docker_env_is_literal(env_file)),
