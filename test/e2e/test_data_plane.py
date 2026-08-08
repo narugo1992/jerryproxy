@@ -35,10 +35,12 @@ REQUEST_TIMEOUT = (5.0, 15.0)
 # home, so this lane needs far more than the unit matrix's per-test budget.
 STARTUP_DEADLINE = 180.0
 BACKEND_INSTALL_DEADLINE = 420.0
-# pytest-timeout counts setup, so the first case also pays for the session-wide
-# backend install. The budget must exceed both or a legal slow download would be
-# reported as a three-protocol data-plane failure.
-CASE_TIMEOUT = BACKEND_INSTALL_DEADLINE + STARTUP_DEADLINE + 60.0
+# pytest-timeout counts setup, so whichever item first requests the session-wide
+# backend install pays for it. A cheap early case takes that allowance, keeping
+# every data-plane case at a budget that reflects only its own work; charging
+# the install to all of them would exceed the workflow's job timeout in total.
+INSTALL_CASE_TIMEOUT = BACKEND_INSTALL_DEADLINE + 60.0
+CASE_TIMEOUT = STARTUP_DEADLINE + 180.0
 
 
 def _session(port=None):  # type: (object) -> requests.Session
@@ -92,7 +94,11 @@ def _run(arguments, home, extra_environment=None, timeout=120.0):
     )
 
 
-def test_environment_contract_is_reported_without_secrets():
+@pytest.mark.timeout(INSTALL_CASE_TIMEOUT)
+def test_environment_contract_is_reported_without_secrets(warm_home):
+    # Requesting the warm home here charges the one-time backend install to this
+    # cheap case rather than to whichever data-plane case happens to run first.
+    assert warm_home.is_dir()
     described = CONTRACT.describe()
 
     assert CONTRACT.backend == "mihomo"
@@ -114,11 +120,13 @@ def _assert_sentinel_is_isolated():
             (CONTRACT.sentinel_host, CONTRACT.sentinel_port), timeout=5.0
         )
     except OSError as error:
-        # Distinguish isolation from an unrelated local failure: a resolvable
-        # name that refuses the connection would mean the sentinel joined the
-        # client network, which is the failure this control exists to catch.
+        # The failure this control catches is a *successful* connect, handled in
+        # the else branch. This only rejects an OS error that does not look like
+        # isolation at all, so a misconfigured host is not silently read as
+        # proof. On the intended topology the error is gaierror, because Docker
+        # does not resolve the sentinel from a client-net-only container.
         assert isinstance(error, (socket.gaierror, socket.timeout, ConnectionError, TimeoutError)), (
-            "sentinel is isolated for an unexpected reason: %s" % type(error).__name__
+            "sentinel is unreachable for an unexpected reason: %s" % type(error).__name__
         )
     else:
         connection.close()

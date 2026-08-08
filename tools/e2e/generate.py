@@ -63,6 +63,54 @@ def shell_environment_path(path):  # type: (str) -> str
     return "%s.sh" % os.path.abspath(path)
 
 
+def redaction_values(**generated):  # type: (**str) -> dict
+    """Return every generated secret that log redaction must cover.
+
+    This is the single decision about which values are secret. The harness
+    self-check calls it so that omitting one here fails the check, rather than
+    the check listing its own expectations and silently agreeing with itself.
+    """
+
+    required = (
+        "ss_password",
+        "vmess_id",
+        "vless_id",
+        "reality_private_key",
+        "reality_public_key",
+        "short_id",
+        "marker",
+    )
+    missing = [name for name in required if not generated.get(name)]
+    if missing:
+        raise SystemExit("redaction values are incomplete: %s" % ", ".join(missing))
+    return {name: generated[name] for name in required}
+
+
+def redaction_values_path(path):  # type: (str) -> str
+    """Return the companion file listing raw secrets for log redaction."""
+
+    return "%s.secrets" % os.path.abspath(path)
+
+
+def write_redaction_values(path, values):  # type: (str, dict) -> None
+    """Record every generated secret so log redaction can cover all of them.
+
+    Deriving redaction from the environment file alone misses whatever is only
+    embedded inside an encoded field: the SS password and the VMess UUID live
+    inside base64 payloads, and the Reality private key is never exported at
+    all because no client needs it. A server that rejects its configuration can
+    still echo those values into a captured log, so they are listed here.
+
+    This file is never injected into the test container. It exists only so the
+    workflow's log capture can remove these values.
+    """
+
+    _private_write(
+        redaction_values_path(path),
+        "".join("%s=%s\n" % (item, values[item]) for item in sorted(values)).encode("utf-8"),
+    )
+
+
 def _private_write(path, payload):  # type: (str, bytes) -> None
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -253,6 +301,19 @@ def main():  # type: () -> int
         "JERRYPROXY_E2E_VLESS_NODE": vless_uri,
     }
     write_environment(arguments.env_file, exports)
+    # Raw secrets for log redaction only; several never appear in any export.
+    write_redaction_values(
+        arguments.env_file,
+        redaction_values(
+            ss_password=ss_password,
+            vmess_id=vmess_id,
+            vless_id=vless_id,
+            reality_private_key=private_key,
+            reality_public_key=public_key,
+            short_id=short_id,
+            marker=marker,
+        ),
+    )
     # Names only: the workflow log must not carry generated credentials.
     sys.stdout.write("generated %d configs and %d exports\n" % (len(configs), len(exports)))
     return 0
