@@ -508,6 +508,7 @@ make relay_health_wiki
 make relay_health_gate
 make check
 python3.7 -m pytest test -m unittest
+pytest test -m e2e
 ```
 
 Unit tests must be deterministic and network-free. Test behavior through public
@@ -521,6 +522,35 @@ assert the resulting public behavior. Model GitHub responses locally because
 unit tests must not depend on external network availability. Real backend
 integration tests belong in an explicit credential-free integration lane and
 must pin versions and asset digests.
+
+Those tests live under `test/e2e` and are ordinary unit tests whose precondition
+is the `JERRYPROXY_E2E_*` environment contract: `make unittest` collects them and
+they skip with one explicit reason when that contract is absent, so the command
+stays deterministic and network-free wherever the fixtures do not exist. The
+`e2e` marker remains only for selecting them individually. Their correctness
+oracle is network isolation, and it is supplied by the platform rather than
+built: the fixtures are declared as GitHub Actions job services, so a service
+that publishes no port cannot be reached from a runner-hosted job at all, while
+the proxy services can still reach it inside the job network. The sentinel
+therefore publishes no port and answers with a per-run nonce injected at
+startup, so obtaining that nonce proves traffic traversed the proxy under test.
+A constant marker is not acceptable, because a test could assert it without
+connecting to anything, and a negative control must prove the sentinel is
+unreachable directly before any positive assertion counts.
+
+The workflow must not run Docker commands to build that topology; declaring
+services is the supported mechanism and the isolation is a property of it.
+Fixture images are published to GHCR, tagged with the commit they were built
+from, and consumed by digest. Because services start before any step, all
+fixture configuration is injected through environment variables and rendered by
+an image entrypoint; configuration logic must live in the image rather than in
+workflow YAML, where it is neither linted nor covered by `make e2e_check`.
+Tests read only environment variables and service addresses; they must not
+import a Docker library, run the Docker CLI, read Compose files, or inspect
+container metadata, and they must not trust ambient proxy configuration. The
+tests must never weaken a product guard to make a fixture succeed: where an
+in-network source cannot satisfy the HTTPS and public-address requirements, the
+test asserts the refusal instead.
 
 The product unit-test boundary is the `jerryproxy` package. Do not create a
 `test/tools` package, import repository maintenance modules from tests, or

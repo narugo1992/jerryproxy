@@ -1,4 +1,4 @@
-.PHONY: help install_dev package build build_linux clean test unittest lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check archive_corpus archive_corpus_check relay_health_sync relay_health_check relay_health_wiki relay_health_gate check
+.PHONY: help install_dev package build build_linux clean test unittest e2e_check lint format docs pdocs rst_auto test_cli python37 catalog_update catalog_check archive_corpus archive_corpus_check relay_health_sync relay_health_check relay_health_wiki relay_health_gate check
 
 PYTHON ?= $(shell which python)
 PYTHON37 ?= python3.7
@@ -26,6 +26,7 @@ RELAY_HEALTH_VANTAGE ?= local
 
 RANGE_DIR      ?= .
 RANGE_TEST_DIR := ${TEST_DIR}/${RANGE_DIR}
+E2E_TEST_DIR   := ${TEST_DIR}/e2e
 RANGE_SRC_DIR  := ${SRC_DIR}/${RANGE_DIR}
 
 COV_TYPES ?= xml term-missing
@@ -54,6 +55,7 @@ help:
 	@echo "Testing and quality:"
 	@echo "  make test         - Alias for make unittest"
 	@echo "  make unittest     - Run pytest with coverage"
+	@echo "  make e2e_check     - Verify the harness assets offline"
 	@echo "                      RANGE_DIR=<path>"
 	@echo "  make python37     - Run unit tests through python3.7"
 	@echo "  make lint         - Run ruff checks"
@@ -124,6 +126,10 @@ unittest:
 
 python37:
 	$(PYTHON37) -m pytest ${TEST_DIR} -sv -m unittest
+
+# Offline invariants of the harness assets: no Docker, no network.
+e2e_check:
+	cd ${TOOLS_DIR}/e2e && $(PYTHON) check.py
 
 lint:
 	ruff check ${SRC_DIR} ${TEST_DIR} ${TOOLS_DIR} jerryproxy_cli.py setup.py auto_rst.py auto_rst_top_index.py
