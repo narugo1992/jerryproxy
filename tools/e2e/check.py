@@ -17,7 +17,13 @@ import subprocess
 import sys
 import tempfile
 
-from generate import shell_environment_path, write_environment
+from generate import (
+    redaction_values,
+    redaction_values_path,
+    shell_environment_path,
+    write_environment,
+    write_redaction_values,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 COMPOSE = os.path.join(HERE, "docker-compose.yml")
@@ -46,12 +52,31 @@ SAMPLE = {
 SECRET_NAMES = ("JERRYPROXY_E2E_MARKER",) + tuple(
     name for name in SAMPLE if name.endswith("_NODE")
 )
+# Secrets that exist only inside an encoded field, or that no client ever
+# receives. A server echoing its rejected configuration can still print them,
+# so redaction must cover them even though no export contains them.
+# Synthetic stand-ins for the values the generator produces. Passing them
+# through the generator's own classifier means dropping one there is caught,
+# while comparing the result back against this mapping means narrowing the
+# classifier is caught too — a shared definition alone cannot detect that,
+# because the check would narrow with it.
+SUPPLIED_SECRETS = {
+    "ss_password": "c3ludGhldGljc2FtcGxlcGFzc3dvcmQ=",
+    "vmess_id": "12345678-abcd-efab-1234-567890abcdef",
+    "vless_id": "abcdef12-3456-7890-abcd-ef1234567890",
+    "reality_private_key": "SYNTHETICREALITYPRIVATEKEYSAMPLEVALUE",
+    "reality_public_key": "SYNTHETICREALITYPUBLICKEYSAMPLEVALUE",
+    "short_id": "0f1e2d3c4b5a6978",
+    "marker": "a1b2c3d4" * 6,
+}
+ENCODED_ONLY_SECRETS = redaction_values(**SUPPLIED_SECRETS)
 
 
 def _write_env(path):  # type: (str) -> None
-    # Use the generator's own writer: a second copy of the quoting rule here
-    # would keep passing after the real writer regressed.
+    # Use the generator's own writers: a second copy of these rules here would
+    # keep passing after the real writer regressed.
     write_environment(path, SAMPLE)
+    write_redaction_values(path, ENCODED_ONLY_SECRETS)
 
 
 def _check_redaction(env_file):  # type: (str) -> list
@@ -59,11 +84,20 @@ def _check_redaction(env_file):  # type: (str) -> list
 
     script = os.path.join(os.path.dirname(env_file), "redact.sed")
     subprocess.run(
-        [sys.executable, os.path.join(HERE, "redact.py"), "--env-file", env_file, "--output", script],
+        [
+            sys.executable,
+            os.path.join(HERE, "redact.py"),
+            "--env-file",
+            env_file,
+            "--secrets-file",
+            redaction_values_path(env_file),
+            "--output",
+            script,
+        ],
         check=True,
         stdout=subprocess.DEVNULL,
     )
-    secrets = []
+    secrets = list(ENCODED_ONLY_SECRETS.values())
     for name in SECRET_NAMES:
         value = SAMPLE[name]
         secrets.append(value)
@@ -73,10 +107,14 @@ def _check_redaction(env_file):  # type: (str) -> list
         ["sed", "-f", script], input=sample_log.encode("utf-8"), stdout=subprocess.PIPE, check=True
     ).stdout.decode("utf-8")
     failures = []
+    lookup = {value: name for name, value in ENCODED_ONLY_SECRETS.items()}
+    lookup.update((SAMPLE[name], name) for name in SECRET_NAMES)
     for secret in secrets:
         if secret in rendered:
-            failures.append("redaction left a generated value in the log: %s" % SECRET_NAMES[0])
-            break
+            # Name the value that survived, never the value itself.
+            failures.append(
+                "redaction left a generated value in the log: %s" % lookup.get(secret, "a node token")
+            )
     if "sentinel:8080" not in rendered or "mihomo" not in rendered:
         failures.append("redaction removed the service information a failure log needs")
     return failures
@@ -104,6 +142,17 @@ def _check_shell_safety(env_file):  # type: (str) -> list
         if "%s=%s" % (name, value) not in output:
             failures.append("sourcing did not preserve %s" % name)
     return failures
+
+
+def _check_secret_classification():  # type: () -> list
+    """Nothing supplied as a secret may be dropped from the classified set."""
+
+    dropped = sorted(set(SUPPLIED_SECRETS) - set(ENCODED_ONLY_SECRETS))
+    return [
+        "the generator no longer classifies %s as a secret, so log redaction "
+        "would never cover it" % name
+        for name in dropped
+    ]
 
 
 def _check_docker_env_is_literal(env_file):  # type: (str) -> list
@@ -157,6 +206,7 @@ def main():  # type: () -> int
     env_file = os.path.join(directory, "e2e.env")
     _write_env(env_file)
     checks = (
+        ("every supplied secret stays classified", _check_secret_classification()),
         ("redaction covers every generated value", _check_redaction(env_file)),
         ("generated environment survives shell sourcing", _check_shell_safety(env_file)),
         ("docker environment file stays literal", _check_docker_env_is_literal(env_file)),

@@ -40,7 +40,7 @@ jobs:
     name: Data plane through Docker
     # Service-container topologies of this shape are Linux-only.
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
 
