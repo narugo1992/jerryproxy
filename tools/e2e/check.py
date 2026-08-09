@@ -13,6 +13,7 @@ Run through ``make e2e_check``. Nothing here contacts a network or starts Docker
 """
 
 import argparse
+import inspect
 import os
 import re
 import subprocess
@@ -20,6 +21,9 @@ import sys
 import tempfile
 
 import provision
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+from test.e2e import _contract as contract  # noqa: E402 - path is set immediately above
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "images"))
 import xray_entrypoint  # noqa: E402 - path is set immediately above
@@ -83,6 +87,13 @@ def _check_private_services_publish_nothing():  # type: () -> list
         elif re.search(r"^\s*ports:", block, re.MULTILINE):
             failures.append(
                 "service %s publishes a port, so the runner could reach it without a proxy"
+                % service
+            )
+        elif re.search(r"(?:--publish|(?<![\w-])-p)[= ]", block):
+            # `options` is passed to `docker create`, so it can publish a port
+            # without a `ports:` key ever appearing.
+            failures.append(
+                "service %s publishes a port through options, so the runner could reach it"
                 % service
             )
     return failures
@@ -166,13 +177,41 @@ def _check_workflow_matches_the_provisioner():  # type: () -> list
     return failures
 
 
+def _check_enforcement_is_declared():  # type: () -> list
+    """The data-plane step must demand the contract, not merely offer it.
+
+    Dropping any other required variable fails closed, because enforcement
+    turns a missing contract into an error. Dropping enforcement itself turns
+    the whole module into a skip, and the job then reports success with no
+    data-plane coverage at all — indistinguishable from a real pass.
+    """
+
+    text = _workflow()
+    step = re.search(
+        r"Run unit tests with the data plane present\n((?:.*\n)*?)\s+- name:", text
+    )
+    if step is None:
+        return ["the workflow has no data-plane test step"]
+    block = step.group(1)
+    failures = []
+    if not re.search(r'JERRYPROXY_E2E_ENFORCE:\s*"1"', block):
+        failures.append(
+            "the data-plane step does not set JERRYPROXY_E2E_ENFORCE=1, so a missing "
+            "contract would skip silently and still report success"
+        )
+    for name in contract.REQUIRED:
+        if "%s:" % name not in block:
+            failures.append("the data-plane step does not supply %s" % name)
+    return failures
+
+
 def _check_images_get_what_they_require():  # type: () -> list
     """Each proxy service must supply the variables its entrypoint demands.
 
-    The requirement set comes from the entrypoint itself rather than from the
-    variable names, because those names overlap: "SS" is a substring of
-    "VMESS", so any name-based inference attributes one protocol's credential
-    to another.
+    The requirement set is read out of each builder's source, not from a table
+    kept beside it: a table drifts the moment someone adds a `_required` call
+    without updating it. Inferring from variable names is also wrong, because
+    "SS" is a substring of "VMESS".
     """
 
     text = _workflow()
@@ -187,10 +226,11 @@ def _check_images_get_what_they_require():  # type: () -> list
         if protocol is None:
             failures.append("service %s does not declare E2E_PROTOCOL" % service)
             continue
-        needed = xray_entrypoint.REQUIRED_BY_PROTOCOL.get(protocol.group(1))
-        if needed is None:
+        builder = xray_entrypoint.BUILDERS.get(protocol.group(1))
+        if builder is None:
             failures.append("service %s declares an unknown protocol" % service)
             continue
+        needed = re.findall(r'_required\("([A-Z0-9_]+)"\)', inspect.getsource(builder))
         failures.extend(
             "service %s does not supply %s, which its entrypoint requires" % (service, name)
             for name in sorted(set(needed) | {"E2E_PROTOCOL"} - supplied)
@@ -207,6 +247,7 @@ def main():  # type: () -> int
         ("every provisioned value stays emitted", _check_every_value_stays_emitted()),
         ("redaction covers every provisioned value", _check_redaction()),
         ("workflow references only real outputs", _check_workflow_matches_the_provisioner()),
+        ("the data-plane step demands the contract", _check_enforcement_is_declared()),
         ("services supply what their images require", _check_images_get_what_they_require()),
     )
     failed = False

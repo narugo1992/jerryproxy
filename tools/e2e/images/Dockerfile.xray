@@ -1,6 +1,11 @@
 # Proxy server fixture, built from the exact official Xray release the packaged
 # catalog already records, so this trusts the same release evidence the product
 # does instead of introducing a second pin.
+#
+# This image is deliberately built without a layer cache. A cache hit would
+# import the result of the verification below without executing it, so the
+# digest check would bind nothing; re-verifying at start does not help either,
+# because the reference value would live in the same poisoned layer.
 ARG BASE_IMAGE=python:3.12-alpine
 FROM ${BASE_IMAGE}
 

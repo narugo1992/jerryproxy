@@ -10,6 +10,12 @@ permissions:
 jobs:
   tests:
     uses: ./.github/workflows/test.yml
+    # The test workflow publishes data-plane fixture images, and a called
+    # workflow can only narrow the caller's token. Without this the push is
+    # denied and the release gate can never pass.
+    permissions:
+      contents: read
+      packages: write
     secrets: inherit
 
   standalone:

@@ -1,9 +1,9 @@
 """The environment contract this lane receives, and nothing else.
 
-The workflow owns Docker: it builds images, generates credentials, starts the
-two-network topology, and injects the values below.  This module reads only
-environment variables and never imports a Docker library, runs the Docker CLI,
-reads Compose files, or inspects container metadata.
+The workflow owns the fixtures: it publishes the images, generates the
+credentials, declares the services, and injects the values below. This module
+reads only environment variables and never imports a Docker library, runs the
+Docker CLI, or inspects container metadata.
 
 Every value here is bearer-like test input, so failures report variable names
 and sanitized classifications rather than values.

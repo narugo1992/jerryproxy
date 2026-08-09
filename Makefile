@@ -205,4 +205,4 @@ relay_health_wiki:
 relay_health_gate:
 	$(PYTHON) -m tools.relay_health --gate-results "${RELAY_HEALTH_RESULTS}"
 
-check: lint catalog_check archive_corpus_check unittest pdocs package test_cli
+check: lint catalog_check archive_corpus_check e2e_check unittest pdocs package test_cli

@@ -1,11 +1,12 @@
 """The private oracle for the end-to-end lane.
 
-This service has no published port and joins only ``private-net``, so the test
-runner cannot reach it directly.  Its answer carries a per-run nonce supplied
-through ``JERRYPROXY_E2E_MARKER`` at startup, which means a test can only learn
-that answer by actually carrying traffic through a proxy that does sit on both
-networks.  A constant baked into the image would prove nothing, because a test
-could assert it without connecting to anything.
+Declared as a job service with no published port, this is unreachable from a
+runner-hosted test while the proxy services on the job network can still reach
+it. Its answer carries a per-run nonce supplied through
+``JERRYPROXY_E2E_MARKER`` at startup, so a test can only learn that answer by
+actually carrying traffic through a proxy. A constant baked into the image
+would prove nothing, because a test could assert it without connecting to
+anything.
 
 The nonce is never written to a node URI, a backend configuration, or this
 service's own log.

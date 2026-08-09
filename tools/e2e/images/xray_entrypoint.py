@@ -16,6 +16,9 @@ import sys
 SENTINEL_FLOW = "xtls-rprx-vision"
 
 
+XRAY_PATH = "/usr/local/bin/xray"
+
+
 def _required(name):  # type: (str) -> str
     value = os.environ.get(name, "")
     if not value:
@@ -76,14 +79,6 @@ def _vless():  # type: () -> dict
 
 BUILDERS = {"ss": _shadowsocks, "vmess": _vmess, "vless": _vless}
 
-# What each protocol needs supplied. Declared rather than inferred from variable
-# names: "SS" is a substring of "VMESS", so any name-based guess misattributes.
-REQUIRED_BY_PROTOCOL = {
-    "ss": ("E2E_SS_PASSWORD",),
-    "vmess": ("E2E_VMESS_ID",),
-    "vless": ("E2E_VLESS_ID", "E2E_REALITY_PRIVATE_KEY", "E2E_REALITY_SHORT_ID"),
-}
-
 
 def main():  # type: () -> int
     protocol = _required("E2E_PROTOCOL")
@@ -101,7 +96,7 @@ def main():  # type: () -> int
         json.dump(config, stream, indent=2, sort_keys=True)
     sys.stderr.write("rendered %s inbound on port %d\n" % (protocol, config["inbounds"][0]["port"]))
     # exec so the proxy is PID 1's successor and receives signals directly.
-    os.execv("/usr/local/bin/xray", ["xray", "run", "-c", path])
+    os.execv(XRAY_PATH, ["xray", "run", "-c", path])
     return 0  # unreachable
 
 
