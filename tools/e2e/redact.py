@@ -4,10 +4,11 @@ The fixture servers emit access records, so a captured log can carry a password,
 UUID, key, or short ID. Redaction that covers only the sentinel nonce would be
 one value wide while the log surface is much wider.
 
-The set is derived from two inputs, because the environment file alone is not
-sufficient: the SS password and the VMess UUID appear there only inside base64
-payloads, and the Reality private key is never exported at all. The generator
-therefore also writes a private list of raw secrets, and both are unioned here.
+The caller supplies every generated value, including the ones that reach no
+service variable of their own — the Reality private key is passed only to the
+vless fixture, and the SS password and VMess UUID otherwise exist only inside
+base64 payloads. Deriving the set from what was generated, rather than from
+what happens to be exported, is what makes the coverage complete.
 
 Non-secret entries — service addresses, ports, backend identity — are kept so a
 failure log stays readable.
@@ -75,17 +76,9 @@ def build(values):  # type: (dict) -> list
 def main():  # type: () -> int
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", required=True)
-    parser.add_argument("--secrets-file", help="raw generated secrets not present in any export")
     parser.add_argument("--output", required=True)
     arguments = parser.parse_args()
-    values = _parse(arguments.env_file)
-    if arguments.secrets_file:
-        # Prefixed so the public-name filter cannot skip one of them.
-        values.update(
-            ("secret_%s" % name, value)
-            for name, value in _parse(arguments.secrets_file).items()
-        )
-    expressions = build(values)
+    expressions = build(_parse(arguments.env_file))
     with open(arguments.output, "w", encoding="utf-8") as stream:
         stream.write("".join("%s\n" % item for item in expressions))
     # Count only: printing an expression would print the secret it removes.

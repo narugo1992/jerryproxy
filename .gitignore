@@ -130,9 +130,9 @@ docs/build/
 # fixtures means downloading these locally, and one of them was committed once
 # because `git add -A` collected a download that landed in the wrong directory.
 # The repository must never carry a backend binary.
-*.zip
-*.tar.gz
-*.tgz
+/*.zip
+/*.tar.gz
+/*.tgz
 /xray
 /mihomo
 /sing-box

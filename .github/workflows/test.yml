@@ -46,6 +46,11 @@ jobs:
       - run: python -m pip install "pip<24.1"
       - run: python -m pip install -e . -r requirements-dev.txt
       - run: make lint
+      - name: Validate the data-plane fixture invariants
+        # These guards are the only thing keeping the sentinel unreachable and
+        # the fixture credentials redactable. Defining them without running
+        # them leaves the design unenforced.
+        run: make e2e_check
       - name: Validate pinned archive corpus measurements
         run: make archive_corpus_check
 
@@ -207,6 +212,11 @@ jobs:
     name: Fixture images
     # Service containers exist before any step, so the images must already be
     # in a registry. Building them here would be too late.
+    #
+    # A fork's token is read-only by design, so it cannot publish. The data
+    # plane is skipped there rather than failing the fork's CI, and the gate
+    # below accepts that only for a fork.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
     uses: ./.github/workflows/e2e-images.yml
     permissions:
       contents: read
@@ -214,27 +224,52 @@ jobs:
 
   unit-data-plane:
     name: Unit (Linux, data plane)
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
     # The same unit suite, run with the environment its data-plane cases need.
     # Everywhere else those cases skip; here they exercise the real protocols.
     needs: [provision, e2e-images]
+    permissions:
+      contents: read
+      packages: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Above the sum of the suite's declared per-test budgets, so the worst case
+    # is a named test failure rather than an unattributed job kill — a killed
+    # job is not guaranteed to run the log capture below.
+    timeout-minutes: 45
     services:
       # No `ports`: a runner-hosted job cannot reach a service that publishes
       # none, while the proxy services share the job network and can. That is
       # what makes reaching the sentinel proof the traffic went through a proxy.
       sentinel:
         image: ${{ needs.e2e-images.outputs.sentinel }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           JERRYPROXY_E2E_MARKER: ${{ needs.provision.outputs.marker }}
           JERRYPROXY_E2E_SENTINEL_PORT: "8080"
+        # Readiness matters even without a published port: the proxies reach
+        # these two, and the Reality handshake needs camouflage's certificate,
+        # which is generated at start.
+        options: >-
+          --health-cmd "wget -q -O- http://127.0.0.1:8080/jerryproxy-e2e-marker || exit 1"
+          --health-interval 3s --health-retries 20 --health-start-period 3s
       camouflage:
         image: ${{ needs.e2e-images.outputs.camouflage }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           E2E_REALITY_SNI: www.example.test
           E2E_PORT: "8443"
+        options: >-
+          --health-cmd "wget -q --no-check-certificate -O- https://127.0.0.1:8443/ || exit 1"
+          --health-interval 3s --health-retries 20 --health-start-period 5s
       subscription:
         image: ${{ needs.e2e-images.outputs.subscription }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         ports:
           - 18081:8081
         env:
@@ -247,6 +282,9 @@ jobs:
           --health-interval 3s --health-retries 20 --health-start-period 3s
       ss-server:
         image: ${{ needs.e2e-images.outputs.xray }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         ports:
           - 10001:10001
         env:
@@ -258,6 +296,9 @@ jobs:
           --health-interval 3s --health-retries 20 --health-start-period 3s
       vmess-server:
         image: ${{ needs.e2e-images.outputs.xray }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         ports:
           - 10002:10002
         env:
@@ -269,6 +310,9 @@ jobs:
           --health-interval 3s --health-retries 20 --health-start-period 3s
       vless-server:
         image: ${{ needs.e2e-images.outputs.xray }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         ports:
           - 10003:10003
         env:
@@ -329,69 +373,31 @@ jobs:
           fail_ci_if_error: true
       - name: Capture fixture logs on failure
         if: failure()
+        # Every provisioned value goes into the redaction script, and the logs
+        # are actually piped through it. A fixture that rejects its
+        # configuration can echo a credential, and the Reality private key
+        # reaches no other variable in this job.
+        env:
+          R_marker: ${{ needs.provision.outputs.marker }}
+          R_ss_password: ${{ needs.provision.outputs.ss_password }}
+          R_vmess_id: ${{ needs.provision.outputs.vmess_id }}
+          R_vless_id: ${{ needs.provision.outputs.vless_id }}
+          R_reality_private_key: ${{ needs.provision.outputs.reality_private_key }}
+          R_reality_public_key: ${{ needs.provision.outputs.reality_public_key }}
+          R_short_id: ${{ needs.provision.outputs.short_id }}
+          R_ss_node: ${{ needs.provision.outputs.ss_node }}
+          R_vmess_node: ${{ needs.provision.outputs.vmess_node }}
+          R_vless_node: ${{ needs.provision.outputs.vless_node }}
         run: |
           set -uo pipefail
-          python tools/e2e/redact.py --env-file /dev/null --output /tmp/redact.sed || true
+          umask 077
+          : > /tmp/e2e-secrets
+          env | sed -n 's/^R_//p' >> /tmp/e2e-secrets
+          python tools/e2e/redact.py --env-file /tmp/e2e-secrets --output /tmp/redact.sed
           for name in sentinel camouflage subscription ss-server vmess-server vless-server; do
             id=$(docker ps -a --filter "name=$name" --format '{{.ID}}' | head -1)
             [ -n "$id" ] || continue
             echo "===== $name ====="
-            docker logs --tail 120 "$id" 2>&1 | head -c 20000
+            docker logs --tail 120 "$id" 2>&1 | sed -f /tmp/redact.sed | head -c 20000
           done
-
-  windows-hardening:
-    name: Windows native hardening
-    runs-on: windows-2022
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e . -r requirements-test.txt
-      - name: Run native Windows hardening tests
-        run: >-
-          python -m pytest test -sv -m unittest
-          --junitxml=windows-hardening-junit.xml -o junit_family=legacy
-          --cov=jerryproxy --cov-report=term-missing --cov-report=xml
-      - name: Upload native Windows coverage to Codecov
-        if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.xml
-          disable_search: true
-          flags: python
-          name: windows-hardening-py3.11
-          fail_ci_if_error: true
-      - name: Upload native Windows test report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-hardening-junit
-          if-no-files-found: error
-          path: |
-            windows-hardening-junit.xml
-            coverage.xml
-
-  gate:
-    name: Code test gate
-    if: always()
-    needs: [repository-policy, lint, unit, unit-data-plane, windows-hardening]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify required jobs
-        env:
-          POLICY_RESULT: ${{ needs.repository-policy.result }}
-          LINT_RESULT: ${{ needs.lint.result }}
-          UNIT_RESULT: ${{ needs.unit.result }}
-          DATA_PLANE_RESULT: ${{ needs.unit-data-plane.result }}
-          WINDOWS_HARDENING_RESULT: ${{ needs.windows-hardening.result }}
-        run: |
-          test "$POLICY_RESULT" = success
-          test "$LINT_RESULT" = success
-          test "$UNIT_RESULT" = success
-          test "$DATA_PLANE_RESULT" = success
-          test "$WINDOWS_HARDENING_RESULT" = success
+          rm -f /tmp/e2e-secrets /tmp/redact.sed

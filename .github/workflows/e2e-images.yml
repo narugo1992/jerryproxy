@@ -8,9 +8,10 @@ name: E2E Images
 # Images are tagged with the commit they were built from, so a test run always
 # names exactly the fixture sources in that tree, and consumed by digest.
 
-# Called by the test workflow only. Adding an event trigger here would run this
-# under two identities at once, and a ref-scoped concurrency group cannot tell
-# them apart — the two runs cancel each other.
+# Called by the test workflow. It also accepts a manual dispatch for rebuilding
+# images out of band; what it must not have is an automatic event trigger, which
+# would run it under two identities at once — a ref-scoped concurrency group
+# cannot tell those apart and the two runs cancel each other.
 on:
   workflow_call:
     outputs:
@@ -70,9 +71,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Every image shares one cache scope per name. `mode=max` keeps
-      # intermediate layers, so a change to one entrypoint rebuilds only that
-      # image's final layer instead of refetching the proxy release.
+      # Built without a cache on purpose: a cache hit would import the result
+      # of the release verification without running it, so the fetch and digest
+      # check would no longer bind the binary that ships. The other images only
+      # copy a script and cache safely.
       - name: Build and publish the proxy server image
         id: xray
         uses: docker/build-push-action@v6
@@ -85,8 +87,7 @@ jobs:
             XRAY_SHA256=${{ steps.pinned.outputs.sha256 }}
           tags: ${{ env.REGISTRY }}/${{ github.repository }}/e2e-xray:${{ github.sha }}
           push: true
-          cache-from: type=gha,scope=e2e-xray
-          cache-to: type=gha,scope=e2e-xray,mode=max
+          no-cache: true
           provenance: false
 
       - name: Build and publish the sentinel image
