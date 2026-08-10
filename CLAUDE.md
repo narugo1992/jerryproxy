@@ -647,6 +647,35 @@ force regeneration and fail when tracked or untracked generated output differs.
 - Do not use copied Tom and Jerry artwork. Any mouse/cheese visual identity
   must be original; logo assets are not part of the initial scaffold.
 
+## Licensing gate
+
+The wheel conveys its dependency chain and a PyInstaller executable embeds that
+chain outright, so a dependency added without a licence review is a
+distribution defect rather than a packaging detail.
+
+- `tools/licenses.json` is the reviewed record and the single source of truth.
+  `THIRD_PARTY_LICENSES.md` is generated from it, checked in, and shipped in
+  both the wheel and the source distribution. Never edit the document by hand.
+- `make license_check` must fail when a conveyed distribution has no reviewed
+  record, when a recorded licence is outside the reviewed allowlist, when an
+  installed distribution declares a licence other than the recorded one, or
+  when the document has drifted from the record. It runs inside `make check`.
+- Review only what is conveyed. Test, docs, and developer tooling never leaves
+  the repository. PyInstaller and its hooks-contrib package are named
+  exceptions because the bootloader and runtime hooks enter every frozen
+  executable; their own build-time dependency trees do not and must not be
+  walked into the record.
+- The standalone executables are Apache-2.0 only under PyInstaller's bootloader
+  exception. Do not modify the bootloader, and do not describe the standalone
+  artifacts as unencumbered without naming that exception.
+- Record a licence that varies by version line through `varies` rather than
+  picking one; `filelock` is conveyed as Unlicense below Python 3.10 and MIT at
+  or above it.
+- Backend binaries are never bundled and are not combined with JerryProxy into
+  one work, but their terms stay recorded because a user copying a populated
+  home conveys them. Verify a backend licence against upstream rather than
+  assuming it.
+
 ## Repository identity and releases
 
 The repository owner, primary maintainer, release authority, and PyPI Trusted

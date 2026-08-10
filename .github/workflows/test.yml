@@ -53,6 +53,12 @@ jobs:
         run: make e2e_check
       - name: Validate pinned archive corpus measurements
         run: make archive_corpus_check
+      - name: Check the licence record of everything distributed
+        # A dependency added without a licence review reaches users inside the
+        # wheel and embedded in the standalone executables. `make check` covers
+        # this too, but only the weekly catalog workflow runs that target, so
+        # the gate has to be invoked here to reach a pull request at all.
+        run: make license_check
 
   unit:
     name: Unit (${{ matrix.platform }}, Python ${{ matrix.python }})
