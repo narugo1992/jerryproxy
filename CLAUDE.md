@@ -393,6 +393,12 @@ authentication, extraction, process, or permission errors to warnings.
   directly, and must fail closed naming the scheme rather than the URI. The
   control endpoint stays on loopback even when `--bind-all` exposes the proxy
   listener, and its secret never reaches a log, an access file, or JSON output.
+- The control channel's port is reserved by binding and releasing, so a
+  same-UID local process can squat it between reservation and the backend's
+  bind, answer the query, and make a bypassed session look verified. That is the
+  same reserve-then-release window the proxy listener already has, and
+  continuous same-UID interference remains outside the supported threat
+  boundary; disclose it rather than claiming the check authenticates the peer.
 - A URI scheme enters `SUPPORTED_SCHEMES` only after the qualified backend was
   measured to parse it into a usable proxy *and* a data-plane fixture proves it
   carries traffic. `make e2e_check` fails when an allowlisted scheme has no

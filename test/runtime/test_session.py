@@ -1089,56 +1089,61 @@ def test_the_control_secret_never_reaches_the_log_or_access_file(tmp_path):
     runtime.start("main", node_id=record.nodes[0].node_id)
     secret = runtime.control_secret
     access = runtime.access_path.read_text(encoding="utf-8") if runtime.access_path.exists() else ""
+    # The on-disk log is the only channel that receives captured backend output;
+    # the sink never sees it, so checking the sink alone would miss a leak there.
+    log = runtime.log_path.read_text(encoding="utf-8") if runtime.log_path.exists() else ""
     try:
         assert secret
         assert all(secret not in line for line in lines)
         assert secret not in access
+        assert secret not in log
+        # The access file may name the endpoint, but never the secret that opens it.
+        assert "127.0.0.1:%d" % runtime.control_port in access
     finally:
         runtime.stop()
 
 
 def test_a_recovery_candidate_that_the_backend_bypasses_is_not_accepted(tmp_path):
-    """The alternate a sweep swaps in must be verified like the first node.
+    """A bypassing alternate must be refused even though it probes healthy.
 
-    Recovery is exactly where an unusable protocol arrives: the first node was
-    healthy enough to start, and the alternates are whatever else the provider
-    listed. Verifying only the first launch would let a sweep settle on a node
-    the backend drops, which routes directly while recovery reports success.
+    This is the dangerous shape, not a candidate that simply fails: routing
+    directly makes egress succeed, so the probe passes and the sweep would
+    otherwise settle on a node the backend never used. The probe therefore
+    reports the alternate as healthy, and only the load check can reject it.
     """
 
     record = _record(nodes=2)
-    launches = []
+    inspections = []
 
     def inspector(port, secret, path, timeout):
         del port, secret, timeout
-        # The first launch is accepted; every later one reports a bypass, which
-        # is what a backend says about a node whose protocol it refused.
         if path.startswith("/providers/proxies/"):
-            launches.append(path)
-            if len(launches) == 1:
+            inspections.append(path)
+            # The first launch is accepted. Every later launch reports what a
+            # backend says about a node whose protocol or dialect it refused.
+            if len(inspections) == 1:
                 return {"proxies": [{"name": "first"}]}
             return {"proxies": []}
-        if len(launches) <= 1:
+        if len(inspections) <= 1:
             return {"now": "first", "all": ["first"], "emptyFallback": "COMPATIBLE"}
         return {"now": "COMPATIBLE", "all": ["COMPATIBLE"], "emptyFallback": "COMPATIBLE"}
 
     runtime = _session(
         tmp_path,
         record,
-        # Healthy at startup, then failing, so recovery sweeps to the alternate.
-        FakeProbe([True, False, False, False, False, False]),
+        # Healthy at start, unhealthy once so recovery begins, then healthy
+        # again -- exactly what a bypassed alternate looks like from a probe.
+        FakeProbe([True, False, True, True, True, True]),
         inspector=inspector,
     )
     runtime.start("main", node_id=record.nodes[0].node_id)
     try:
-        # Driven through the same private entry the other recovery tests use;
-        # this session type exposes no public tick. Recovery must exhaust rather
-        # than settle on a candidate the backend is not using.
         with pytest.raises(RuntimeSessionError, match="recovery exhausted"):
             runtime._recover()
     finally:
         runtime.stop()
 
-    assert len(launches) > 1, "the sweep must have attempted at least one alternate"
-    # The bypassing alternate never becomes the effective node.
+    assert len(inspections) > 1, "the sweep must have attempted at least one alternate"
+    # A candidate the backend is not using never becomes the effective node,
+    # even though it answered the probe.
     assert runtime.node is None or runtime.node.node_id == record.nodes[0].node_id

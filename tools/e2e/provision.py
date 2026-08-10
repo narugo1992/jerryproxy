@@ -8,6 +8,12 @@ These are one-run fixture credentials: they authorise nothing beyond the
 throwaway containers of a single workflow run, and every run generates a fresh
 set. They are deliberately not masked, because a masked value is redacted out
 of job outputs and would arrive empty.
+
+Node URIs are *not* job outputs. The runner scans outputs with a credential
+heuristic and silently drops one it dislikes -- `tuic://uuid:password@host`
+tripped it, and the lane then failed on an empty variable rather than on
+anything real. Node URIs are derived from the credential parts, so `--emit-nodes`
+rebuilds them inside the job that consumes them, where no such scan applies.
 """
 
 import argparse
@@ -59,15 +65,21 @@ OUTPUT_NAMES = (
     "tls_certificate",
     "tls_key",
     "tls_server_name",
-    "ss_node",
-    "vmess_node",
-    "vless_node",
-    "trojan_node",
-    "hysteria2_node",
-    "hy2_node",
-    "tuic_node",
-    "anytls_node",
+    "subscription_body",
 )
+
+#: Node URIs, keyed by the environment variable the data-plane lane reads. These
+#: never travel as job outputs; ``--emit-nodes`` recomposes them from the parts.
+NODE_VARIABLES = {
+    "ss": "JERRYPROXY_E2E_SS_NODE",
+    "vmess": "JERRYPROXY_E2E_VMESS_NODE",
+    "vless": "JERRYPROXY_E2E_VLESS_NODE",
+    "trojan": "JERRYPROXY_E2E_TROJAN_NODE",
+    "hysteria2": "JERRYPROXY_E2E_HYSTERIA2_NODE",
+    "hy2": "JERRYPROXY_E2E_HY2_NODE",
+    "tuic": "JERRYPROXY_E2E_TUIC_NODE",
+    "anytls": "JERRYPROXY_E2E_ANYTLS_NODE",
+}
 
 
 def _reality_keypair(xray):  # type: (str) -> tuple
@@ -129,36 +141,13 @@ def build(xray):  # type: (str) -> dict
     private_key, public_key = _reality_keypair(xray)
     short_id = secrets.token_hex(8)
 
-    ss_userinfo = (
-        base64.urlsafe_b64encode(("%s:%s" % (SS_METHOD, ss_password)).encode("utf-8"))
-        .decode("ascii")
-        .rstrip("=")
-    )
-    vmess_payload = base64.b64encode(
-        json.dumps(
-            {
-                "add": PROXY_HOST,
-                "aid": "0",
-                "id": vmess_id,
-                "net": "tcp",
-                "port": str(VMESS_PORT),
-                "ps": "e2e-vmess",
-                "tls": "",
-                "v": 2,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    ).decode("ascii").rstrip("=")
-
     trojan_password = secrets.token_urlsafe(24)
     hysteria2_password = secrets.token_urlsafe(24)
     tuic_uuid = str(uuid.uuid4())
     tuic_password = secrets.token_urlsafe(24)
     anytls_password = secrets.token_urlsafe(24)
     certificate, key = _tls_leaf()
-
-    return {
+    values = {
         "marker": secrets.token_hex(24),
         "trojan_password": trojan_password,
         "hysteria2_password": hysteria2_password,
@@ -174,43 +163,121 @@ def build(xray):  # type: (str) -> dict
         "reality_private_key": private_key,
         "reality_public_key": public_key,
         "short_id": short_id,
-        "ss_node": "ss://%s@%s:%d#e2e-ss" % (ss_userinfo, PROXY_HOST, SS_PORT),
-        "vmess_node": "vmess://%s" % vmess_payload,
-        "vless_node": (
+    }
+    # The subscription fixture is a service container, created before any step
+    # could compose a value for it, so its body has to travel as an output. It
+    # goes as one Base64 blob rather than as node URIs, because the runner's
+    # credential heuristic silently drops an output shaped like a credential URI.
+    nodes = compose_nodes(values)
+    values["subscription_body"] = base64.b64encode(
+        ("\n".join(nodes[scheme] for scheme in sorted(nodes)) + "\n").encode("utf-8")
+    ).decode("ascii")
+    return values
+
+
+def compose_nodes(values):  # type: (dict) -> dict
+    """Rebuild every node URI from the credential parts.
+
+    Kept in Python, next to the generator that produced the parts, rather than
+    assembled in workflow YAML where it would be neither linted nor covered.
+    """
+
+    ss_userinfo = (
+        base64.urlsafe_b64encode(
+            ("%s:%s" % (SS_METHOD, values["ss_password"])).encode("utf-8")
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
+    vmess_payload = base64.b64encode(
+        json.dumps(
+            {
+                "add": PROXY_HOST,
+                "aid": "0",
+                "id": values["vmess_id"],
+                "net": "tcp",
+                "port": str(VMESS_PORT),
+                "ps": "e2e-vmess",
+                "tls": "",
+                "v": 2,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    name = values["tls_server_name"]
+    return {
+        "ss": "ss://%s@%s:%d#e2e-ss" % (ss_userinfo, PROXY_HOST, SS_PORT),
+        "vmess": "vmess://%s" % vmess_payload,
+        "vless": (
             "vless://%s@%s:%d?type=tcp&security=reality&flow=%s&sni=%s&fp=chrome&pbk=%s&sid=%s#e2e-vless"
-            % (vless_id, PROXY_HOST, VLESS_PORT, VLESS_FLOW, CAMOUFLAGE_SNI, public_key, short_id)
+            % (
+                values["vless_id"],
+                PROXY_HOST,
+                VLESS_PORT,
+                VLESS_FLOW,
+                CAMOUFLAGE_SNI,
+                values["reality_public_key"],
+                values["short_id"],
+            )
         ),
-        "trojan_node": (
+        "trojan": (
             "trojan://%s@%s:%d?sni=%s&allowInsecure=1#e2e-trojan"
-            % (trojan_password, PROXY_HOST, TROJAN_PORT, TLS_SERVER_NAME)
+            % (values["trojan_password"], PROXY_HOST, TROJAN_PORT, name)
         ),
-        "hysteria2_node": (
+        "hysteria2": (
             "hysteria2://%s@%s:%d?sni=%s&insecure=1#e2e-hysteria2"
-            % (hysteria2_password, PROXY_HOST, HYSTERIA2_PORT, TLS_SERVER_NAME)
+            % (values["hysteria2_password"], PROXY_HOST, HYSTERIA2_PORT, name)
         ),
-        # The short alias reaches the same server: it is a second URI spelling
-        # rather than a second protocol, and a build that accepted only the long
-        # form would still reject half of the subscriptions in the wild.
-        "hy2_node": (
+        # The short alias reaches the same server: a second URI spelling that
+        # subscriptions use in the wild, not a second protocol.
+        "hy2": (
             "hy2://%s@%s:%d?sni=%s&insecure=1#e2e-hy2"
-            % (hysteria2_password, PROXY_HOST, HYSTERIA2_PORT, TLS_SERVER_NAME)
+            % (values["hysteria2_password"], PROXY_HOST, HYSTERIA2_PORT, name)
         ),
-        "tuic_node": (
+        "tuic": (
             "tuic://%s:%s@%s:%d?sni=%s&alpn=h3&congestion_control=bbr&allow_insecure=1#e2e-tuic"
-            % (tuic_uuid, tuic_password, PROXY_HOST, TUIC_PORT, TLS_SERVER_NAME)
+            % (values["tuic_uuid"], values["tuic_password"], PROXY_HOST, TUIC_PORT, name)
         ),
-        "anytls_node": (
+        "anytls": (
             "anytls://%s@%s:%d?sni=%s&insecure=1#e2e-anytls"
-            % (anytls_password, PROXY_HOST, ANYTLS_PORT, TLS_SERVER_NAME)
+            % (values["anytls_password"], PROXY_HOST, ANYTLS_PORT, name)
         ),
     }
 
 
+def _emit_nodes(path):  # type: (str) -> int
+    """Write the node URIs to a GITHUB_ENV file from parts already in the env."""
+
+    parts = {}
+    for name in OUTPUT_NAMES:
+        parts[name] = os.environ.get(name.upper(), "")
+    missing = sorted(name for name, value in parts.items() if not value)
+    if missing:
+        raise SystemExit("cannot compose nodes without: %s" % ", ".join(missing))
+    nodes = compose_nodes(parts)
+    with open(path, "a", encoding="utf-8") as stream:
+        for scheme, variable in sorted(NODE_VARIABLES.items()):
+            stream.write("%s=%s\n" % (variable, nodes[scheme]))
+    sys.stdout.write("composed %d node URIs\n" % len(nodes))
+    return 0
+
+
 def main():  # type: () -> int
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--xray", required=True, help="pinned proxy binary used for key generation")
+    parser.add_argument("--xray", help="pinned proxy binary used for key generation")
     parser.add_argument("--output", required=True, help="GITHUB_OUTPUT file to append to")
+    parser.add_argument(
+        "--emit-nodes",
+        action="store_true",
+        help="compose node URIs from parts already in the environment",
+    )
     arguments = parser.parse_args()
+
+    if arguments.emit_nodes:
+        return _emit_nodes(arguments.output)
+    if not arguments.xray:
+        raise SystemExit("--xray is required unless --emit-nodes is given")
 
     values = build(arguments.xray)
     missing = [name for name in OUTPUT_NAMES if not values.get(name)]

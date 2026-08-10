@@ -140,6 +140,11 @@ def _control_request(port, secret, path, timeout):  # type: (int, str, str, floa
     Deliberately not `requests`: this must never inherit ambient proxy
     environment variables, which on a machine running JerryProxy may point at
     the very listener being inspected.
+
+    The responder is not authenticated as the child process. The port is
+    reserved by binding and releasing, so a same-UID local process could squat
+    it and answer; that window is the one the proxy listener already has, and
+    continuous same-UID interference is outside the supported threat boundary.
     """
 
     connection = HTTPConnection("127.0.0.1", port, timeout=timeout)
@@ -203,15 +208,22 @@ def reserve_loopback_port(preferred=None, strict=False, bind_address="127.0.0.1"
             descriptor.close()
     if preferred is not None and strict:
         raise RuntimeSessionError("requested listener port is unavailable: %d" % preferred)
-    descriptor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        descriptor.bind((bind_address, 0))
-        return descriptor.getsockname()[1]
-    except OSError as error:
-        # A lack of a listener socket is a terminal launch failure.
-        raise RuntimeSessionError("unable to reserve a listener port") from error
-    finally:
-        descriptor.close()
+    # The kernel does not know about `exclude`, so an ephemeral port has to be
+    # retried until it is not one the caller already reserved for another role.
+    # Bounded, because an unbounded retry would hang instead of failing.
+    for unused_attempt in range(16):
+        descriptor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            descriptor.bind((bind_address, 0))
+            port = descriptor.getsockname()[1]
+        except OSError as error:
+            # A lack of a listener socket is a terminal launch failure.
+            raise RuntimeSessionError("unable to reserve a listener port") from error
+        finally:
+            descriptor.close()
+        if port not in exclude:
+            return port
+    raise RuntimeSessionError("unable to reserve a listener port outside the excluded set")
 
 
 def build_provider_config(

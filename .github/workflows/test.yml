@@ -195,10 +195,8 @@ jobs:
       vmess_id: ${{ steps.generate.outputs.vmess_id }}
       vless_id: ${{ steps.generate.outputs.vless_id }}
       reality_private_key: ${{ steps.generate.outputs.reality_private_key }}
+      reality_public_key: ${{ steps.generate.outputs.reality_public_key }}
       short_id: ${{ steps.generate.outputs.short_id }}
-      ss_node: ${{ steps.generate.outputs.ss_node }}
-      vmess_node: ${{ steps.generate.outputs.vmess_node }}
-      vless_node: ${{ steps.generate.outputs.vless_node }}
       trojan_password: ${{ steps.generate.outputs.trojan_password }}
       hysteria2_password: ${{ steps.generate.outputs.hysteria2_password }}
       tuic_uuid: ${{ steps.generate.outputs.tuic_uuid }}
@@ -207,11 +205,6 @@ jobs:
       tls_certificate: ${{ steps.generate.outputs.tls_certificate }}
       tls_key: ${{ steps.generate.outputs.tls_key }}
       tls_server_name: ${{ steps.generate.outputs.tls_server_name }}
-      trojan_node: ${{ steps.generate.outputs.trojan_node }}
-      hysteria2_node: ${{ steps.generate.outputs.hysteria2_node }}
-      hy2_node: ${{ steps.generate.outputs.hy2_node }}
-      tuic_node: ${{ steps.generate.outputs.tuic_node }}
-      anytls_node: ${{ steps.generate.outputs.anytls_node }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -297,9 +290,7 @@ jobs:
           - 18081:8081
         env:
           E2E_PORT: "8081"
-          E2E_SS_NODE: ${{ needs.provision.outputs.ss_node }}
-          E2E_VMESS_NODE: ${{ needs.provision.outputs.vmess_node }}
-          E2E_VLESS_NODE: ${{ needs.provision.outputs.vless_node }}
+          E2E_SUBSCRIPTION_BODY: ${{ needs.provision.outputs.subscription_body }}
         options: >-
           --health-cmd "wget -q -O- http://127.0.0.1:8081/subscription || exit 1"
           --health-interval 3s --health-retries 20 --health-start-period 3s
@@ -384,7 +375,7 @@ jobs:
           E2E_TLS_CERTIFICATE: ${{ needs.provision.outputs.tls_certificate }}
           E2E_TLS_KEY: ${{ needs.provision.outputs.tls_key }}
         options: >-
-          --health-cmd "test -f /tmp/singbox-config.json"
+          --health-cmd "netstat -lun | grep -q ':10005 '"
           --health-interval 3s --health-retries 20 --health-start-period 3s
       tuic-server:
         image: ${{ needs.e2e-images.outputs.singbox }}
@@ -402,7 +393,7 @@ jobs:
           E2E_TLS_CERTIFICATE: ${{ needs.provision.outputs.tls_certificate }}
           E2E_TLS_KEY: ${{ needs.provision.outputs.tls_key }}
         options: >-
-          --health-cmd "test -f /tmp/singbox-config.json"
+          --health-cmd "netstat -lun | grep -q ':10006 '"
           --health-interval 3s --health-retries 20 --health-start-period 3s
       anytls-server:
         image: ${{ needs.e2e-images.outputs.singbox }}
@@ -439,6 +430,29 @@ jobs:
             exit 1
           fi
           echo "sentinel is not resolvable from the runner, as required"
+      - name: Compose the node URIs from the provisioned parts
+        # Not job outputs: the runner scans outputs with a credential heuristic
+        # and silently drops one it dislikes, which failed this lane on an empty
+        # variable rather than on anything real. The URIs are derived, so they
+        # are rebuilt here from the parts instead.
+        env:
+          MARKER: ${{ needs.provision.outputs.marker }}
+          SS_PASSWORD: ${{ needs.provision.outputs.ss_password }}
+          VMESS_ID: ${{ needs.provision.outputs.vmess_id }}
+          VLESS_ID: ${{ needs.provision.outputs.vless_id }}
+          REALITY_PRIVATE_KEY: ${{ needs.provision.outputs.reality_private_key }}
+          REALITY_PUBLIC_KEY: ${{ needs.provision.outputs.reality_public_key }}
+          SHORT_ID: ${{ needs.provision.outputs.short_id }}
+          TROJAN_PASSWORD: ${{ needs.provision.outputs.trojan_password }}
+          HYSTERIA2_PASSWORD: ${{ needs.provision.outputs.hysteria2_password }}
+          TUIC_UUID: ${{ needs.provision.outputs.tuic_uuid }}
+          TUIC_PASSWORD: ${{ needs.provision.outputs.tuic_password }}
+          ANYTLS_PASSWORD: ${{ needs.provision.outputs.anytls_password }}
+          TLS_CERTIFICATE: ${{ needs.provision.outputs.tls_certificate }}
+          TLS_KEY: ${{ needs.provision.outputs.tls_key }}
+          TLS_SERVER_NAME: ${{ needs.provision.outputs.tls_server_name }}
+        run: python tools/e2e/provision.py --emit-nodes --output "$GITHUB_ENV"
+
       - name: Run unit tests with the data plane present
         env:
           V2RAY_SUBSCRIPTION: http://127.0.0.1:18081/subscription
@@ -447,14 +461,6 @@ jobs:
           JERRYPROXY_E2E_MARKER: ${{ needs.provision.outputs.marker }}
           JERRYPROXY_E2E_BACKEND: mihomo
           JERRYPROXY_E2E_BACKEND_VERSION: 1.19.29
-          JERRYPROXY_E2E_SS_NODE: ${{ needs.provision.outputs.ss_node }}
-          JERRYPROXY_E2E_VMESS_NODE: ${{ needs.provision.outputs.vmess_node }}
-          JERRYPROXY_E2E_VLESS_NODE: ${{ needs.provision.outputs.vless_node }}
-          JERRYPROXY_E2E_TROJAN_NODE: ${{ needs.provision.outputs.trojan_node }}
-          JERRYPROXY_E2E_HYSTERIA2_NODE: ${{ needs.provision.outputs.hysteria2_node }}
-          JERRYPROXY_E2E_HY2_NODE: ${{ needs.provision.outputs.hy2_node }}
-          JERRYPROXY_E2E_TUIC_NODE: ${{ needs.provision.outputs.tuic_node }}
-          JERRYPROXY_E2E_ANYTLS_NODE: ${{ needs.provision.outputs.anytls_node }}
           JERRYPROXY_E2E_PUBLIC_PROBES: https://www.gstatic.com/generate_204,https://cloudflare.com/cdn-cgi/trace
           JERRYPROXY_E2E_ENFORCE: "1"
         run: >-
@@ -485,20 +491,12 @@ jobs:
           R_reality_private_key: ${{ needs.provision.outputs.reality_private_key }}
           R_reality_public_key: ${{ needs.provision.outputs.reality_public_key }}
           R_short_id: ${{ needs.provision.outputs.short_id }}
-          R_ss_node: ${{ needs.provision.outputs.ss_node }}
-          R_vmess_node: ${{ needs.provision.outputs.vmess_node }}
-          R_vless_node: ${{ needs.provision.outputs.vless_node }}
           R_trojan_password: ${{ needs.provision.outputs.trojan_password }}
           R_hysteria2_password: ${{ needs.provision.outputs.hysteria2_password }}
           R_tuic_uuid: ${{ needs.provision.outputs.tuic_uuid }}
           R_tuic_password: ${{ needs.provision.outputs.tuic_password }}
           R_anytls_password: ${{ needs.provision.outputs.anytls_password }}
           R_tls_key: ${{ needs.provision.outputs.tls_key }}
-          R_trojan_node: ${{ needs.provision.outputs.trojan_node }}
-          R_hysteria2_node: ${{ needs.provision.outputs.hysteria2_node }}
-          R_hy2_node: ${{ needs.provision.outputs.hy2_node }}
-          R_tuic_node: ${{ needs.provision.outputs.tuic_node }}
-          R_anytls_node: ${{ needs.provision.outputs.anytls_node }}
         run: |
           set -uo pipefail
           umask 077

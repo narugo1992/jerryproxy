@@ -51,26 +51,21 @@ SUPPLIED_SECRETS = {
     "reality_private_key": "SYNTHETICREALITYPRIVATEKEYSAMPLE",
     "reality_public_key": "SYNTHETICREALITYPUBLICKEYSAMPLEV",
     "short_id": "0f1e2d3c4b5a6978",
-    "ss_node": "ss://c3ludGhldGljc2FtcGxldXNlcmluZm8@127.0.0.1:10001#e2e-ss",
-    "vmess_node": "vmess://eyJhZGQiOiIxMjcuMC4wLjEiLCJpZCI6ImFiY2RlZiJ9",
-    "vless_node": (
-        "vless://abcdef12-3456-7890-abcd-ef1234567890@127.0.0.1:10003"
-        "?type=tcp&security=reality&pbk=SYNTHETICREALITYPUBLICKEYSAMPLEV&sid=0f1e2d3c4b5a6978#e2e"
-    ),
-    "trojan_password": "SYNTHETICTROJANPASSWORDSAMPLE",
-    "hysteria2_password": "SYNTHETICHYSTERIA2PASSWORDSAMP",
-    "tuic_uuid": "fedcba98-7654-3210-fedc-ba9876543210",
-    "tuic_password": "SYNTHETICTUICPASSWORDSAMPLE",
-    "anytls_password": "SYNTHETICANYTLSPASSWORDSAMPLE",
-    "tls_key": "U1lOVEhFVElDUFJJVkFURUtFWU1BVEVSSUFMU0FNUExF",
-    "trojan_node": "trojan://SYNTHETICTROJANPASSWORDSAMPLE@127.0.0.1:10004?sni=fixture.invalid#e2e",
-    "hysteria2_node": "hysteria2://SYNTHETICHYSTERIA2PASSWORDSAMP@127.0.0.1:10005?sni=fixture.invalid#e2e",
-    "hy2_node": "hy2://SYNTHETICHYSTERIA2PASSWORDSAMP@127.0.0.1:10005?sni=fixture.invalid#e2e",
-    "tuic_node": (
-        "tuic://fedcba98-7654-3210-fedc-ba9876543210:SYNTHETICTUICPASSWORDSAMPLE"
-        "@127.0.0.1:10006?sni=fixture.invalid&alpn=h3#e2e"
-    ),
-    "anytls_node": "anytls://SYNTHETICANYTLSPASSWORDSAMPLE@127.0.0.1:10007?sni=fixture.invalid#e2e",
+}
+
+# Which service serves each scheme. `hy2` is an alias reaching the hysteria2
+# server: a second URI spelling, not a second protocol, so it shares a fixture.
+# Written out rather than inferred from the name, because guessing by prefix
+# would silently accept a scheme that no service actually serves.
+SCHEME_SERVICES = {
+    "ss": "ss-server",
+    "vmess": "vmess-server",
+    "vless": "vless-server",
+    "trojan": "trojan-server",
+    "hysteria2": "hysteria2-server",
+    "hy2": "hysteria2-server",
+    "tuic": "tuic-server",
+    "anytls": "anytls-server",
 }
 
 # Every proxy service, and the entrypoint module that renders its inbound.
@@ -138,6 +133,47 @@ def _check_every_value_stays_emitted():  # type: () -> list
         "the provisioner no longer emits %s, so redaction would never cover it" % name
         for name in dropped
     ]
+
+
+# Provisioned values that are not secret-bearing, so their absence from the
+# failure-log redaction list is correct rather than an omission.
+PUBLIC_OUTPUTS = ("marker", "tls_certificate", "tls_server_name", "subscription_body")
+
+
+def _check_every_secret_reaches_redaction():  # type: () -> list
+    """Every secret-bearing output must appear in the failure-log redaction env.
+
+    The subset check next to this one only proves the hand-listed samples still
+    exist. Without this direction, a new secret-bearing output could reach a
+    service and never enter the redaction script, while every guard stayed green
+    and the workflow comment claiming otherwise stayed false.
+    """
+
+    text = _workflow()
+    failures = []
+    for name in provision.OUTPUT_NAMES:
+        if name in PUBLIC_OUTPUTS:
+            continue
+        if "R_%s:" % name not in text:
+            failures.append(
+                "%s is provisioned but never reaches the failure-log redaction script" % name
+            )
+    stale = [
+        name
+        for name in re.findall(r"^\s+R_([a-z0-9_]+):", text, re.MULTILINE)
+        if name not in provision.OUTPUT_NAMES
+    ]
+    failures.extend(
+        "the redaction script is given R_%s, which the provisioner does not emit" % name
+        for name in sorted(set(stale))
+    )
+    # `subscription_body` is Base64 of every node URI, so redacting the parts is
+    # what covers it; assert the classification is deliberate, not forgotten.
+    unknown = sorted(set(PUBLIC_OUTPUTS) - set(provision.OUTPUT_NAMES))
+    failures.extend(
+        "%s is classified as public but is not provisioned at all" % name for name in unknown
+    )
+    return failures
 
 
 def _check_redaction():  # type: () -> list
@@ -230,9 +266,24 @@ def _check_enforcement_is_declared():  # type: () -> list
             "the data-plane step does not set JERRYPROXY_E2E_ENFORCE=1, so a missing "
             "contract would skip silently and still report success"
         )
+    # Node URIs no longer arrive as step `env:`; they are composed into
+    # GITHUB_ENV by an earlier step, because the runner's credential heuristic
+    # silently drops an output that looks like a credential URI.
+    composed = set(provision.NODE_VARIABLES.values())
+    emitter = re.search(r"provision\.py --emit-nodes", text)
+    if composed and emitter is None:
+        failures.append("nothing composes the node URIs, so the lane would see none")
     for name in contract.REQUIRED:
+        if name in composed:
+            continue
         if "%s:" % name not in block:
             failures.append("the data-plane step does not supply %s" % name)
+    # The composer and the lane must agree on the exact variable names.
+    mismatch = sorted(set(contract.NODE_VARIABLES.values()) ^ composed)
+    failures.extend(
+        "%s is composed or expected by only one side of the lane contract" % name
+        for name in mismatch
+    )
     return failures
 
 
@@ -278,6 +329,38 @@ def _check_housekeeping_cannot_gate_the_lane():  # type: () -> list
     ]
 
 
+def _required_names(module, builder):  # type: (object, object) -> list
+    """Every variable a builder demands, including through the helpers it calls.
+
+    Reading only the builder's own source misses requirements moved into a
+    shared helper -- the TLS material is required by `_tls()`, not by the four
+    builders that call it, and a guard that stopped at the builder reported
+    those services as fully supplied while their containers would die at start.
+    """
+
+    seen = set()
+    pending = [builder]
+    names = []
+    while pending:
+        target = pending.pop()
+        name = getattr(target, "__name__", None)
+        if name is None or name in seen:
+            continue
+        seen.add(name)
+        try:
+            source = inspect.getsource(target)
+        except (OSError, TypeError):
+            # A callable with no retrievable source cannot be scanned; say so
+            # rather than silently treating it as requiring nothing.
+            raise AssertionError("cannot read the source of %s" % name)
+        names.extend(re.findall(r'_required\("([A-Z0-9_]+)"\)', source))
+        for called in re.findall(r"\b(_[a-z][a-z0-9_]*)\s*\(", source):
+            helper = getattr(module, called, None)
+            if callable(helper) and called not in seen:
+                pending.append(helper)
+    return names
+
+
 def _check_images_get_what_they_require():  # type: () -> list
     """Each proxy service must supply the variables its entrypoint demands.
 
@@ -304,7 +387,7 @@ def _check_images_get_what_they_require():  # type: () -> list
         if builder is None:
             failures.append("service %s declares an unknown protocol" % service)
             continue
-        needed = re.findall(r'_required\("([A-Z0-9_]+)"\)', inspect.getsource(builder))
+        needed = _required_names(module, builder)
         failures.extend(
             "service %s does not supply %s, which its entrypoint requires" % (service, name)
             for name in sorted(set(needed) | {"E2E_PROTOCOL"} - supplied)
@@ -323,7 +406,6 @@ def _check_every_supported_scheme_has_a_fixture():  # type: () -> list
     """
 
     failures = []
-    text = _workflow()
     for scheme in SUPPORTED_SCHEMES:
         variable = contract.NODE_VARIABLES.get(scheme)
         if variable is None:
@@ -332,11 +414,21 @@ def _check_every_supported_scheme_has_a_fixture():  # type: () -> list
                 "nothing proves it carries traffic" % scheme
             )
             continue
-        if variable not in text:
-            failures.append("the workflow never supplies %s" % variable)
-        expected = "%s_node" % scheme
-        if expected not in provision.OUTPUT_NAMES:
-            failures.append("the provisioner emits no %s for %s://" % (expected, scheme))
+        if variable not in provision.NODE_VARIABLES.values():
+            failures.append("the provisioner never composes %s" % variable)
+        if scheme not in provision.NODE_VARIABLES:
+            failures.append("the provisioner composes no node URI for %s://" % scheme)
+        # A scheme also needs a server, or nothing serves the protocol it names.
+        service = SCHEME_SERVICES.get(scheme)
+        if service is None:
+            failures.append(
+                "no proxy service is recorded for %s://, so its node URI would "
+                "address nothing" % scheme
+            )
+        elif service not in PROXY_SERVICES:
+            failures.append("%s:// names service %s, which does not exist" % (scheme, service))
+        elif not _service_block(_workflow(), service):
+            failures.append("%s:// names service %s, which the workflow omits" % (scheme, service))
     extra = sorted(set(contract.NODE_VARIABLES) - set(SUPPORTED_SCHEMES))
     failures.extend(
         "the lane tests %s://, which the product no longer accepts" % scheme for scheme in extra
@@ -351,6 +443,7 @@ def main():  # type: () -> int
         ("private services publish no port", _check_private_services_publish_nothing()),
         ("every provisioned value stays emitted", _check_every_value_stays_emitted()),
         ("redaction covers every provisioned value", _check_redaction()),
+        ("every secret reaches redaction", _check_every_secret_reaches_redaction()),
         ("workflow references only real outputs", _check_workflow_matches_the_provisioner()),
         ("the data-plane step demands the contract", _check_enforcement_is_declared()),
         ("services supply what their images require", _check_images_get_what_they_require()),

@@ -349,7 +349,9 @@ class RuntimeSession(object):
             "session": self.session_id,
             "backend": self.driver.name,
             "backend_version": self.backend_version,
-            "controller": None,
+            # The session does publish a loopback controller for its own use.
+            # The port is recorded so the file is truthful; the secret is not.
+            "controller": None if self.control_port is None else "127.0.0.1:%d" % self.control_port,
             "authentication": self.authenticate,
             "listeners": [
                 {
@@ -491,7 +493,7 @@ class RuntimeSession(object):
         # so a startup retry and the recovery sweep are both covered -- the sweep
         # launches a *different* node, the case most likely to carry a protocol
         # the backend refuses.
-        self._require_node_in_use()
+        self._require_node_in_use(deadline=deadline)
 
     def _check_health(self, deadline=None):
         if self.port is None:
@@ -537,7 +539,7 @@ class RuntimeSession(object):
             message += "; next=%s" % redact_text(action)
         self._log(level, message)
 
-    def _require_node_in_use(self):  # type: () -> None
+    def _require_node_in_use(self, deadline=None):  # type: (object) -> None
         """Refuse to report readiness unless the backend is using the node.
 
         A backend can start, listen, and answer a connectivity probe while
@@ -548,7 +550,15 @@ class RuntimeSession(object):
         protected while their traffic leaves unproxied.
         """
 
-        loaded = self.driver.loaded_nodes(self.control_port, self.control_secret, 5.0)
+        # Two sequential requests happen inside, so an unclamped timeout could
+        # overrun the recovery deadline once per swept candidate.
+        timeout = 5.0
+        if deadline is not None:
+            remaining = deadline.remaining()
+            if remaining <= 0:
+                raise RuntimeSessionError("proxy recovery deadline exhausted")
+            timeout = max(0.5, min(5.0, remaining / 2.0))
+        loaded = self.driver.loaded_nodes(self.control_port, self.control_secret, timeout)
         if loaded.bypassing or len(loaded.accepted) != 1:
             # Name the scheme, never the URI: the scheme is already public in
             # `node list` output while the rest of the URI is a credential.
@@ -707,10 +717,12 @@ class RuntimeSession(object):
                 raise RuntimeSessionError("proxy recovery deadline exhausted")
             if snapshot.ok:
                 return True
-        except RuntimeSessionError:
+        except RuntimeSessionError as error:
             # Candidate failures are classified and the next candidate is
-            # attempted after bounded cleanup.
-            pass
+            # attempted after bounded cleanup. The reason is logged rather than
+            # dropped: when the backend refused this candidate's protocol, that
+            # message is the only thing telling the user why.
+            self._log("WARN", "recovery candidate rejected: %s" % redact_text(str(error)))
         self._mark_cooldown(node)
         try:
             self._stop_process(deadline=deadline)
