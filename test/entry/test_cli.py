@@ -13,13 +13,14 @@ from click.testing import CliRunner
 
 import jerryproxy.cli as cli_module
 import jerryproxy.cli._common as common_module
-import jerryproxy.selfcheck as selfcheck_module
 from jerryproxy.backend.catalog import BackendCatalog
 from jerryproxy.backend.manager import BackendManager
 from jerryproxy.backend.platform import detect_platform
 from jerryproxy.cli import cli, main
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.lock import JerryProxyOperationLock, filelock_status
+from jerryproxy.selfcheck import relay as selfcheck_relay
+from jerryproxy.selfcheck import runner as selfcheck_runner
 from test.selfcheck.fakes import verified_relay_session_factory
 
 
@@ -29,9 +30,11 @@ def _isolate_self_check_relay_network(monkeypatch):
 
     def inline_relay_probe(profile, supervision=None):
         del supervision
-        return selfcheck_module._check_relay(profile, relay_factory)
+        return selfcheck_relay._check_relay(profile, relay_factory)
 
-    monkeypatch.setattr(selfcheck_module, "_check_relay_in_process", inline_relay_probe)
+    # build_checks() holds its own binding, so the runner is what must be
+    # replaced for the assembled relay checks to stay offline.
+    monkeypatch.setattr(selfcheck_runner, "_check_relay_in_process", inline_relay_probe)
     return relay_factory
 
 
@@ -170,21 +173,28 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     assert result.exit_code == 0
     assert "Runtime: Python" in result.output
     assert "System:" in result.output
-    assert "[1/22] Python runtime: OK" in result.output
-    assert "[7/22] packaged backend catalog: OK" in result.output
-    assert "[8/22] catalog platform selection: OK" in result.output
-    assert "[9/22] subscription parser: OK" in result.output
-    assert "[10/22] runtime projection: OK" in result.output
-    assert "[11/22] filelock compatibility:" in result.output
-    assert "[12/22] backend inventory: OK" in result.output
-    assert "[13/22] isolated backend lifecycle: OK" in result.output
-    assert "[14/22] recovery install rollback: OK" in result.output
-    assert "[15/22] recovery activation rollback: OK" in result.output
-    assert "[16/22] recovery activation rollforward: OK" in result.output
-    assert "[17/22] recovery removal rollback: OK" in result.output
-    assert "[18/22] recovery removal rollforward: OK" in result.output
-    assert "[21/22] relay gh.geekertao.top: OK" in result.output
-    assert "[22/22] delayed process cleanup: OK" in result.output
+    # Positions are written out rather than derived, so that inserting or
+    # removing a check has to be acknowledged here instead of passing silently.
+    assert "[1/27] Python runtime: OK" in result.output
+    assert "[7/27] packaged backend catalog: OK" in result.output
+    assert "[8/27] catalog platform selection: OK" in result.output
+    assert "[9/27] subscription parser: OK" in result.output
+    assert "[10/27] subscription state: OK" in result.output
+    assert "[11/27] node source boundary: OK" in result.output
+    assert "[12/27] runtime projection: OK" in result.output
+    assert "[13/27] runtime driver contract: OK" in result.output
+    assert "[14/27] loopback listener: OK" in result.output
+    assert "[15/27] console rendering: OK" in result.output
+    assert "[16/27] filelock compatibility:" in result.output
+    assert "[17/27] backend inventory: OK" in result.output
+    assert "[18/27] isolated backend lifecycle: OK" in result.output
+    assert "[19/27] recovery install rollback: OK" in result.output
+    assert "[20/27] recovery activation rollback: OK" in result.output
+    assert "[21/27] recovery activation rollforward: OK" in result.output
+    assert "[22/27] recovery removal rollback: OK" in result.output
+    assert "[23/27] recovery removal rollforward: OK" in result.output
+    assert "[26/27] relay gh.geekertao.top: OK" in result.output
+    assert "[27/27] delayed process cleanup: OK" in result.output
     assert "0 FAIL, 0 ERR" in result.output
     expected_skips = 0 if os.name == "posix" else 1
     assert "%d SKIP" % expected_skips in result.output
