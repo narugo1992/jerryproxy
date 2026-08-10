@@ -485,6 +485,13 @@ class RuntimeSession(object):
             # backend diagnostics cross this boundary.
             self.process = None if self.process is None else self.process
             raise RuntimeSessionError("mihomo backend candidate failed to start") from error
+        # Outside the launch failure boundary, because a backend that started
+        # cleanly but is not using the node is a different verdict and keeps its
+        # own message. Inside `_launch_node` rather than beside one call of it,
+        # so a startup retry and the recovery sweep are both covered -- the sweep
+        # launches a *different* node, the case most likely to carry a protocol
+        # the backend refuses.
+        self._require_node_in_use()
 
     def _check_health(self, deadline=None):
         if self.port is None:
@@ -628,7 +635,6 @@ class RuntimeSession(object):
             self._resolve_executable(install_missing)
             startup_deadline = RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
             self._launch_node(self.node, deadline=startup_deadline)
-            self._require_node_in_use()
             self._startup_health(startup_deadline)
             self._publish_access()
             self._next_health_at = self.clock() + self.recovery_policy.health_interval

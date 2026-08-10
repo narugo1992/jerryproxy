@@ -1095,3 +1095,50 @@ def test_the_control_secret_never_reaches_the_log_or_access_file(tmp_path):
         assert secret not in access
     finally:
         runtime.stop()
+
+
+def test_a_recovery_candidate_that_the_backend_bypasses_is_not_accepted(tmp_path):
+    """The alternate a sweep swaps in must be verified like the first node.
+
+    Recovery is exactly where an unusable protocol arrives: the first node was
+    healthy enough to start, and the alternates are whatever else the provider
+    listed. Verifying only the first launch would let a sweep settle on a node
+    the backend drops, which routes directly while recovery reports success.
+    """
+
+    record = _record(nodes=2)
+    launches = []
+
+    def inspector(port, secret, path, timeout):
+        del port, secret, timeout
+        # The first launch is accepted; every later one reports a bypass, which
+        # is what a backend says about a node whose protocol it refused.
+        if path.startswith("/providers/proxies/"):
+            launches.append(path)
+            if len(launches) == 1:
+                return {"proxies": [{"name": "first"}]}
+            return {"proxies": []}
+        if len(launches) <= 1:
+            return {"now": "first", "all": ["first"], "emptyFallback": "COMPATIBLE"}
+        return {"now": "COMPATIBLE", "all": ["COMPATIBLE"], "emptyFallback": "COMPATIBLE"}
+
+    runtime = _session(
+        tmp_path,
+        record,
+        # Healthy at startup, then failing, so recovery sweeps to the alternate.
+        FakeProbe([True, False, False, False, False, False]),
+        inspector=inspector,
+    )
+    runtime.start("main", node_id=record.nodes[0].node_id)
+    try:
+        # Driven through the same private entry the other recovery tests use;
+        # this session type exposes no public tick. Recovery must exhaust rather
+        # than settle on a candidate the backend is not using.
+        with pytest.raises(RuntimeSessionError, match="recovery exhausted"):
+            runtime._recover()
+    finally:
+        runtime.stop()
+
+    assert len(launches) > 1, "the sweep must have attempted at least one alternate"
+    # The bypassing alternate never becomes the effective node.
+    assert runtime.node is None or runtime.node.node_id == record.nodes[0].node_id
