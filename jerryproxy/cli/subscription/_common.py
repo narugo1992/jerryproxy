@@ -9,8 +9,9 @@ from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
 from tabulate import tabulate
 
+from ...errors import SubscriptionError
 from ...subscription.redaction import terminal_safe_text
-from ...subscription.transport import MAXIMUM_BODY_BYTES
+from ...subscription.transport import MAXIMUM_BODY_BYTES, MIHOMO_SUBSCRIPTION_PARSER
 from .. import _common as cli_common
 
 SOURCE_ENVIRONMENT = "V2RAY_SUBSCRIPTION"
@@ -118,11 +119,33 @@ def confirm_dangerous_operation(message, assume_yes):  # type: (str, bool) -> bo
     return cli_common.confirm_dangerous_operation(message, assume_yes)
 
 
+def _skipped_summary(record):  # type: (object) -> tuple
+    """Recompute what this build could not use from the stored source bytes.
+
+    The skip set is derived, not stored: the source body is the single truth,
+    and what a build can interpret changes with the build. Recomputing keeps
+    the report accurate after an upgrade adds a protocol.
+    """
+
+    try:
+        parsed = MIHOMO_SUBSCRIPTION_PARSER.parse(
+            record.body,
+            format_hint="auto" if record.format == "base64-uri-lines" else "uri-lines",
+        )
+    except (SubscriptionError, ValueError):
+        # A body that no longer parses is reported by the read path itself;
+        # an unavailable summary must not replace that error.
+        return ()
+    return parsed.skipped
+
+
 def emit_record(record, as_json, include_nodes=True):  # type: (object, bool, bool) -> None
     value = record.public(include_nodes=include_nodes)
+    skipped = _skipped_summary(record)
     if as_json:
         import json
 
+        value["skipped"] = [{"count": count, "scheme": scheme} for scheme, count in skipped]
         click.echo(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         return
     click.echo("Subscription: %s" % terminal_safe_text(record.name))
@@ -130,6 +153,13 @@ def emit_record(record, as_json, include_nodes=True):  # type: (object, bool, bo
     click.echo("Format: %s" % record.format)
     click.echo("Enabled: %s" % ("yes" if record.enabled else "no"))
     click.echo("Nodes: %d" % record.node_count)
+    if skipped:
+        # Say it plainly: a silent skip is its own trap, because the node count
+        # would simply be lower than the provider's list with no explanation.
+        click.echo(
+            "Skipped: %s (unsupported by this build)"
+            % ", ".join("%d %s" % (count, terminal_safe_text(scheme)) for scheme, count in skipped)
+        )
     if include_nodes:
         emit_nodes(record.nodes)
 

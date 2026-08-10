@@ -36,6 +36,15 @@ CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
 SUPPORTED_SCHEMES = ("ss", "vmess", "vless")
 _URI_LINE = re.compile(r"^(ss|vmess|vless)://[^\s]+$", re.IGNORECASE)
+# A rejected record contributes only its scheme name to diagnostics, so that
+# name is bounded and must look like a scheme rather than arbitrary text.
+_SCHEME_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
+# Any URI-shaped line, whatever its scheme. Used only to tell "this is not a
+# URI list" apart from "this is a URI list of protocols this build lacks";
+# reporting the second as a format error sends the reader hunting for a Base64
+# or newline fault that does not exist.
+_ANY_URI_LINE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^\s]+$")
+_MAXIMUM_SCHEME_NAME = 16
 
 
 class _PinnedConnectionMixin(object):
@@ -340,12 +349,20 @@ def _decode_base64(value):  # type: (bytes) -> bytes
 
 
 def _looks_like_uri_lines(value):  # type: (bytes) -> bool
+    """Return whether this body is a URI-line container at all.
+
+    One supported record is enough. Requiring every line to be supported would
+    make a single Trojan or Hysteria entry reject an entire subscription, and
+    would report that as a format error — sending the reader to look for a
+    Base64 or newline problem that does not exist.
+    """
+
     try:
         text = value.decode("utf-8")
     except UnicodeDecodeError:
         return False
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return bool(lines) and all(_URI_LINE.match(line) for line in lines)
+    return any(_URI_LINE.match(line) for line in lines)
 
 
 def _display_for_uri(uri):  # type: (str) -> str
@@ -381,6 +398,47 @@ def _display_for_uri(uri):  # type: (str) -> str
     return label[:MAXIMUM_LABEL_CHARACTERS]
 
 
+def _looks_like_uri_container(value):  # type: (bytes) -> bool
+    """Return whether every line is URI-shaped, supported or not."""
+
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return bool(lines) and all(_ANY_URI_LINE.match(line) for line in lines)
+
+
+def _unsupported_container_error(value):  # type: (bytes) -> SubscriptionParseError
+    """Name the protocols found, so the reader is not sent after a format fault."""
+
+    schemes = {}
+    for line in value.decode("utf-8").splitlines():
+        line = line.strip()
+        if line:
+            scheme = _skipped_scheme(line)
+            schemes[scheme] = schemes.get(scheme, 0) + 1
+    return SubscriptionParseError(
+        "subscription contains no supported nodes; it declares %s, and this build "
+        "supports %s" % (_describe(schemes), ", ".join(SUPPORTED_SCHEMES))
+    )
+
+
+def _skipped_scheme(line):  # type: (str) -> str
+    """Name a rejected record by its declared scheme, without retaining it."""
+
+    scheme, separator, _rest = line.partition("://")
+    if not separator or not scheme or not _SCHEME_NAME.match(scheme):
+        return "malformed"
+    return scheme.lower()[:_MAXIMUM_SCHEME_NAME]
+
+
+def _describe(skipped):  # type: (dict) -> str
+    return ", ".join(
+        "%d %s" % (count, scheme) for scheme, count in sorted(skipped.items())
+    )
+
+
 def _validate_uri_line(line):  # type: (str) -> Tuple[str, str, str]
     if len(line.encode("utf-8")) > MAXIMUM_URI_BYTES:
         raise SubscriptionParseError("subscription URI record exceeds the 16 KiB bound")
@@ -414,6 +472,12 @@ def _parse_v2ray_subscription_body(body, format_hint="auto"):
             if decoded is not None and _looks_like_uri_lines(decoded):
                 candidates.append(("base64-uri-lines", decoded))
     if not candidates:
+        # A URI list this build cannot serve is a support gap, not a malformed
+        # body, and saying so is the difference between an actionable message
+        # and one that points at the wrong thing entirely.
+        for probe in (body, decoded if format_hint == "auto" else None):
+            if probe is not None and _looks_like_uri_container(probe):
+                raise _unsupported_container_error(probe)
         raise SubscriptionParseError("subscription body is neither Base64 nor URI lines")
     # Exact duplicate representations are allowed only when they decode to the
     # same URI set; the classified format remains explicit for state evidence.
@@ -424,18 +488,35 @@ def _parse_v2ray_subscription_body(body, format_hint="auto"):
         # UnicodeDecodeError is expected for non-UTF-8 source bodies.
         raise SubscriptionParseError("subscription URI lines are not UTF-8") from error
     records = []
+    skipped = {}
     for line in text.splitlines():
         line = line.strip()
         if not line:
+            continue
+        if not _URI_LINE.match(line):
+            # A record this build cannot interpret is counted, never retained:
+            # its credential shape is exactly what is unknown here. Providers
+            # routinely mix protocols, and dropping the whole subscription over
+            # one of them would make supported nodes unusable.
+            scheme = _skipped_scheme(line)
+            skipped[scheme] = skipped.get(scheme, 0) + 1
             continue
         records.append(_validate_uri_line(line))
         if len(records) > MAXIMUM_RECORDS:
             raise SubscriptionParseError("subscription contains too many nodes")
     if not records:
-        raise SubscriptionParseError("subscription contains no supported nodes")
+        raise SubscriptionParseError(
+            "subscription contains no supported nodes; it declares %s, and this "
+            "build supports %s" % (
+                _describe(skipped) or "no usable records",
+                ", ".join(SUPPORTED_SCHEMES),
+            )
+        )
     # Keep the exact fetched representation for revision/rollback integrity;
     # Mihomo receives the decoded records through the private provider file.
-    return ParsedSubscription(format_name, body, tuple(records))
+    return ParsedSubscription(
+        format_name, body, tuple(records), tuple(sorted(skipped.items()))
+    )
 
 
 class V2RaySubscriptionParser(SubscriptionParser):

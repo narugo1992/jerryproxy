@@ -432,3 +432,75 @@ def test_node_label_is_bounded_far_below_the_stored_display_limit():
 
     assert len(label) == MAXIMUM_LABEL_CHARACTERS
     assert len(label.encode("utf-8")) < 512
+
+
+def test_a_mixed_container_keeps_its_supported_nodes():
+    """One unsupported protocol must not cost the whole subscription.
+
+    Providers routinely mix protocols. Rejecting the container would leave a
+    user with supported nodes unable to use any of them.
+    """
+
+    body = (
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#tokyo\n"
+        b"trojan://secret@example.invalid:443#unsupported\n"
+        b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?security=reality#osaka\n"
+        b"hysteria2://secret@example.invalid:443#also-unsupported\n"
+        b"this is not a uri\n"
+    )
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+
+    assert [record[0] for record in parsed.records] == ["ss", "vless"]
+    assert parsed.skipped == (("hysteria2", 1), ("malformed", 1), ("trojan", 1))
+    assert parsed.skipped_count == 3
+
+
+def test_a_skipped_record_is_counted_but_never_retained():
+    """The aggregate must not carry any part of a rejected line."""
+
+    body = (
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ok\n"
+        b"trojan://SUPERSECRETPASSWORD@example.invalid:443#leaky\n"
+    )
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+    rendered = "%s %s" % (parsed.describe_skipped(), parsed.skipped)
+
+    assert "SUPERSECRETPASSWORD" not in rendered
+    assert "example.invalid" not in rendered
+    assert parsed.describe_skipped() == "1 trojan"
+    # The body is retained verbatim for revision integrity, but the skipped
+    # record contributes only its scheme name to anything rendered.
+    assert b"SUPERSECRETPASSWORD" in parsed.body
+
+
+def test_an_entirely_unsupported_container_names_the_protocols():
+    """This is a support gap, and must not be reported as a format fault."""
+
+    body = b"trojan://a@example.invalid:443#x\nhysteria2://b@example.invalid:443#y\n"
+
+    with pytest.raises(SubscriptionParseError) as failure:
+        parse_subscription_body(body, format_hint="uri-lines")
+
+    message = str(failure.value)
+    assert "no supported nodes" in message
+    assert "1 hysteria2" in message and "1 trojan" in message
+    assert "ss, vmess, vless" in message
+    assert "Base64" not in message, "an unsupported protocol is not a format error"
+
+
+def test_a_body_that_is_not_a_uri_list_still_reports_a_format_error():
+    with pytest.raises(SubscriptionParseError, match="neither Base64 nor URI lines"):
+        parse_subscription_body(b"\x00\x01\x02 not text at all", format_hint="uri-lines")
+
+
+def test_a_scheme_name_in_diagnostics_is_bounded_and_shaped():
+    """A rejected line must not smuggle arbitrary text into a message."""
+
+    body = (
+        b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ok\n"
+        + b"x" * 200 + b"://payload\n"
+    )
+    parsed = parse_subscription_body(body, format_hint="uri-lines")
+    schemes = [scheme for scheme, _count in parsed.skipped]
+
+    assert all(len(scheme) <= 16 for scheme in schemes), schemes

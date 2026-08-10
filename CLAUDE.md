@@ -22,7 +22,9 @@ The canonical technical identifiers are all `jerryproxy`:
 
 The backend version manager, official release resolution, verified downloads,
 safe extraction, manifests, active-link switching, bounded
-`V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS/VMess/VLESS URI lines, and a
+`V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS/VMess/VLESS URI lines that
+keeps the supported nodes of a mixed-protocol container and reports the rest as
+a scheme-name aggregate, and a
 Mihomo `1.19.29` foreground session now exist. The public server listener is
 open on `127.0.0.1` by default, with optional generated local credentials via
 `--auth`; `--bind-all` explicitly selects `0.0.0.0`. The session keeps
@@ -332,6 +334,13 @@ authentication, extraction, process, or permission errors to warnings.
 - `jerryproxy.subscription` owns bounded source transport, URI classification,
   private revision publication, and sanitized node inventory. It must not
   normalize protocol-specific credentials/settings into a second core.
+- A URI-line container is accepted when at least one record is supported.
+  Unsupported and unreadable records are skipped, never retained beyond a
+  bounded scheme name, and reported only as aggregate scheme/count pairs
+  recomputed from the stored body rather than persisted beside it. A container
+  with no supported record is a support gap that must name the protocols found
+  and the protocols this build supports; it must not be reported as a format
+  error.
 - A node's displayed label may be derived only from the URI fragment, which is
   generic RFC 3986 syntax, never from the authority, query, or a protocol
   envelope such as the VMess Base64 payload. A record with no usable fragment

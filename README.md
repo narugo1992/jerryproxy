@@ -7,9 +7,10 @@ home directory all use the same name: `jerryproxy`.
 
 > **Work in progress:** the first runtime slice is implemented: bounded
 > `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, and VLESS URI
-> lines, sanitized home-local state, and a synchronous Mihomo 1.19.29
-> foreground server with bounded health diagnostics and bounded recovery from
-> subscription state drift. The CLI binds an open
+> lines, which keeps the supported nodes of a mixed-protocol list usable and
+> reports the rest as a sanitized aggregate, sanitized home-local state, and a
+> synchronous Mihomo 1.19.29 foreground server with bounded health diagnostics
+> and bounded recovery from subscription state drift. The CLI binds an open
 > listener to `127.0.0.1` by default; `--auth` enables generated local
 > credentials and `--bind-all` explicitly selects `0.0.0.0`. Native profiles,
 > other core drivers, and the historical `v2raycli` compatibility layer remain
@@ -49,7 +50,9 @@ Implemented now:
 - a packaged-CLI self-check with isolated local diagnostics plus bounded,
   integrity-checked availability probes for the three built-in relays;
 - bounded `V2RAY_SUBSCRIPTION` source ingestion with private state below
-  `JERRYPROXY_HOME`, stable sanitized node IDs, and SS/VMess/VLESS URI support;
+  `JERRYPROXY_HOME`, stable sanitized node IDs, SS/VMess/VLESS URI support, and
+  mixed-protocol lists reduced to their supported nodes with an aggregate
+  report of what was skipped;
 - a synchronous Mihomo 1.19.29 foreground server with an open loopback
   listener by default, one merged bounded live backend output stream labeled by
   core name (for example `[mihomo]`) with no stdout/stderr split, and bounded
@@ -494,6 +497,21 @@ interpretation with the backend; a record without a usable fragment, such as
 VMess with its Base64 payload, shows its scheme instead. Labels are decoded,
 redacted, made terminal-safe, and truncated, and they are never used to select
 a node — `--node NODE_ID` remains the exact selector.
+
+Providers routinely mix protocols in one list. A subscription is accepted when
+it carries at least one node this build supports, and the entries it cannot
+interpret are skipped rather than allowed to reject the whole container. What
+was skipped is reported as an aggregate of scheme names and counts — for
+example `Skipped: 1 hysteria2, 2 trojan (unsupported by this build)` — by
+`subscription add`, `replace`, `refresh`, `show`, and `validate`, and as a
+`skipped` array in their JSON output. Only the scheme name is retained; no part
+of a skipped line reaches output or state, and a line whose scheme cannot be
+read at all is counted as `malformed`. The summary is recomputed from the
+stored source bytes on every read rather than saved, so a later build that
+gains a protocol reports the same subscription accurately without refetching
+it. A container in which no entry is supported is a support gap, not a format
+fault, and says so: it names the protocols it found and the ones this build
+understands.
 
 A stored subscription can also drift: after an upgrade changes how the same
 source bytes are classified, the persisted nodes stop matching those bytes.

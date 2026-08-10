@@ -692,6 +692,9 @@ def test_guided_add_source_wizard_discovers_and_completes_environment_names(tmp_
         enabled = True
         node_count = 0
         nodes = ()
+        # This stub stands in for a manager that never fetched anything, so it
+        # genuinely holds no source bytes to recompute a skip summary from.
+        body = b""
 
         def public(self, include_nodes=True):
             del include_nodes
@@ -851,3 +854,53 @@ def test_guided_subscription_menu_lists_a_drifted_record(tmp_path, monkeypatch):
     # A drifted record must remain selectable, or it can never be repaired.
     assert result.exit_code == 0, result.output
     assert offered["names"] == ["main"]
+
+
+def test_mixed_protocol_subscription_reports_what_it_skipped(tmp_path):
+    """A silent skip would leave the node count unexplained."""
+
+    runner = CliRunner()
+    home = tmp_path / "home"
+    body = tmp_path / "mixed.txt"
+    body.write_text(
+        SS
+        + "trojan://secret@example.invalid:443#unsupported\n"
+        + VMESS
+        + "hysteria2://secret@example.invalid:443#also\n",
+        encoding="ascii",
+    )
+
+    added = _invoke(runner, home, "subscription", "add", "main", "--file", str(body))
+    assert added.exit_code == 0, added.output
+    assert "Nodes: 2" in added.output
+    assert "Skipped: 1 hysteria2, 1 trojan (unsupported by this build)" in added.output
+    assert "secret" not in added.output
+
+    shown = _invoke(runner, home, "subscription", "show", "main", "--json")
+    assert shown.exit_code == 0
+    value = json.loads(shown.output)
+    assert value["node_count"] == 2
+    assert value["skipped"] == [
+        {"count": 1, "scheme": "hysteria2"},
+        {"count": 1, "scheme": "trojan"},
+    ]
+
+
+def test_a_fully_unsupported_subscription_explains_the_gap(tmp_path):
+    runner = CliRunner()
+    home = tmp_path / "home"
+    body = tmp_path / "unsupported.txt"
+    body.write_text(
+        "trojan://a@example.invalid:443#x\nhysteria2://b@example.invalid:443#y\n",
+        encoding="ascii",
+    )
+
+    result = _invoke(runner, home, "subscription", "add", "main", "--file", str(body))
+
+    assert result.exit_code != 0
+    message = str(result.exception)
+    assert "no supported nodes" in message
+    assert "ss, vmess, vless" in message
+    # Naming it a format error would send the reader after a fault that is not
+    # there; this is a support gap.
+    assert "Base64" not in message
