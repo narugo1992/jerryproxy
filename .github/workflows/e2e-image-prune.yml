@@ -1,0 +1,45 @@
+name: E2E Image Prune
+
+# Bounds how many fixture image versions GHCR stores. A per-commit tag
+# accumulates one image set per build, so old versions are pruned.
+#
+# This lives outside `e2e-images.yml` on purpose. A caller's `needs:` on a
+# reusable workflow waits for *every* job in it, so a housekeeping failure there
+# made the data-plane test lane skip -- and a skipped lane looks the same as one
+# that had nothing to run. Storage cleanup must never be able to disable a test.
+
+on:
+  schedule:
+    # Weekly, off the hour so it does not pile onto the top-of-hour rush.
+    - cron: "37 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    name: Bound stored versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - jerryproxy/e2e-xray
+          - jerryproxy/e2e-sentinel
+          - jerryproxy/e2e-subscription
+          - jerryproxy/e2e-camouflage
+    steps:
+      - name: Keep the recent versions of ${{ matrix.package }}
+        uses: actions/delete-package-versions@v5
+        with:
+          # The input is `package-name`, singular: one invocation prunes one
+          # package. An earlier revision passed a comma-joined `package-names`,
+          # which the action rejected outright as an invalid input combination.
+          package-name: ${{ matrix.package }}
+          package-type: container
+          min-versions-to-keep: 10
+          delete-only-untagged-versions: false
