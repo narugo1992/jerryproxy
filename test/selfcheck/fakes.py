@@ -3,7 +3,7 @@
 import hashlib
 from types import SimpleNamespace
 
-import jerryproxy.selfcheck as selfcheck_module
+from jerryproxy.selfcheck import relay as selfcheck_module
 
 
 def relay_payload():
@@ -97,3 +97,43 @@ def verified_relay_session_factory(monkeypatch):
         hashlib.sha256(payload).hexdigest(),
     )
     return RelaySessionFactory(lambda: FakeRelayResponse(payload))
+
+
+SELFCHECK_MODULES = (
+    "backend",
+    "dependencies",
+    "environment",
+    "fixtures",
+    "processes",
+    "recovery",
+    "relay",
+    "resources",
+    "result",
+    "runner",
+    "runtime",
+    "subscription",
+)
+
+
+def patch_across_selfcheck(monkeypatch, name, value):
+    """Replace ``name`` in every self-check module that binds it.
+
+    Each module imports the helpers it uses by name, so it holds its own
+    binding. A host-wide condition such as an unsupported platform is only
+    simulated faithfully when every consumer sees the replacement.
+
+    Raises if the name is bound nowhere, so a rename cannot silently turn the
+    caller into a test that patches nothing and asserts against real behaviour.
+    """
+
+    import importlib
+
+    patched = []
+    for suffix in SELFCHECK_MODULES:
+        module = importlib.import_module("jerryproxy.selfcheck." + suffix)
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value)
+            patched.append(suffix)
+    if not patched:
+        raise AssertionError("no self-check module binds %r" % name)
+    return tuple(patched)

@@ -19,7 +19,7 @@ modules, classes, functions, or data objects.
    api_doc/home
    api_doc/lock
    api_doc/runtime/index
-   api_doc/selfcheck
+   api_doc/selfcheck/index
    api_doc/subscription/index
    api_doc/utils/index
 
@@ -32,6 +32,6 @@ modules, classes, functions, or data objects.
 * :doc:`api_doc/home`
 * :doc:`api_doc/lock`
 * :doc:`api_doc/runtime/index`
-* :doc:`api_doc/selfcheck`
+* :doc:`api_doc/selfcheck/index`
 * :doc:`api_doc/subscription/index`
 * :doc:`api_doc/utils/index`

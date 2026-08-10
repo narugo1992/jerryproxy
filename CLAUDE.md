@@ -477,6 +477,21 @@ private branch coverage or replace the normal test matrix.
   terminate, bounded join, hard kill when still alive, and final bounded join.
   A failure in one stage must be recorded but must never suppress later cleanup
   stages. Treat an unreadable liveness state as alive and attempt the hard kill.
+- `jerryproxy.selfcheck` is a package, never one flat module. Each submodule
+  owns one problem area: `result` (outcomes and the redaction boundary),
+  `environment`, `resources`, `subscription`, `runtime`, `dependencies`,
+  `backend`, `recovery`, `relay`, `fixtures` (synthetic backend archives) and
+  `processes` (bounded child supervision) for the shared probe machinery, and
+  `runner` for assembly, rendering, and the entry point. `__init__.py` only
+  re-exports the public surface. A new check belongs in the submodule that owns
+  its problem area; add a submodule rather than growing an unrelated one.
+- Self-check tests mirror that layout: `test/selfcheck/test_<module>.py` covers
+  `jerryproxy/selfcheck/<module>.py`. Module-level spawn targets live in
+  `test/selfcheck/children.py`, because a spawned child re-imports its target by
+  module path.
+- A helper imported by name is bound per module, so a test that simulates a
+  host-wide condition must replace it in every submodule that binds it and fail
+  loudly when the name is bound nowhere.
 - Report `SKIP` in cyan when a system, Python runtime, packaging mode, or failed
   prerequisite makes a check meaningless or impossible. A skip is neither a
   success claim nor an error and never changes the exit code. Do not use SKIP to

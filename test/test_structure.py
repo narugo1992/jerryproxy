@@ -139,10 +139,7 @@ def test_backend_catalog_resource_reads_stay_inside_the_data_module():
     project_root = Path(__file__).parent.parent
     catalog_source = project_root / "jerryproxy" / "backend" / "catalog.py"
     assert "from jerryproxy.data import" in catalog_source.read_text(encoding="utf-8")
-    allowed = {
-        project_root / "jerryproxy" / "data" / "__init__.py",
-        project_root / "jerryproxy" / "selfcheck.py",
-    }
+    allowed = {project_root / "jerryproxy" / "data" / "__init__.py"}
     violations = []
     for source in (project_root / "jerryproxy").rglob("*.py"):
         if source in allowed:
