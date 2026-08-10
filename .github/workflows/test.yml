@@ -139,7 +139,11 @@ jobs:
             os: macos-latest
             python: "3.14"
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # macOS unit runs were measured across twelve branches at 524s-921s
+    # against a 900s limit, so which branch timed out was luck rather than
+    # a property of its change. Sized for headroom over the slowest run
+    # observed, not trimmed to it.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
