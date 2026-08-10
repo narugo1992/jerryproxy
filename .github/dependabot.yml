@@ -39,9 +39,18 @@ updates:
       # coverage 7.3 requires >= 3.8; 7.2.7 is the newest line declaring 3.7.
       - dependency-name: coverage
         versions: [">=7.3"]
-      # tqdm 4.69 requires >= 3.8; 4.68.2 is the newest line declaring 3.7.
+      # tqdm 4.68.3 requires >= 3.8; 4.68.2 is the newest release declaring
+      # 3.7. An earlier revision of this entry said 4.69 and was wrong, which
+      # let 4.68.4 through -- take the boundary from the release that actually
+      # changed requires_python, not from the next minor.
       - dependency-name: tqdm
-        versions: [">=4.69"]
+        versions: [">=4.68.3"]
+      # pytest 8 requires >= 3.8; the 7.4 line is the newest declaring 3.7.
+      - dependency-name: pytest
+        versions: [">=8"]
+      # tabulate 0.10 requires >= 3.10; 0.9.0 is the newest declaring 3.7.
+      - dependency-name: tabulate
+        versions: [">=0.10"]
       # urllib3 2 requires >= 3.10, and the standalone build additionally
       # targets OpenSSL 1.1.0, which urllib3 2 dropped. This ignore outlives
       # the 3.7 block: remove it only when both constraints are retired.
