@@ -1,8 +1,270 @@
 {
   "backend": "v2ray",
-  "generated_at": "2026-07-07T00:22:07Z",
+  "generated_at": "2026-08-02T22:43:33Z",
   "repository": "v2fly/v2ray-core",
   "versions": [
+    {
+      "artifacts": {
+        "darwin-amd64": {
+          "archive_format": "zip",
+          "asset_id": 469180151,
+          "executable": "v2ray",
+          "name": "v2ray-macos-64.zip",
+          "sha256": "8f035fd4ff68f60144e5f29b9cc40a50e2421b154c9e0b7d91cc2adb016fca45",
+          "size": 19429408,
+          "updated_at": "2026-07-07T13:04:28Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-macos-64.zip",
+          "verification": "github-release-digest"
+        },
+        "darwin-arm64": {
+          "archive_format": "zip",
+          "asset_id": 469179226,
+          "executable": "v2ray",
+          "name": "v2ray-macos-arm64-v8a.zip",
+          "sha256": "0763f1c00b78741f0847536177b5a8902cc366c3f9c7b4d08a7c90fff671f186",
+          "size": 18286099,
+          "updated_at": "2026-07-07T13:03:19Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-macos-arm64-v8a.zip",
+          "verification": "github-release-digest"
+        },
+        "freebsd-386": {
+          "archive_format": "zip",
+          "asset_id": 469179734,
+          "executable": "v2ray",
+          "name": "v2ray-freebsd-32.zip",
+          "sha256": "821e0d4290c2a1f4c373cf49dbdfd455ab4f42c460e2a209cfdf109321df18e9",
+          "size": 18159629,
+          "updated_at": "2026-07-07T13:04:01Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-freebsd-32.zip",
+          "verification": "github-release-digest"
+        },
+        "freebsd-amd64": {
+          "archive_format": "zip",
+          "asset_id": 469178650,
+          "executable": "v2ray",
+          "name": "v2ray-freebsd-64.zip",
+          "sha256": "c64e55166903be342d655f981baa39bcf802e45de0a6306ed2e5749a10e08467",
+          "size": 19053818,
+          "updated_at": "2026-07-07T13:02:30Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-freebsd-64.zip",
+          "verification": "github-release-digest"
+        },
+        "freebsd-arm64": {
+          "archive_format": "zip",
+          "asset_id": 469178902,
+          "executable": "v2ray",
+          "name": "v2ray-freebsd-arm64-v8a.zip",
+          "sha256": "03a0c4ca725127d9b82893d2fae06c1e42cb377877ef2922b55aaeeea2fa8a29",
+          "size": 17623432,
+          "updated_at": "2026-07-07T13:02:53Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-freebsd-arm64-v8a.zip",
+          "verification": "github-release-digest"
+        },
+        "freebsd-armv6": {
+          "archive_format": "zip",
+          "asset_id": 469178640,
+          "executable": "v2ray",
+          "name": "v2ray-freebsd-arm32-v6.zip",
+          "sha256": "bb6df6d6f16367c12979c26e7ab603f44c3833124dceae5aaf46db3c2979b57c",
+          "size": 18103174,
+          "updated_at": "2026-07-07T13:02:29Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-freebsd-arm32-v6.zip",
+          "verification": "github-release-digest"
+        },
+        "freebsd-armv7": {
+          "archive_format": "zip",
+          "asset_id": 469180042,
+          "executable": "v2ray",
+          "name": "v2ray-freebsd-arm32-v7a.zip",
+          "sha256": "0a22ee8454301aaa3744b8db554b28bc614788c3e0f1e0f7f6c82558da0d63ea",
+          "size": 18083133,
+          "updated_at": "2026-07-07T13:04:21Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-freebsd-arm32-v7a.zip",
+          "verification": "github-release-digest"
+        },
+        "linux-386": {
+          "archive_format": "zip",
+          "asset_id": 469178562,
+          "executable": "v2ray",
+          "name": "v2ray-linux-32.zip",
+          "sha256": "6e9050cd20200c08f5b50ad4a4e6df9da5c065d88f3841f4b1829ffebad049d5",
+          "size": 18234594,
+          "updated_at": "2026-07-07T13:02:23Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-linux-32.zip",
+          "verification": "github-release-digest"
+        },
+        "linux-amd64": {
+          "archive_format": "zip",
+          "asset_id": 469178750,
+          "executable": "v2ray",
+          "name": "v2ray-linux-64.zip",
+          "sha256": "98b123c0f3ba1138eedc2be9b25935e5289236cb6800d1e6370a08d86e797177",
+          "size": 19223970,
+          "updated_at": "2026-07-07T13:02:38Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-linux-64.zip",
+          "verification": "github-release-digest"
+        },
+        "linux-arm64": {
+          "archive_format": "zip",
+          "asset_id": 469178857,
+          "executable": "v2ray",
+          "name": "v2ray-linux-arm64-v8a.zip",
+          "sha256": "bd87731c32d429eb6986f2a7484b4a78bfc1be4a4de1e25901265c52aa854970",
+          "size": 17782849,
+          "updated_at": "2026-07-07T13:02:48Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-linux-arm64-v8a.zip",
+          "verification": "github-release-digest"
+        },
+        "linux-armv5": {
+          "archive_format": "zip",
+          "asset_id": 469178795,
+          "executable": "v2ray",
+          "name": "v2ray-linux-arm32-v5.zip",
+          "sha256": "e8eba50685ee4c13cd699bb5672affef4a4c07470e10b594c457f4e1d5e586e1",
+          "size": 18165008,
+          "updated_at": "2026-07-07T13:02:42Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-linux-arm32-v5.zip",
+          "verification": "github-release-digest"
+        },
+        "linux-armv6": {
+          "archive_format": "zip",
+          "asset_id": 469179809,
+          "executable": "v2ray",
+          "name": "v2ray-linux-arm32-v6.zip",
+          "sha256": "c28a21dd200732929c37bcb98d2a7e58f7a855c5614f6a74fc62551badd3a8b5",
+          "size": 18156319,
+          "updated_at": "2026-07-07T13:04:05Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-linux-arm32-v6.zip",
+          "verification": "github-release-digest"
+        },
+        "linux-armv7": {
+          "archive_format": "zip",
+          "asset_id": 469179723,
+          "executable": "v2ray",
+          "name": "v2ray-linux-arm32-v7a.zip",
+          "sha256": "569e84b2ec3a461da30329dbbd46311bdeb0da0079a85552d819877850552fe5",
+          "size": 18138223,
+          "updated_at": "2026-07-07T13:03:59Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-linux-arm32-v7a.zip",
+          "verification": "github-release-digest"
+        },
+        "linux-loong64": {
+          "archive_format": "zip",
+          "asset_id": 469178275,
+          "executable": "v2ray",
+          "name": "v2ray-linux-loong64.zip",
+          "sha256": "1e36b4e54c25555787b3d58d12ecb1c2abcd3f31ed85053587c40c501785f230",
+          "size": 18266607,
+          "updated_at": "2026-07-07T13:02:05Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-linux-loong64.zip",
+          "verification": "github-release-digest"
+        },
+        "linux-riscv64": {
+          "archive_format": "zip",
+          "asset_id": 469179646,
+          "executable": "v2ray",
+          "name": "v2ray-linux-riscv64.zip",
+          "sha256": "64dd5b59682d88083e6eea6ef246acccee836b5d1c724b9ef5e349238edddcf1",
+          "size": 18123022,
+          "updated_at": "2026-07-07T13:03:54Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-linux-riscv64.zip",
+          "verification": "github-release-digest"
+        },
+        "openbsd-386": {
+          "archive_format": "zip",
+          "asset_id": 469178882,
+          "executable": "v2ray",
+          "name": "v2ray-openbsd-32.zip",
+          "sha256": "de70fb9a367d0ce653aa154327c116d4d7b6b419775f2476a584913a33c95412",
+          "size": 18083414,
+          "updated_at": "2026-07-07T13:02:52Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-openbsd-32.zip",
+          "verification": "github-release-digest"
+        },
+        "openbsd-amd64": {
+          "archive_format": "zip",
+          "asset_id": 469178908,
+          "executable": "v2ray",
+          "name": "v2ray-openbsd-64.zip",
+          "sha256": "21f24020d2cf4f2088d02b0b13f5a91ee196aea1141d5cbde9d3753072bb5565",
+          "size": 18974390,
+          "updated_at": "2026-07-07T13:02:54Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-openbsd-64.zip",
+          "verification": "github-release-digest"
+        },
+        "openbsd-arm64": {
+          "archive_format": "zip",
+          "asset_id": 469179893,
+          "executable": "v2ray",
+          "name": "v2ray-openbsd-arm64-v8a.zip",
+          "sha256": "31518bf28bc5a4b7266c48bd33b8a709cb1d4d33722aafa034494c393d6d99fb",
+          "size": 17556878,
+          "updated_at": "2026-07-07T13:04:11Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-openbsd-arm64-v8a.zip",
+          "verification": "github-release-digest"
+        },
+        "openbsd-armv6": {
+          "archive_format": "zip",
+          "asset_id": 469179813,
+          "executable": "v2ray",
+          "name": "v2ray-openbsd-arm32-v6.zip",
+          "sha256": "83fa16ebf5d14c1c63dd205fe016947ef82e8140e160bf050752244e5af97e0b",
+          "size": 18025361,
+          "updated_at": "2026-07-07T13:04:05Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-openbsd-arm32-v6.zip",
+          "verification": "github-release-digest"
+        },
+        "openbsd-armv7": {
+          "archive_format": "zip",
+          "asset_id": 469178957,
+          "executable": "v2ray",
+          "name": "v2ray-openbsd-arm32-v7a.zip",
+          "sha256": "95af3cfa8b53857bc70219ab740bf103a749be2eb3c67e61d5537548d76596b6",
+          "size": 18006224,
+          "updated_at": "2026-07-07T13:02:58Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-openbsd-arm32-v7a.zip",
+          "verification": "github-release-digest"
+        },
+        "windows-386": {
+          "archive_format": "zip",
+          "asset_id": 469178925,
+          "executable": "v2ray.exe",
+          "name": "v2ray-windows-32.zip",
+          "sha256": "b992970dcf946380d0fad62274b84d6b424788c9e2b7049de6cae41fb71321c1",
+          "size": 18655612,
+          "updated_at": "2026-07-07T13:02:55Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-windows-32.zip",
+          "verification": "github-release-digest"
+        },
+        "windows-amd64": {
+          "archive_format": "zip",
+          "asset_id": 469179906,
+          "executable": "v2ray.exe",
+          "name": "v2ray-windows-64.zip",
+          "sha256": "a73b01d1dbfe054b260e37a79ca13b12b6549dbd1827a44f0bcaa113e990cc9d",
+          "size": 19282241,
+          "updated_at": "2026-07-07T13:04:12Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-windows-64.zip",
+          "verification": "github-release-digest"
+        },
+        "windows-arm64": {
+          "archive_format": "zip",
+          "asset_id": 469178702,
+          "executable": "v2ray.exe",
+          "name": "v2ray-windows-arm64-v8a.zip",
+          "sha256": "11092b68fb518ce5136fd84e727bf41fd6bc179ee59283a6660249e83e6237ec",
+          "size": 17663051,
+          "updated_at": "2026-07-07T13:02:33Z",
+          "url": "https://github.com/v2fly/v2ray-core/releases/download/v5.52.0/v2ray-windows-arm64-v8a.zip",
+          "verification": "github-release-digest"
+        }
+      },
+      "published_at": "2026-07-07T13:00:47Z",
+      "release_id": 350287023,
+      "release_url": "https://github.com/v2fly/v2ray-core/releases/tag/v5.52.0",
+      "tag": "v5.52.0",
+      "version": "5.52.0"
+    },
     {
       "artifacts": {
         "darwin-amd64": {
