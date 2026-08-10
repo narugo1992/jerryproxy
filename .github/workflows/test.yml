@@ -224,8 +224,8 @@ jobs:
     # in a registry. Building them here would be too late.
     #
     # A fork's token is read-only by design, so it cannot publish. The data
-    # plane is skipped there rather than failing the fork's CI, and the gate
-    # below accepts that only for a fork.
+    # plane is skipped there rather than failing the fork's CI, which the
+    # `data-plane-gate` job at the end of this file accepts only for a fork.
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
     uses: ./.github/workflows/e2e-images.yml
     permissions:
@@ -411,3 +411,34 @@ jobs:
             docker logs --tail 120 "$id" 2>&1 | sed -f /tmp/redact.sed | head -c 20000
           done
           rm -f /tmp/e2e-secrets /tmp/redact.sed
+
+  data-plane-gate:
+    name: Data plane ran
+    needs: [unit-data-plane]
+    # Must observe a skipped or failed upstream, so it cannot itself be skipped.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require that the data-plane lane actually ran
+        env:
+          RESULT: ${{ needs.unit-data-plane.result }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+        run: |
+          set -euo pipefail
+          # A skipped lane and a lane with nothing to report look identical in
+          # the run summary, and that is how a housekeeping failure in the image
+          # workflow silently disabled every data-plane assertion on main. This
+          # job exists so that silence fails instead.
+          if [ "$RESULT" = "success" ]; then
+            echo "data-plane lane ran and passed"
+            exit 0
+          fi
+          if [ "$IS_FORK" = "true" ] && [ "$RESULT" = "skipped" ]; then
+            # A fork's token cannot publish fixture images, so the lane has no
+            # images to consume. This is the only accepted reason to skip.
+            echo "::notice::data-plane lane skipped for a fork pull request"
+            exit 0
+          fi
+          echo "::error::data-plane lane result was '$RESULT'; it must run and pass outside fork pull requests" >&2
+          exit 1

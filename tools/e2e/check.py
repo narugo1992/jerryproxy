@@ -30,6 +30,7 @@ import xray_entrypoint  # noqa: E402 - path is set immediately above
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKFLOW = os.path.join(HERE, "..", "..", ".github", "workflows", "test.yml")
+IMAGE_WORKFLOW = os.path.join(HERE, "..", "..", ".github", "workflows", "e2e-images.yml")
 IMAGES = os.path.join(HERE, "images")
 PRIVATE_ONLY_SERVICES = ("sentinel", "camouflage")
 
@@ -205,6 +206,48 @@ def _check_enforcement_is_declared():  # type: () -> list
     return failures
 
 
+def _check_the_lane_cannot_skip_silently():  # type: () -> list
+    """A skipped data-plane lane must fail, not look like it had nothing to do.
+
+    A housekeeping job inside the image workflow once failed, and because a
+    caller's ``needs:`` waits for every job in a reusable workflow, the whole
+    data-plane lane skipped while the run still read as green. Silence has to
+    be an error, so the gate that turns it into one must exist.
+    """
+
+    text = _workflow()
+    failures = []
+    gate = re.search(r"^  data-plane-gate:\n((?:    .*\n|\n)*)", text, re.MULTILINE)
+    if gate is None:
+        return ["the workflow has no data-plane-gate job, so a skipped lane reads as success"]
+    block = gate.group(1)
+    if "if: always()" not in block:
+        failures.append("data-plane-gate is not always(), so it skips with the lane it guards")
+    if "needs: [unit-data-plane]" not in block:
+        failures.append("data-plane-gate does not depend on unit-data-plane")
+    if "exit 1" not in block:
+        failures.append("data-plane-gate never fails, so it asserts nothing")
+    return failures
+
+
+def _check_housekeeping_cannot_gate_the_lane():  # type: () -> list
+    """The image workflow may only contain the job the lane consumes.
+
+    ``needs:`` on a reusable workflow waits for all of its jobs, so any extra
+    job there can veto the tests. Storage pruning belongs in its own workflow.
+    """
+
+    with open(IMAGE_WORKFLOW, "r", encoding="utf-8") as stream:
+        text = stream.read()
+    jobs = re.findall(r"^  ([a-z][a-z0-9-]*):$", text, re.MULTILINE)
+    extra = [name for name in jobs if name != "publish"]
+    return [
+        "the image workflow also defines %r, which a caller's needs: would wait "
+        "for -- a failure there would veto the data-plane lane" % name
+        for name in extra
+    ]
+
+
 def _check_images_get_what_they_require():  # type: () -> list
     """Each proxy service must supply the variables its entrypoint demands.
 
@@ -249,6 +292,8 @@ def main():  # type: () -> int
         ("workflow references only real outputs", _check_workflow_matches_the_provisioner()),
         ("the data-plane step demands the contract", _check_enforcement_is_declared()),
         ("services supply what their images require", _check_images_get_what_they_require()),
+        ("a skipped data-plane lane fails", _check_the_lane_cannot_skip_silently()),
+        ("housekeeping cannot gate the lane", _check_housekeeping_cannot_gate_the_lane()),
     )
     failed = False
     for label, failures in checks:

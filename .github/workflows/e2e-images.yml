@@ -144,26 +144,3 @@ jobs:
             printf '%s=%s/e2e-%s@%s\n' "$name" "$base" "$name" "$digest" >> "$GITHUB_OUTPUT"
             printf '%-13s %s\n' "$name" "$digest"
           done
-
-  prune:
-    name: Bound stored versions
-    needs: publish
-    # Only on main: a pull request's images are needed until the branch is done.
-    if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
-    permissions:
-      packages: write
-    steps:
-      - name: Keep the recent versions and delete the rest
-        uses: actions/delete-package-versions@v5
-        with:
-          # A per-commit tag accumulates one image set per build, so old
-          # versions are pruned rather than allowed to grow without bound.
-          package-names: >-
-            jerryproxy/e2e-xray,
-            jerryproxy/e2e-sentinel,
-            jerryproxy/e2e-subscription,
-            jerryproxy/e2e-camouflage
-          package-type: container
-          min-versions-to-keep: 10
-          delete-only-untagged-versions: false
