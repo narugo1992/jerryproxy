@@ -29,6 +29,7 @@ jobs:
       matrix:
         package:
           - jerryproxy/e2e-xray
+          - jerryproxy/e2e-singbox
           - jerryproxy/e2e-sentinel
           - jerryproxy/e2e-subscription
           - jerryproxy/e2e-camouflage

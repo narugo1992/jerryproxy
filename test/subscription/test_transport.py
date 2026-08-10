@@ -14,6 +14,7 @@ from jerryproxy.subscription import (
     mihomo_parser_identity,
     subscription_field_disposition_manifest,
 )
+from jerryproxy.subscription.audit import SUPPORTED_SCHEMES
 from jerryproxy.subscription.manager import SubscriptionManager
 from jerryproxy.subscription.transport import (
     MAXIMUM_LABEL_CHARACTERS,
@@ -69,11 +70,11 @@ def test_field_manifest_is_auditable_and_credential_free():
     manifest = field_disposition_manifest()
     assert manifest == subscription_field_disposition_manifest()
     assert manifest["identity"]["version"] == "1.19.29"
-    assert manifest["protocols"] == {
-        "ss": "opaque-forwarded-to-mihomo",
-        "vmess": "opaque-forwarded-to-mihomo",
-        "vless": "opaque-forwarded-to-mihomo",
-    }
+    # Derived from the one allowlist rather than restated, and checked to cover
+    # every scheme so narrowing the allowlist cannot quietly narrow this too.
+    assert set(manifest["protocols"]) == set(SUPPORTED_SCHEMES)
+    assert set(manifest["protocols"].values()) == {"opaque-forwarded-to-mihomo"}
+    assert not set(manifest["protocols"]) & set(manifest["unsafe"]["rejected_protocols"])
     assert manifest["provider"]["uri"] == "preserve"
     assert manifest["semantic_authority"]["owner"] == "mihomo"
     assert manifest["unsafe"]["credential_material"] == "private-only"
@@ -443,15 +444,15 @@ def test_a_mixed_container_keeps_its_supported_nodes():
 
     body = (
         b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#tokyo\n"
-        b"trojan://secret@example.invalid:443#unsupported\n"
+        b"ssr://cGFzc3dvcmQ\n"
         b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?security=reality#osaka\n"
-        b"hysteria2://secret@example.invalid:443#also-unsupported\n"
+        b"wireguard://secret@example.invalid:51820#also-unsupported\n"
         b"this is not a uri\n"
     )
     parsed = parse_subscription_body(body, format_hint="uri-lines")
 
     assert [record[0] for record in parsed.records] == ["ss", "vless"]
-    assert parsed.skipped == (("hysteria2", 1), ("malformed", 1), ("trojan", 1))
+    assert parsed.skipped == (("malformed", 1), ("ssr", 1), ("wireguard", 1))
     assert parsed.skipped_count == 3
 
 
@@ -460,14 +461,14 @@ def test_a_skipped_record_is_counted_but_never_retained():
 
     body = (
         b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ok\n"
-        b"trojan://SUPERSECRETPASSWORD@example.invalid:443#leaky\n"
+        b"wireguard://SUPERSECRETPASSWORD@example.invalid:51820#leaky\n"
     )
     parsed = parse_subscription_body(body, format_hint="uri-lines")
     rendered = "%s %s" % (parsed.describe_skipped(), parsed.skipped)
 
     assert "SUPERSECRETPASSWORD" not in rendered
     assert "example.invalid" not in rendered
-    assert parsed.describe_skipped() == "1 trojan"
+    assert parsed.describe_skipped() == "1 wireguard"
     # The body is retained verbatim for revision integrity, but the skipped
     # record contributes only its scheme name to anything rendered.
     assert b"SUPERSECRETPASSWORD" in parsed.body
@@ -476,15 +477,15 @@ def test_a_skipped_record_is_counted_but_never_retained():
 def test_an_entirely_unsupported_container_names_the_protocols():
     """This is a support gap, and must not be reported as a format fault."""
 
-    body = b"trojan://a@example.invalid:443#x\nhysteria2://b@example.invalid:443#y\n"
+    body = b"ssr://YWJj\nwireguard://b@example.invalid:51820#y\nwireguard://c@example.invalid:51821#z\n"
 
     with pytest.raises(SubscriptionParseError) as failure:
         parse_subscription_body(body, format_hint="uri-lines")
 
     message = str(failure.value)
     assert "no supported nodes" in message
-    assert "1 hysteria2" in message and "1 trojan" in message
-    assert "ss, vmess, vless" in message
+    assert "1 ssr" in message and "2 wireguard" in message
+    assert "trojan" in message, "the message must list what this build does support"
     assert "Base64" not in message, "an unsupported protocol is not a format error"
 
 

@@ -62,13 +62,6 @@ READ\_TIMEOUT
    :no-value:
 
 
-SUPPORTED\_SCHEMES
------------------------------------------------------
-
-.. autodata:: SUPPORTED_SCHEMES
-   :no-value:
-
-
 MIHOMO\_SUBSCRIPTION\_PARSER
 -----------------------------------------------------
 

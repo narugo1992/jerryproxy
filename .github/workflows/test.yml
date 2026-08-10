@@ -199,6 +199,19 @@ jobs:
       ss_node: ${{ steps.generate.outputs.ss_node }}
       vmess_node: ${{ steps.generate.outputs.vmess_node }}
       vless_node: ${{ steps.generate.outputs.vless_node }}
+      trojan_password: ${{ steps.generate.outputs.trojan_password }}
+      hysteria2_password: ${{ steps.generate.outputs.hysteria2_password }}
+      tuic_uuid: ${{ steps.generate.outputs.tuic_uuid }}
+      tuic_password: ${{ steps.generate.outputs.tuic_password }}
+      anytls_password: ${{ steps.generate.outputs.anytls_password }}
+      tls_certificate: ${{ steps.generate.outputs.tls_certificate }}
+      tls_key: ${{ steps.generate.outputs.tls_key }}
+      tls_server_name: ${{ steps.generate.outputs.tls_server_name }}
+      trojan_node: ${{ steps.generate.outputs.trojan_node }}
+      hysteria2_node: ${{ steps.generate.outputs.hysteria2_node }}
+      hy2_node: ${{ steps.generate.outputs.hy2_node }}
+      tuic_node: ${{ steps.generate.outputs.tuic_node }}
+      anytls_node: ${{ steps.generate.outputs.anytls_node }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -336,6 +349,78 @@ jobs:
         options: >-
           --health-cmd "nc -z 127.0.0.1 10003"
           --health-interval 3s --health-retries 20 --health-start-period 3s
+      trojan-server:
+        image: ${{ needs.e2e-images.outputs.xray }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        ports:
+          - 10004:10004
+        env:
+          E2E_PROTOCOL: trojan
+          E2E_PORT: "10004"
+          E2E_TROJAN_PASSWORD: ${{ needs.provision.outputs.trojan_password }}
+          E2E_TLS_SERVER_NAME: ${{ needs.provision.outputs.tls_server_name }}
+          E2E_TLS_CERTIFICATE: ${{ needs.provision.outputs.tls_certificate }}
+          E2E_TLS_KEY: ${{ needs.provision.outputs.tls_key }}
+        options: >-
+          --health-cmd "nc -z 127.0.0.1 10004"
+          --health-interval 3s --health-retries 20 --health-start-period 3s
+      # Hysteria2, TUIC, and AnyTLS run on sing-box: Xray's exact validator
+      # rejects all three outright, so the Xray fixture cannot serve them.
+      # All three are QUIC-based, so their ports must be published for UDP.
+      hysteria2-server:
+        image: ${{ needs.e2e-images.outputs.singbox }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        ports:
+          - 10005:10005/udp
+        env:
+          E2E_PROTOCOL: hysteria2
+          E2E_PORT: "10005"
+          E2E_HYSTERIA2_PASSWORD: ${{ needs.provision.outputs.hysteria2_password }}
+          E2E_TLS_SERVER_NAME: ${{ needs.provision.outputs.tls_server_name }}
+          E2E_TLS_CERTIFICATE: ${{ needs.provision.outputs.tls_certificate }}
+          E2E_TLS_KEY: ${{ needs.provision.outputs.tls_key }}
+        options: >-
+          --health-cmd "test -f /tmp/singbox-config.json"
+          --health-interval 3s --health-retries 20 --health-start-period 3s
+      tuic-server:
+        image: ${{ needs.e2e-images.outputs.singbox }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        ports:
+          - 10006:10006/udp
+        env:
+          E2E_PROTOCOL: tuic
+          E2E_PORT: "10006"
+          E2E_TUIC_UUID: ${{ needs.provision.outputs.tuic_uuid }}
+          E2E_TUIC_PASSWORD: ${{ needs.provision.outputs.tuic_password }}
+          E2E_TLS_SERVER_NAME: ${{ needs.provision.outputs.tls_server_name }}
+          E2E_TLS_CERTIFICATE: ${{ needs.provision.outputs.tls_certificate }}
+          E2E_TLS_KEY: ${{ needs.provision.outputs.tls_key }}
+        options: >-
+          --health-cmd "test -f /tmp/singbox-config.json"
+          --health-interval 3s --health-retries 20 --health-start-period 3s
+      anytls-server:
+        image: ${{ needs.e2e-images.outputs.singbox }}
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        ports:
+          - 10007:10007
+        env:
+          E2E_PROTOCOL: anytls
+          E2E_PORT: "10007"
+          E2E_ANYTLS_PASSWORD: ${{ needs.provision.outputs.anytls_password }}
+          E2E_TLS_SERVER_NAME: ${{ needs.provision.outputs.tls_server_name }}
+          E2E_TLS_CERTIFICATE: ${{ needs.provision.outputs.tls_certificate }}
+          E2E_TLS_KEY: ${{ needs.provision.outputs.tls_key }}
+        options: >-
+          --health-cmd "nc -z 127.0.0.1 10007"
+          --health-interval 3s --health-retries 20 --health-start-period 3s
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -365,6 +450,11 @@ jobs:
           JERRYPROXY_E2E_SS_NODE: ${{ needs.provision.outputs.ss_node }}
           JERRYPROXY_E2E_VMESS_NODE: ${{ needs.provision.outputs.vmess_node }}
           JERRYPROXY_E2E_VLESS_NODE: ${{ needs.provision.outputs.vless_node }}
+          JERRYPROXY_E2E_TROJAN_NODE: ${{ needs.provision.outputs.trojan_node }}
+          JERRYPROXY_E2E_HYSTERIA2_NODE: ${{ needs.provision.outputs.hysteria2_node }}
+          JERRYPROXY_E2E_HY2_NODE: ${{ needs.provision.outputs.hy2_node }}
+          JERRYPROXY_E2E_TUIC_NODE: ${{ needs.provision.outputs.tuic_node }}
+          JERRYPROXY_E2E_ANYTLS_NODE: ${{ needs.provision.outputs.anytls_node }}
           JERRYPROXY_E2E_PUBLIC_PROBES: https://www.gstatic.com/generate_204,https://cloudflare.com/cdn-cgi/trace
           JERRYPROXY_E2E_ENFORCE: "1"
         run: >-
@@ -398,13 +488,25 @@ jobs:
           R_ss_node: ${{ needs.provision.outputs.ss_node }}
           R_vmess_node: ${{ needs.provision.outputs.vmess_node }}
           R_vless_node: ${{ needs.provision.outputs.vless_node }}
+          R_trojan_password: ${{ needs.provision.outputs.trojan_password }}
+          R_hysteria2_password: ${{ needs.provision.outputs.hysteria2_password }}
+          R_tuic_uuid: ${{ needs.provision.outputs.tuic_uuid }}
+          R_tuic_password: ${{ needs.provision.outputs.tuic_password }}
+          R_anytls_password: ${{ needs.provision.outputs.anytls_password }}
+          R_tls_key: ${{ needs.provision.outputs.tls_key }}
+          R_trojan_node: ${{ needs.provision.outputs.trojan_node }}
+          R_hysteria2_node: ${{ needs.provision.outputs.hysteria2_node }}
+          R_hy2_node: ${{ needs.provision.outputs.hy2_node }}
+          R_tuic_node: ${{ needs.provision.outputs.tuic_node }}
+          R_anytls_node: ${{ needs.provision.outputs.anytls_node }}
         run: |
           set -uo pipefail
           umask 077
           : > /tmp/e2e-secrets
           env | sed -n 's/^R_//p' >> /tmp/e2e-secrets
           python tools/e2e/redact.py --env-file /tmp/e2e-secrets --output /tmp/redact.sed
-          for name in sentinel camouflage subscription ss-server vmess-server vless-server; do
+          for name in sentinel camouflage subscription ss-server vmess-server \
+                      vless-server trojan-server hysteria2-server tuic-server anytls-server; do
             id=$(docker ps -a --filter "name=$name" --format '{{.ID}}' | head -1)
             [ -n "$id" ] || continue
             echo "===== $name ====="

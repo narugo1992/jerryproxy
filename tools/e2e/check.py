@@ -26,7 +26,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from test.e2e import _contract as contract  # noqa: E402 - path is set immediately above
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "images"))
+import singbox_entrypoint  # noqa: E402 - path is set immediately above
 import xray_entrypoint  # noqa: E402 - path is set immediately above
+
+from jerryproxy.subscription.audit import SUPPORTED_SCHEMES  # noqa: E402 - see above
+
+ENTRYPOINTS = {"xray_entrypoint": xray_entrypoint, "singbox_entrypoint": singbox_entrypoint}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKFLOW = os.path.join(HERE, "..", "..", ".github", "workflows", "test.yml")
@@ -52,6 +57,31 @@ SUPPLIED_SECRETS = {
         "vless://abcdef12-3456-7890-abcd-ef1234567890@127.0.0.1:10003"
         "?type=tcp&security=reality&pbk=SYNTHETICREALITYPUBLICKEYSAMPLEV&sid=0f1e2d3c4b5a6978#e2e"
     ),
+    "trojan_password": "SYNTHETICTROJANPASSWORDSAMPLE",
+    "hysteria2_password": "SYNTHETICHYSTERIA2PASSWORDSAMP",
+    "tuic_uuid": "fedcba98-7654-3210-fedc-ba9876543210",
+    "tuic_password": "SYNTHETICTUICPASSWORDSAMPLE",
+    "anytls_password": "SYNTHETICANYTLSPASSWORDSAMPLE",
+    "tls_key": "U1lOVEhFVElDUFJJVkFURUtFWU1BVEVSSUFMU0FNUExF",
+    "trojan_node": "trojan://SYNTHETICTROJANPASSWORDSAMPLE@127.0.0.1:10004?sni=fixture.invalid#e2e",
+    "hysteria2_node": "hysteria2://SYNTHETICHYSTERIA2PASSWORDSAMP@127.0.0.1:10005?sni=fixture.invalid#e2e",
+    "hy2_node": "hy2://SYNTHETICHYSTERIA2PASSWORDSAMP@127.0.0.1:10005?sni=fixture.invalid#e2e",
+    "tuic_node": (
+        "tuic://fedcba98-7654-3210-fedc-ba9876543210:SYNTHETICTUICPASSWORDSAMPLE"
+        "@127.0.0.1:10006?sni=fixture.invalid&alpn=h3#e2e"
+    ),
+    "anytls_node": "anytls://SYNTHETICANYTLSPASSWORDSAMPLE@127.0.0.1:10007?sni=fixture.invalid#e2e",
+}
+
+# Every proxy service, and the entrypoint module that renders its inbound.
+PROXY_SERVICES = {
+    "ss-server": "xray_entrypoint",
+    "vmess-server": "xray_entrypoint",
+    "vless-server": "xray_entrypoint",
+    "trojan-server": "xray_entrypoint",
+    "hysteria2-server": "singbox_entrypoint",
+    "tuic-server": "singbox_entrypoint",
+    "anytls-server": "singbox_entrypoint",
 }
 
 
@@ -259,7 +289,7 @@ def _check_images_get_what_they_require():  # type: () -> list
 
     text = _workflow()
     failures = []
-    for service in ("ss-server", "vmess-server", "vless-server"):
+    for service in sorted(PROXY_SERVICES):
         block = _service_block(text, service)
         if not block:
             failures.append("service %s is missing from the workflow" % service)
@@ -269,7 +299,8 @@ def _check_images_get_what_they_require():  # type: () -> list
         if protocol is None:
             failures.append("service %s does not declare E2E_PROTOCOL" % service)
             continue
-        builder = xray_entrypoint.BUILDERS.get(protocol.group(1))
+        module = ENTRYPOINTS[PROXY_SERVICES[service]]
+        builder = module.BUILDERS.get(protocol.group(1))
         if builder is None:
             failures.append("service %s declares an unknown protocol" % service)
             continue
@@ -279,6 +310,37 @@ def _check_images_get_what_they_require():  # type: () -> list
             for name in sorted(set(needed) | {"E2E_PROTOCOL"} - supplied)
             if name not in supplied
         )
+    return failures
+
+
+def _check_every_supported_scheme_has_a_fixture():  # type: () -> list
+    """A scheme the product accepts must be proved to carry traffic.
+
+    Widening the product allowlist without a fixture would turn "measured to
+    work" back into "assumed to work", which is the whole reason this lane
+    exists. Each scheme needs a node variable the tests can select, and each
+    variable needs a provisioned value that the workflow injects.
+    """
+
+    failures = []
+    text = _workflow()
+    for scheme in SUPPORTED_SCHEMES:
+        variable = contract.NODE_VARIABLES.get(scheme)
+        if variable is None:
+            failures.append(
+                "the product accepts %s:// but the data-plane lane has no node for it, so "
+                "nothing proves it carries traffic" % scheme
+            )
+            continue
+        if variable not in text:
+            failures.append("the workflow never supplies %s" % variable)
+        expected = "%s_node" % scheme
+        if expected not in provision.OUTPUT_NAMES:
+            failures.append("the provisioner emits no %s for %s://" % (expected, scheme))
+    extra = sorted(set(contract.NODE_VARIABLES) - set(SUPPORTED_SCHEMES))
+    failures.extend(
+        "the lane tests %s://, which the product no longer accepts" % scheme for scheme in extra
+    )
     return failures
 
 
@@ -294,6 +356,10 @@ def main():  # type: () -> int
         ("services supply what their images require", _check_images_get_what_they_require()),
         ("a skipped data-plane lane fails", _check_the_lane_cannot_skip_silently()),
         ("housekeeping cannot gate the lane", _check_housekeeping_cannot_gate_the_lane()),
+        (
+            "every supported scheme has a fixture",
+            _check_every_supported_scheme_has_a_fixture(),
+        ),
     )
     failed = False
     for label, failures in checks:

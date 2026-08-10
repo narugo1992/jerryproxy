@@ -1,11 +1,45 @@
 """Credential-free, source-pinned audit metadata for Mihomo NodeSets.
 
 JerryProxy bounds and classifies the outer URI-line container only.  Mihomo
-owns every SS, VMess, and VLESS semantic decision at runtime.  This manifest
-records that ownership boundary without duplicating protocol fields.
+owns every protocol semantic decision at runtime.  This manifest records that
+ownership boundary without duplicating protocol fields.
+
+The protocol lists are derived from the transport allowlist rather than written
+out again here.  Two hand-maintained copies drifted once already: `hysteria`
+was listed as rejected while the allowlist admitted it.
 """
 
 from copy import deepcopy
+
+# Encrypted proxy schemes whose URI lines the qualified Mihomo release was
+# measured to parse into a usable proxy. Membership is an observation, not an
+# aspiration: `ssr://`, `wireguard://`, and the token-only `tuic://` dialect were
+# measured to be dropped, so they stay out and are reported through the skip
+# aggregate. Hysteria v1 is also absent: the backend loads it, but upstream has
+# replaced it with v2, real subscriptions have effectively stopped shipping it,
+# and supporting a protocol without a fixture proving it carries traffic is the
+# claim this list exists to avoid.
+#
+# `http://` and `socks5://` are deliberately absent even though Mihomo does load
+# them. They carry no encryption, so harvesting them out of a provider-controlled
+# body is a poor default for a tool whose purpose is protecting traffic; and
+# `http://` is also the scheme of a subscription source URL, so accepting it as a
+# node would let an error page or a plain URL list be reported as N usable nodes.
+# A deliberate plaintext proxy belongs in an explicit single-node input.
+#
+# JerryProxy still parses none of these. It forwards the URI verbatim, and the
+# runtime session refuses to report readiness unless the backend confirms it
+# accepted that exact line -- which is what makes widening this list safe.
+SUPPORTED_SCHEMES = (
+    "ss",
+    "vmess",
+    "vless",
+    "trojan",
+    "hysteria2",
+    "hy2",
+    "tuic",
+    "anytls",
+)
 
 #: Credential-free source-pinned Mihomo parser identity.
 MIHOMO_PARSER_IDENTITY = {
@@ -29,11 +63,7 @@ _FIELD_DISPOSITION_MANIFEST = {
         "base64-uri-lines": {"disposition": "replace"},
         "mihomo-provider": {"disposition": "preserve"},
     },
-    "protocols": {
-        "ss": "opaque-forwarded-to-mihomo",
-        "vmess": "opaque-forwarded-to-mihomo",
-        "vless": "opaque-forwarded-to-mihomo",
-    },
+    "protocols": {scheme: "opaque-forwarded-to-mihomo" for scheme in SUPPORTED_SCHEMES},
     "provider": {
         "uri": "preserve",
         "bytes": "preserve",
@@ -41,7 +71,10 @@ _FIELD_DISPOSITION_MANIFEST = {
     },
     "unsafe": {
         "rejected_fields": ["scripts", "hooks", "plugins", "controller", "tun", "listeners"],
-        "rejected_protocols": ["ssr", "hysteria", "wireguard"],
+        # Measured against the qualified Mihomo release to be dropped rather
+        # than parsed, so accepting them would report nodes that cannot carry
+        # traffic. They are reported through the skip aggregate instead.
+        "rejected_protocols": ["ssr", "wireguard"],
         "credential_material": "private-only",
     },
     "semantic_authority": {

@@ -30,6 +30,7 @@ from .model import NodeRecord, SubscriptionRecord
 from .transport import (
     MAXIMUM_BODY_BYTES,
     MIHOMO_SUBSCRIPTION_PARSER,
+    SUPPORTED_SCHEMES,
     source_digest,
     validate_source_url,
 )
@@ -594,7 +595,7 @@ def _node_from_value(value):  # type: (dict) -> NodeRecord
         char not in "0123456789abcdef" for char in node_id
     ):
         raise SubscriptionStateError("subscription node identity is invalid")
-    if not isinstance(value["scheme"], str) or value["scheme"] not in ("ss", "vmess", "vless"):
+    if not isinstance(value["scheme"], str) or value["scheme"] not in SUPPORTED_SCHEMES:
         raise SubscriptionStateError("subscription node scheme is invalid")
     if not isinstance(value["display"], str) or not value["display"]:
         raise SubscriptionStateError("subscription node state is invalid")

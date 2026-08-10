@@ -20,6 +20,11 @@ def _check_subscription_parser():
         b"ss://YWVzLTI1Ni1nY206cGFzc3dvcmRAMTkyLjAuMi4xOjQ0Mw#ss\n"
         b"vmess://eyJhZGQiOiIxOTIuMC4yLjIiLCJhaWQiOiIwIiwiaWQiOiI1NTU1NTU1NS01NTU1LTU1NTUtNTU1NS01NTU1NTU1NTU1NTUiLCJuZXQiOiJ0Y3AiLCJwb3J0IjoiNDQzIiwicHMiOiJ2bWVzcyIsInRscyI6InRscyIsInYiOjJ9\n"
         b"vless://11111111-1111-1111-1111-111111111111@example.invalid:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&flow=xtls-rprx-vision#vless\n"
+        b"trojan://password@example.invalid:443?sni=www.example.com#trojan\n"
+        b"hysteria2://password@example.invalid:443?sni=www.example.com#hysteria2\n"
+        # Measured to be dropped by the qualified backend, so it must be reported
+        # as skipped rather than counted as a node.
+        b"wireguard://key@example.invalid:51820#wireguard\n"
     )
     try:
         parsed = parse_subscription_body(fixture, format_hint="uri-lines")
@@ -28,11 +33,16 @@ def _check_subscription_parser():
         # test proxy; a malformed packaged fixture is a diagnostic error.
         return _error_result(error)
     schemes = tuple(item[0] for item in parsed.records)
-    if schemes != ("ss", "vmess", "vless"):
+    if schemes != ("ss", "vmess", "vless", "trojan", "hysteria2"):
         return CheckResult.fail("subscription parser classified an unexpected scheme set")
+    if parsed.skipped != (("wireguard", 1),):
+        return CheckResult.fail("subscription parser did not report the unsupported record")
     if any("@" in item[1] or "=" in item[1] for item in parsed.records):
         return CheckResult.fail("subscription parser produced a credential-shaped display")
-    return CheckResult.ok("Base64/plain URI parser accepted SS, VMess, and VLESS safely")
+    return CheckResult.ok(
+        "URI parser accepted %d encrypted schemes safely and reported 1 unsupported record"
+        % len(parsed.records)
+    )
 
 
 _SUBSCRIPTION_PROBE_BODY = (

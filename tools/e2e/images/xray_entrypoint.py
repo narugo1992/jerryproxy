@@ -9,6 +9,8 @@ Exactly one protocol inbound is configured per container, so a failure names one
 protocol and one service rather than a shared process.
 """
 
+import base64
+import binascii
 import json
 import os
 import sys
@@ -31,6 +33,33 @@ def _port(name, default):  # type: (str, int) -> int
     if not value.isdigit() or not 1 <= int(value) <= 65535:
         raise SystemExit("%s must be a TCP port" % name)
     return int(value)
+
+
+def _tls_material():  # type: () -> tuple
+    """Write this container's TLS material from the environment.
+
+    The certificate and key are generated on the runner by the provisioning job
+    and injected here, so the job that builds the node URIs is the same one that
+    knows the certificate. Generating them in-container would leave the runner
+    with no way to learn the leaf, since a service container has no channel back
+    to the job.
+    """
+
+    certificate = "/tmp/fixture-cert.pem"
+    key = "/tmp/fixture-key.pem"
+    _write_private(certificate, _required("E2E_TLS_CERTIFICATE"))
+    _write_private(key, _required("E2E_TLS_KEY"))
+    return certificate, key
+
+
+def _write_private(path, encoded):  # type: (str, str) -> None
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise SystemExit("TLS material must be base64")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(content)
 
 
 def _shadowsocks():  # type: () -> dict
@@ -77,7 +106,25 @@ def _vless():  # type: () -> dict
     }
 
 
-BUILDERS = {"ss": _shadowsocks, "vmess": _vmess, "vless": _vless}
+def _trojan():  # type: () -> dict
+    certificate, key = _tls_material()
+    return {
+        "tag": "trojan",
+        "port": _port("E2E_PORT", 10004),
+        "protocol": "trojan",
+        "settings": {"clients": [{"password": _required("E2E_TROJAN_PASSWORD")}]},
+        "streamSettings": {
+            "network": "tcp",
+            "security": "tls",
+            "tlsSettings": {
+                "serverName": _required("E2E_TLS_SERVER_NAME"),
+                "certificates": [{"certificateFile": certificate, "keyFile": key}],
+            },
+        },
+    }
+
+
+BUILDERS = {"ss": _shadowsocks, "vmess": _vmess, "vless": _vless, "trojan": _trojan}
 
 
 def main():  # type: () -> int

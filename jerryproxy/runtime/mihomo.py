@@ -11,13 +11,14 @@ import sys
 import tempfile
 import threading
 import time
+from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 
 from ..backend.durable import flush_directory
 from ..errors import RuntimeSessionError
 from ..home import is_path_alias
 from ..subscription.redaction import redact_bytes, redact_text, terminal_safe_text
-from .interfaces import RuntimeDriver, RuntimeProjection
+from .interfaces import LoadedNodes, RuntimeDriver, RuntimeProjection
 
 QUALIFIED_VERSION = "1.19.29"
 MAXIMUM_LOG_BYTES = 4 * 1024 * 1024
@@ -26,6 +27,12 @@ LISTENER_PROTOCOLS = ("mixed", "http", "socks5")
 LISTENER_ADDRESSES = ("127.0.0.1", "0.0.0.0")
 _HTTP_READINESS_STATUSES = frozenset((200, 400, 403, 404, 405, 500, 501, 502, 503, 504))
 _MACOS_LSOF_PATHS = ("/usr/sbin/lsof", "/usr/bin/lsof")
+PROVIDER_NAME = "jerryproxy"
+# Mihomo substitutes these for a selector group it could not fill. Routing
+# through any of them means the node was never used.
+_BYPASS_SELECTIONS = frozenset(("COMPATIBLE", "DIRECT", "REJECT", "PASS", "REJECT-DROP"))
+_CONTROL_TIMEOUT = 5.0
+_MAXIMUM_CONTROL_BYTES = 256 * 1024
 
 
 def _configure_parent_death_signal():  # type: () -> None
@@ -127,7 +134,42 @@ def _private_bytes(path, payload, boundary=None):  # type: (Path, bytes, object)
                 pass
 
 
-def reserve_loopback_port(preferred=None, strict=False, bind_address="127.0.0.1"):  # type: (int, bool, str) -> int
+def _control_request(port, secret, path, timeout):  # type: (int, str, str, float) -> dict
+    """Read one small JSON document from the private loopback control endpoint.
+
+    Deliberately not `requests`: this must never inherit ambient proxy
+    environment variables, which on a machine running JerryProxy may point at
+    the very listener being inspected.
+    """
+
+    connection = HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", path, headers={"Authorization": "Bearer %s" % secret})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise RuntimeSessionError(
+                "mihomo control endpoint answered %d for its own inventory" % response.status
+            )
+        payload = response.read(_MAXIMUM_CONTROL_BYTES + 1)
+    except (OSError, HTTPException) as error:
+        # A private loopback endpoint that cannot be reached is a startup fault.
+        raise RuntimeSessionError("mihomo control endpoint is unreachable") from error
+    finally:
+        connection.close()
+    if len(payload) > _MAXIMUM_CONTROL_BYTES:
+        raise RuntimeSessionError("mihomo control response exceeded its bound")
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        # Malformed control output is a fault, never a silent pass.
+        raise RuntimeSessionError("mihomo control response was not valid JSON") from error
+    if not isinstance(document, dict):
+        raise RuntimeSessionError("mihomo control response was not a JSON object")
+    return document
+
+
+def reserve_loopback_port(preferred=None, strict=False, bind_address="127.0.0.1", exclude=()):
+    # type: (int, bool, str, tuple) -> int
     """Reserve and release one TCP port immediately before launch."""
 
     if not isinstance(strict, bool):
@@ -145,6 +187,10 @@ def reserve_loopback_port(preferred=None, strict=False, bind_address="127.0.0.1"
         candidates.extend(range(17777, 17827))
     for port in candidates:
         if port is None or not isinstance(port, int) or not 1 <= port <= 65535:
+            continue
+        if port in exclude:
+            # A caller that already reserved a port for another purpose must not
+            # be handed the same one back.
             continue
         descriptor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -177,10 +223,18 @@ def build_provider_config(
     listener_protocol="mixed",
     log_level="warning",
     bind_address="127.0.0.1",
+    control_port=None,
+    control_secret=None,
 ):
-    # type: (Path, bytes, int, str, str, str, str, str) -> bytes
+    # type: (Path, bytes, int, str, str, str, str, str, int, str) -> bytes
     """Build a minimal local-file Mihomo config without parsing credentials."""
 
+    if (control_port is None) != (control_secret is None):
+        raise ValueError("the control channel requires both a port and a secret")
+    if control_port is not None and not 1 <= control_port <= 65535:
+        raise ValueError("control port is outside the TCP port range")
+    if control_secret is not None and (not control_secret or ":" in control_secret):
+        raise ValueError("control secret must be non-empty and free of ':'")
     if listener_protocol not in LISTENER_PROTOCOLS:
         raise ValueError("unsupported Mihomo listener protocol")
     if bind_address not in LISTENER_ADDRESSES:
@@ -188,7 +242,11 @@ def build_provider_config(
     if (username is None) != (password is None):
         raise ValueError("proxy authentication requires both username and password")
     # The provider body remains opaque and is parsed by Mihomo 1.19.29.  The
-    # generated projection contains no controller or secondary network source.
+    # projection contains no secondary network source.  It does contain one
+    # loopback control endpoint with a random per-session secret, because
+    # Mihomo silently drops a node it cannot parse and then routes directly:
+    # without asking it what it loaded, a bypassed session is indistinguishable
+    # from a working one.
     escaped_path = str(provider_path).replace("\\", "/").replace("'", "''")
     lines = [
         "%s: %d" % (
@@ -218,6 +276,13 @@ def build_provider_config(
         "rules:",
         "  - MATCH,jerryproxy",
     ]
+    if control_port is not None:
+        # Always loopback, even when the proxy listener is bound to 0.0.0.0:
+        # `--bind-all` opts into exposing the proxy, never the control channel.
+        lines[2:2] = [
+            "external-controller: 127.0.0.1:%d" % control_port,
+            "secret: '%s'" % control_secret.replace("'", "''"),
+        ]
     if username is not None:
         lines[6:6] = [
             "authentication:",
@@ -230,8 +295,13 @@ def build_provider_config(
 class MihomoDriver(RuntimeDriver):
     """Runtime-driver adapter for the qualified Mihomo foreground core."""
 
-    def __init__(self, process_factory=None):
+    def __init__(self, process_factory=None, inspector=None):
         self.process_factory = process_factory or MihomoProcess
+        # Injection point for the control query, mirroring `process_factory`.
+        # A deterministic test can stand in for the endpoint; the real query is
+        # exercised against a live loopback server in its own tests and against
+        # real Mihomo in the data-plane lane.
+        self.inspector = inspector
 
     @property
     def name(self):  # type: () -> str
@@ -247,8 +317,10 @@ class MihomoDriver(RuntimeDriver):
         listener_protocol="mixed",
         backend_log_level="INFO",
         bind_address="127.0.0.1",
+        control_port=None,
+        control_secret=None,
     ):
-        # type: (Path, object, int, str, str, str, str, str) -> RuntimeProjection
+        # type: (Path, object, int, str, str, str, str, str, int, str) -> RuntimeProjection
         uri = node.secret_uri()
         provider = (uri + "\n").encode("utf-8")
         config = build_provider_config(
@@ -260,8 +332,43 @@ class MihomoDriver(RuntimeDriver):
             listener_protocol=listener_protocol,
             log_level=backend_log_level,
             bind_address=bind_address,
+            control_port=control_port,
+            control_secret=control_secret,
         )
         return RuntimeProjection(config=config, provider=provider)
+
+    def loaded_nodes(self, control_port, control_secret, timeout=_CONTROL_TIMEOUT):
+        # type: (int, str, float) -> LoadedNodes
+        """Ask the running Mihomo what it parsed and what it would route through.
+
+        Two independent questions are asked, because either alone can be
+        satisfied while traffic still bypasses the node: how many proxies the
+        provider produced, and what the selector group resolves to now.
+        """
+
+        request = self.inspector or _control_request
+        provider = request(
+            control_port, control_secret, "/providers/proxies/%s" % PROVIDER_NAME, timeout
+        )
+        group = request(control_port, control_secret, "/proxies/%s" % PROVIDER_NAME, timeout)
+        entries = provider.get("proxies")
+        if not isinstance(entries, list):
+            raise RuntimeSessionError("mihomo did not report its provider inventory")
+        accepted = tuple(
+            entry.get("name")
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+        )
+        selected = group.get("now")
+        if not isinstance(selected, str):
+            raise RuntimeSessionError("mihomo did not report its selected proxy")
+        # Mihomo names its own placeholder in `emptyFallback`, so the check does
+        # not depend only on a hard-coded list of placeholder names.
+        fallback = group.get("emptyFallback")
+        bypassing = selected in _BYPASS_SELECTIONS or (
+            isinstance(fallback, str) and fallback != "" and selected == fallback
+        )
+        return LoadedNodes(accepted=accepted, selected=selected, bypassing=bypassing)
 
     def create_process(self, executable, config_path, session_root, log_path, backend_log_level, log_sink=None):
         # type: (Path, Path, Path, Path, str, object) -> object

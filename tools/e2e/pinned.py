@@ -11,13 +11,25 @@ import sys
 
 from jerryproxy.data import read_backend_catalog_json
 
-PLATFORM = "linux-amd64"
-FIELDS = ("version", "asset", "sha256", "url")
+FIELDS = ("version", "asset", "sha256", "url", "executable", "archive_format")
+
+# Fixture images are Alpine, so a backend that ships separate glibc and musl
+# builds must take the musl one. Naming the key per backend keeps that choice
+# visible instead of hiding it behind a substring match.
+PLATFORM_KEYS = {
+    "xray": "linux-amd64",
+    "sing-box": "linux-amd64-musl",
+}
+BACKENDS = tuple(sorted(PLATFORM_KEYS))
 
 
-def resolve(backend="xray", platform=PLATFORM):  # type: (str, str) -> dict
+def resolve(backend="xray", platform=None):  # type: (str, str) -> dict
     """Return the newest catalog release and its verified platform artifact."""
 
+    if platform is None:
+        platform = PLATFORM_KEYS.get(backend)
+        if platform is None:
+            raise SystemExit("no fixture platform key is recorded for %s" % backend)
     catalog = read_backend_catalog_json(backend)
     version = catalog["versions"][0]
     artifact = version["artifacts"][platform]
@@ -29,12 +41,14 @@ def resolve(backend="xray", platform=PLATFORM):  # type: (str, str) -> dict
         "asset": artifact["name"],
         "sha256": digest,
         "url": artifact["url"],
+        "executable": artifact["executable"],
+        "archive_format": artifact["archive_format"],
     }
 
 
 def main():  # type: () -> int
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", default="xray")
+    parser.add_argument("--backend", default="xray", choices=BACKENDS)
     parser.add_argument("--field", choices=FIELDS, required=True)
     arguments = parser.parse_args()
     sys.stdout.write("%s\n" % resolve(arguments.backend)[arguments.field])

@@ -864,16 +864,16 @@ def test_mixed_protocol_subscription_reports_what_it_skipped(tmp_path):
     body = tmp_path / "mixed.txt"
     body.write_text(
         SS
-        + "trojan://secret@example.invalid:443#unsupported\n"
+        + "ssr://c2VjcmV0\n"
         + VMESS
-        + "hysteria2://secret@example.invalid:443#also\n",
+        + "wireguard://secret@example.invalid:51820#also\n",
         encoding="ascii",
     )
 
     added = _invoke(runner, home, "subscription", "add", "main", "--file", str(body))
     assert added.exit_code == 0, added.output
     assert "Nodes: 2" in added.output
-    assert "Skipped: 1 hysteria2, 1 trojan (unsupported by this build)" in added.output
+    assert "Skipped: 1 ssr, 1 wireguard (unsupported by this build)" in added.output
     assert "secret" not in added.output
 
     shown = _invoke(runner, home, "subscription", "show", "main", "--json")
@@ -881,8 +881,8 @@ def test_mixed_protocol_subscription_reports_what_it_skipped(tmp_path):
     value = json.loads(shown.output)
     assert value["node_count"] == 2
     assert value["skipped"] == [
-        {"count": 1, "scheme": "hysteria2"},
-        {"count": 1, "scheme": "trojan"},
+        {"count": 1, "scheme": "ssr"},
+        {"count": 1, "scheme": "wireguard"},
     ]
 
 
@@ -891,7 +891,7 @@ def test_a_fully_unsupported_subscription_explains_the_gap(tmp_path):
     home = tmp_path / "home"
     body = tmp_path / "unsupported.txt"
     body.write_text(
-        "trojan://a@example.invalid:443#x\nhysteria2://b@example.invalid:443#y\n",
+        "ssr://YWJj\nwireguard://b@example.invalid:51820#y\n",
         encoding="ascii",
     )
 
@@ -900,7 +900,7 @@ def test_a_fully_unsupported_subscription_explains_the_gap(tmp_path):
     assert result.exit_code != 0
     message = str(result.exception)
     assert "no supported nodes" in message
-    assert "ss, vmess, vless" in message
+    assert "trojan" in message and "hysteria2" in message
     # Naming it a format error would send the reader after a fault that is not
     # there; this is a support gap.
     assert "Base64" not in message

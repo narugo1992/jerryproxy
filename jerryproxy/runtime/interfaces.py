@@ -12,6 +12,27 @@ class RuntimeProjection(object):
     provider: bytes = None
 
 
+@dataclass(frozen=True)
+class LoadedNodes(object):
+    """What a running backend actually accepted from the published node.
+
+    A backend may parse fewer nodes than were handed to it and still start.
+    Mihomo, for one, substitutes a direct-routing placeholder for an empty
+    selector group, so a listener can be ready and healthy while nothing is
+    proxied at all.  This is the backend-neutral answer to "is traffic really
+    going through the node", which the session turns into policy.
+    """
+
+    accepted: tuple
+    """Names the backend parsed out of the published node source."""
+
+    selected: str
+    """What the backend would route through right now."""
+
+    bypassing: bool
+    """The selection is a direct or reject placeholder rather than a node."""
+
+
 class RuntimeDriver(object, metaclass=ABCMeta):
     """Backend-specific projection and process lifecycle contract.
 
@@ -36,9 +57,27 @@ class RuntimeDriver(object, metaclass=ABCMeta):
         listener_protocol,
         backend_log_level,
         bind_address="127.0.0.1",
+        control_port=None,
+        control_secret=None,
     ):
-        # type: (object, object, int, str, str, str, str, str) -> RuntimeProjection
-        """Build an opaque-node projection without exposing it to the session."""
+        # type: (object, object, int, str, str, str, str, str, int, str) -> RuntimeProjection
+        """Build an opaque-node projection without exposing it to the session.
+
+        ``control_port`` and ``control_secret`` are allocated by the session for
+        its own private inspection channel.  A driver that projects one must
+        keep it on loopback regardless of the listener's bind address, and must
+        never place the secret anywhere but the private config.
+        """
+
+    @abstractmethod
+    def loaded_nodes(self, control_port, control_secret, timeout):
+        # type: (int, str, float) -> LoadedNodes
+        """Report what the running backend accepted from the published node.
+
+        Drivers own the backend's inspection protocol; the session owns what to
+        do about the answer.  Raise :class:`~jerryproxy.errors.JerryProxyError`
+        when the answer cannot be obtained, rather than reporting a guess.
+        """
 
     @abstractmethod
     def create_process(self, executable, config_path, session_root, log_path, backend_log_level, log_sink=None):

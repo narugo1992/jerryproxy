@@ -21,10 +21,19 @@ MARKER = "JERRYPROXY_E2E_MARKER"
 BACKEND = "JERRYPROXY_E2E_BACKEND"
 BACKEND_VERSION = "JERRYPROXY_E2E_BACKEND_VERSION"
 PUBLIC_PROBES = "JERRYPROXY_E2E_PUBLIC_PROBES"
+# One entry per URI scheme the build claims to support, so a scheme added to the
+# product allowlist without a fixture makes this lane fail rather than pass by
+# omission. `hy2` reaches the same server as `hysteria2`: it is a second URI
+# spelling that subscriptions use in the wild, not a second protocol.
 NODE_VARIABLES = {
     "ss": "JERRYPROXY_E2E_SS_NODE",
     "vmess": "JERRYPROXY_E2E_VMESS_NODE",
     "vless": "JERRYPROXY_E2E_VLESS_NODE",
+    "trojan": "JERRYPROXY_E2E_TROJAN_NODE",
+    "hysteria2": "JERRYPROXY_E2E_HYSTERIA2_NODE",
+    "hy2": "JERRYPROXY_E2E_HY2_NODE",
+    "tuic": "JERRYPROXY_E2E_TUIC_NODE",
+    "anytls": "JERRYPROXY_E2E_ANYTLS_NODE",
 }
 
 REQUIRED = (

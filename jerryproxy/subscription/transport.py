@@ -19,7 +19,7 @@ from urllib3.poolmanager import PoolManager
 from urllib3.util.connection import create_connection
 
 from ..errors import SubscriptionFetchError, SubscriptionParseError
-from .audit import MIHOMO_PARSER_IDENTITY
+from .audit import MIHOMO_PARSER_IDENTITY, SUPPORTED_SCHEMES
 from .interfaces import SubscriptionParser
 from .model import ParsedSubscription
 from .redaction import redact_text, terminal_safe_text
@@ -34,8 +34,10 @@ MAXIMUM_RECORDS = 4096
 MAXIMUM_REDIRECTS = 3
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
-SUPPORTED_SCHEMES = ("ss", "vmess", "vless")
-_URI_LINE = re.compile(r"^(ss|vmess|vless)://[^\s]+$", re.IGNORECASE)
+_URI_LINE = re.compile(
+    r"^(?:%s)://[^\s]+$" % "|".join(re.escape(scheme) for scheme in SUPPORTED_SCHEMES),
+    re.IGNORECASE,
+)
 # A rejected record contributes only its scheme name to diagnostics, so that
 # name is bounded and must look like a scheme rather than arbitrary text.
 _SCHEME_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")

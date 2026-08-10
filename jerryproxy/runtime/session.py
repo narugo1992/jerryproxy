@@ -155,6 +155,8 @@ class RuntimeSession(object):
         started_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.log_path = self.paths.logs / ("runtime-%s-%s.log" % (started_at, self.session_id))
         self.port = None
+        self.control_port = None
+        self.control_secret = None
         self.username = None
         self.password = None
         self.process = None
@@ -389,6 +391,8 @@ class RuntimeSession(object):
             listener_protocol=self.listener_protocol,
             backend_log_level=self.backend_log_level,
             bind_address=self.bind_address,
+            control_port=self.control_port,
+            control_secret=self.control_secret,
         )
         if projection.provider is not None:
             _private_bytes(self.provider_path, projection.provider, boundary=self.session_root)
@@ -526,6 +530,40 @@ class RuntimeSession(object):
             message += "; next=%s" % redact_text(action)
         self._log(level, message)
 
+    def _require_node_in_use(self):  # type: () -> None
+        """Refuse to report readiness unless the backend is using the node.
+
+        A backend can start, listen, and answer a connectivity probe while
+        routing nothing through the selected node: Mihomo replaces a selector
+        group it could not fill with a direct-routing placeholder, so egress
+        still succeeds and a health quorum still passes.  For a proxy that
+        failure is worse than not starting, because the user is told they are
+        protected while their traffic leaves unproxied.
+        """
+
+        loaded = self.driver.loaded_nodes(self.control_port, self.control_secret, 5.0)
+        if loaded.bypassing or len(loaded.accepted) != 1:
+            # Name the scheme, never the URI: the scheme is already public in
+            # `node list` output while the rest of the URI is a credential.
+            raise RuntimeSessionError(
+                "%s did not accept node %s: it parsed %d nodes from the published "
+                "source and would route traffic directly instead of through the "
+                "node. The %s:// protocol or that provider's URI dialect is not "
+                "usable by %s %s. Choose another node with `jerryproxy node list`."
+                % (
+                    self.driver.name,
+                    self.node.node_id,
+                    len(loaded.accepted),
+                    self.node.scheme,
+                    self.driver.name,
+                    self.backend_version,
+                )
+            )
+        self._log(
+            "INFO",
+            "backend accepted node %s and routes through it" % self.node.node_id,
+        )
+
     def _startup_health(self, deadline=None):
         deadline = deadline or RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
         delays = tuple(self.recovery_policy.startup_retry_delays)
@@ -582,10 +620,15 @@ class RuntimeSession(object):
                 strict=self.strict_port,
                 bind_address=self.bind_address,
             )
+            # The control channel is private to this session: always loopback,
+            # never the listener's bind address, and a fresh secret each start.
+            self.control_port = reserve_loopback_port(exclude=(self.port,))
+            self.control_secret = _token_urlsafe(32)
             self._write_access()
             self._resolve_executable(install_missing)
             startup_deadline = RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
             self._launch_node(self.node, deadline=startup_deadline)
+            self._require_node_in_use()
             self._startup_health(startup_deadline)
             self._publish_access()
             self._next_health_at = self.clock() + self.recovery_policy.health_interval

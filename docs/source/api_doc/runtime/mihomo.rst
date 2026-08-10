@@ -41,11 +41,18 @@ LISTENER\_ADDRESSES
    :no-value:
 
 
+PROVIDER\_NAME
+-----------------------------------------------------
+
+.. autodata:: PROVIDER_NAME
+   :no-value:
+
+
 MihomoDriver
 -----------------------------------------------------
 
 .. autoclass:: MihomoDriver
-   :members: __init__,name,projection,create_process,wait_ready,stop
+   :members: __init__,name,projection,loaded_nodes,create_process,wait_ready,stop
 
 
 MihomoProcess

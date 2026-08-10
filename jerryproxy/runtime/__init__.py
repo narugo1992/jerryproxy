@@ -1,7 +1,7 @@
 """Foreground runtime drivers and session supervision."""
 
 from .health import DEFAULT_HEALTH_TARGETS, ConnectivityProbe, HealthSnapshot, RecoveryPolicy
-from .interfaces import RuntimeDriver, RuntimeProjection
+from .interfaces import LoadedNodes, RuntimeDriver, RuntimeProjection
 from .mihomo import QUALIFIED_VERSION, MihomoDriver
 from .session import RuntimeSession
 
@@ -12,6 +12,7 @@ __all__ = [
     "QUALIFIED_VERSION",
     "RecoveryPolicy",
     "MihomoDriver",
+    "LoadedNodes",
     "RuntimeDriver",
     "RuntimeProjection",
     "RuntimeSession",
