@@ -423,7 +423,9 @@ Official upstream repositories currently registered:
 
 The backend binaries keep their upstream licenses. They are downloaded from
 upstream after installation and are not conveyed inside the Apache-2.0
-JerryProxy wheel.
+JerryProxy wheel. Their terms are recorded in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) anyway, because a user who
+copies a populated JerryProxy home does convey them.
 
 Catalog maintenance is repository work, not a user command. A weekly workflow
 runs `tools.backend_catalog`, accepts only official non-draft stable releases,
@@ -616,3 +618,21 @@ download/extraction code, credential handling, or release workflows.
 
 JerryProxy is licensed under the Apache License 2.0. External backends remain
 independent programs under their respective upstream licenses.
+
+A wheel carries its dependency chain and a standalone executable embeds that
+chain outright, so every component either form conveys is reviewed and recorded
+in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), which ships inside both
+the wheel and the source distribution. The record is generated from
+`tools/licenses.json`; `make license_check` fails when a conveyed dependency has
+no reviewed entry, when a recorded licence is outside the reviewed allowlist,
+when an installed distribution declares something other than what was recorded,
+or when the document has drifted from the record. It runs as part of
+`make check`, and `make license_check WRITE=1` regenerates the document.
+
+Two facts in that record are worth stating here. The standalone executables are
+Apache-2.0 only because PyInstaller grants an explicit exception permitting a
+frozen application to be distributed under terms of its author's choosing; that
+exception does not survive a modified bootloader, so the bootloader stays
+unmodified. And `certifi` and `tqdm` carry MPL-2.0 files, which are shipped
+unmodified so that naming the upstream release satisfies the source-form
+obligation.

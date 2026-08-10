@@ -1,0 +1,285 @@
+{
+  "project": {
+    "name": "jerryproxy",
+    "license": "Apache-2.0",
+    "notice": "The JerryProxy source in this repository is Apache-2.0. Everything below is a third-party component that reaches a user through the wheel's dependency chain or is embedded in a standalone executable."
+  },
+  "allowed": [
+    "Apache-2.0",
+    "Apache-2.0 AND GPL-2.0-or-later WITH Bootloader-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "GPL-2.0-or-later WITH Bootloader-exception",
+    "MIT",
+    "MPL-2.0",
+    "MPL-2.0 AND MIT",
+    "PSF-2.0",
+    "Unlicense"
+  ],
+  "components": [
+    {
+      "name": "certifi",
+      "license": "MPL-2.0",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "weak-copyleft",
+      "note": "Root certificate bundle reached through requests. Shipped unmodified; MPL-2.0 section 3.2 is satisfied by naming the upstream release as the source form."
+    },
+    {
+      "name": "charset-normalizer",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "click",
+      "license": "BSD-3-Clause",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "colorama",
+      "license": "BSD-3-Clause",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice",
+      "note": "Windows-only dependency of click; present in the Windows standalone executable.",
+      "conditional": true
+    },
+    {
+      "name": "filelock",
+      "license": "Unlicense",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "none",
+      "varies": [
+        {
+          "license": "MIT",
+          "when": "filelock 3.30 and later, which requirements.txt selects on Python 3.10+"
+        }
+      ],
+      "note": "Upstream relicensed between 3.19.1 and 3.30.0. JerryProxy pins a different filelock line per interpreter, so both licences are conveyed depending on the Python version; both are permissive and impose no source obligation."
+    },
+    {
+      "name": "idna",
+      "license": "BSD-3-Clause",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "importlib-metadata",
+      "license": "Apache-2.0",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice",
+      "note": "Reached only on Python versions without a sufficient standard-library implementation.",
+      "conditional": true
+    },
+    {
+      "name": "inquirerpy",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "markdown-it-py",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "mdurl",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "pfzy",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "prompt-toolkit",
+      "license": "BSD-3-Clause",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "pygments",
+      "license": "BSD-2-Clause",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "pyinstaller",
+      "license": "GPL-2.0-or-later WITH Bootloader-exception",
+      "distribution": [
+        "standalone"
+      ],
+      "obligation": "bootloader-exception",
+      "note": "Build-time only, except for the bootloader that is linked into every frozen executable. PyInstaller's licence grants an explicit exception permitting the resulting executable to be distributed under terms of the author's choosing. JerryProxy relies on that exception; without it the standalone artifacts could not be Apache-2.0. The exception does not extend to a modified bootloader, so the bootloader must stay unmodified."
+    },
+    {
+      "name": "pyinstaller-hooks-contrib",
+      "license": "Apache-2.0 AND GPL-2.0-or-later WITH Bootloader-exception",
+      "distribution": [
+        "standalone"
+      ],
+      "obligation": "bootloader-exception",
+      "conditional": true,
+      "note": "Build-time only, except for runtime hooks that PyInstaller embeds in the frozen executable. Distributed under the same dual arrangement as PyInstaller itself, so the same bootloader exception governs the result."
+    },
+    {
+      "name": "pysocks",
+      "license": "BSD-3-Clause",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "requests",
+      "license": "Apache-2.0",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "rich",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "tabulate",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "tqdm",
+      "license": "MPL-2.0 AND MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "weak-copyleft",
+      "note": "Shipped unmodified; MPL-2.0 section 3.2 is satisfied by naming the upstream release as the source form."
+    },
+    {
+      "name": "typing-extensions",
+      "license": "PSF-2.0",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice",
+      "note": "Reached only on Python versions that need the backported typing constructs.",
+      "conditional": true
+    },
+    {
+      "name": "urllib3",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "wcwidth",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice"
+    },
+    {
+      "name": "zipp",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice",
+      "note": "Reached through importlib-metadata.",
+      "conditional": true
+    }
+  ],
+  "backends": {
+    "note": "Backend binaries are never bundled. They are downloaded from their official upstream release after installation and executed as independent programs, so they are not combined with JerryProxy into one work and their terms do not reach the wheel or the standalone executables. Their licences are recorded because a user distributing a populated JerryProxy home does convey them.",
+    "components": [
+      {
+        "name": "mihomo",
+        "license": "MIT",
+        "repository": "MetaCubeX/mihomo",
+        "verified": "GitHub licence API reports spdx_id MIT"
+      },
+      {
+        "name": "sing-box",
+        "license": "GPL-3.0-or-later WITH a naming restriction",
+        "repository": "SagerNet/sing-box",
+        "verified": "GitHub reports NOASSERTION; the LICENSE text is GPL-3.0-or-later plus an added clause forbidding a derivative work from using the name or implying association without consent",
+        "note": "The added clause is why GitHub cannot classify it. JerryProxy neither derives from nor renames sing-box, so the clause is satisfied by leaving the upstream binary and its name intact."
+      },
+      {
+        "name": "xray",
+        "license": "MPL-2.0",
+        "repository": "XTLS/Xray-core",
+        "verified": "GitHub licence API reports spdx_id MPL-2.0"
+      },
+      {
+        "name": "v2ray",
+        "license": "MIT",
+        "repository": "v2fly/v2ray-core",
+        "verified": "GitHub licence API reports spdx_id MIT"
+      }
+    ]
+  }
+}

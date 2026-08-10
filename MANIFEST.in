@@ -1,4 +1,5 @@
 include LICENSE
+include THIRD_PARTY_LICENSES.md
 include README.md
 include auto_rst.py
 include auto_rst_top_index.py

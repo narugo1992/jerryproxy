@@ -27,6 +27,10 @@ setup(
     author_email=meta["__AUTHOR_EMAIL__"],
     url="https://github.com/narugo1992/jerryproxy",
     license="Apache-2.0",
+    # The wheel embeds a dependency chain of its own, so the reviewed record of
+    # what those components are licensed under travels with it. Regenerate it
+    # with `make license_check WRITE=1`.
+    license_files=["LICENSE", "THIRD_PARTY_LICENSES.md"],
     python_requires=">=3.7",
     packages=find_packages(include=("jerryproxy", "jerryproxy.*")),
     package_data={"jerryproxy.data": ["*.json"]},
