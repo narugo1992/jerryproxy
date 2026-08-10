@@ -77,7 +77,7 @@ jobs:
       # copy a script and cache safely.
       - name: Build and publish the proxy server image
         id: xray
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: tools/e2e/images
           file: tools/e2e/images/Dockerfile.xray
@@ -92,7 +92,7 @@ jobs:
 
       - name: Build and publish the sentinel image
         id: sentinel
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: tools/e2e/images
           file: tools/e2e/images/Dockerfile.sentinel
@@ -104,7 +104,7 @@ jobs:
 
       - name: Build and publish the subscription image
         id: subscription
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: tools/e2e/images
           file: tools/e2e/images/Dockerfile.subscription
@@ -116,7 +116,7 @@ jobs:
 
       - name: Build and publish the camouflage image
         id: camouflage
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: tools/e2e/images
           file: tools/e2e/images/Dockerfile.camouflage
