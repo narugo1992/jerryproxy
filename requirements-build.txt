@@ -1,5 +1,5 @@
 build==0.10.0
-pyinstaller>=5.13,<7
+pyinstaller>=5.13.2,<7
 setuptools==67.8.0
 twine<6
 wheel==0.41.3

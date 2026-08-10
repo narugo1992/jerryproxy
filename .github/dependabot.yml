@@ -25,6 +25,14 @@ updates:
       # PyInstaller 6 requires >= 3.8, and the standalone lane builds on 3.7.
       - dependency-name: pyinstaller
         versions: [">=6"]
+      # rich 13.9 requires >= 3.8. One rich version across the matrix also keeps
+      # the styled startup guide byte-identical between cells, which the human
+      # output tests compare directly.
+      - dependency-name: rich
+        versions: [">=13.9"]
+      # setuptools 68.1 requires >= 3.8, and the standalone lane builds on 3.7.
+      - dependency-name: setuptools
+        versions: [">=68.1"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
