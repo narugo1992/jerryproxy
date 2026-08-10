@@ -36,6 +36,17 @@ updates:
       # build 1.2 requires >= 3.8, and the standalone lane builds on 3.7.
       - dependency-name: build
         versions: [">=1.2"]
+      # coverage 7.3 requires >= 3.8; 7.2.7 is the newest line declaring 3.7.
+      - dependency-name: coverage
+        versions: [">=7.3"]
+      # tqdm 4.69 requires >= 3.8; 4.68.2 is the newest line declaring 3.7.
+      - dependency-name: tqdm
+        versions: [">=4.69"]
+      # urllib3 2 requires >= 3.10, and the standalone build additionally
+      # targets OpenSSL 1.1.0, which urllib3 2 dropped. This ignore outlives
+      # the 3.7 block: remove it only when both constraints are retired.
+      - dependency-name: urllib3
+        versions: [">=2"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
