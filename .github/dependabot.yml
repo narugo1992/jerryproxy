@@ -33,6 +33,9 @@ updates:
       # setuptools 68.1 requires >= 3.8, and the standalone lane builds on 3.7.
       - dependency-name: setuptools
         versions: [">=68.1"]
+      # build 1.2 requires >= 3.8, and the standalone lane builds on 3.7.
+      - dependency-name: build
+        versions: [">=1.2"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
