@@ -31,4 +31,4 @@ ParsedSubscription
 -----------------------------------------------------
 
 .. autoclass:: ParsedSubscription
-   :members: format,body,records
+   :members: format,body,records,skipped,skipped_count,describe_skipped

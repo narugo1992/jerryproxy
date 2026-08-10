@@ -89,8 +89,27 @@ class SubscriptionRecord(NodeSource):
 
 @dataclass(frozen=True)
 class ParsedSubscription(object):
-    """Bounded, classified source body before state publication."""
+    """Bounded, classified source body before state publication.
+
+    ``skipped`` counts the records this build could not use, grouped by the
+    scheme they declared, with malformed lines under ``"malformed"``. It is a
+    sanitized aggregate: no rejected line is retained, because a line this
+    build cannot interpret is also a line whose credential shape it cannot
+    reason about.
+    """
 
     format: str
     body: bytes
     records: Tuple[Tuple[str, str, str], ...]
+    skipped: Tuple[Tuple[str, int], ...] = ()
+
+    @property
+    def skipped_count(self):  # type: () -> int
+        return sum(count for _scheme, count in self.skipped)
+
+    def describe_skipped(self):  # type: () -> str
+        """Return a credential-free summary of what could not be used."""
+
+        if not self.skipped:
+            return ""
+        return ", ".join("%d %s" % (count, scheme) for scheme, count in self.skipped)
