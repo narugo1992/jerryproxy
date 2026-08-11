@@ -415,6 +415,10 @@ authentication, extraction, process, or permission errors to warnings.
   `password: NO` into `password: false`, which the backend rejects. Anything
   that re-serialises provider content must preserve the literal text of plain
   scalars while still honouring an explicit tag.
+- A provider body is provider-controlled input, so every failure it can cause
+  must arrive as a subscription error. `RecursionError` from a deeply nested
+  document is not one and escapes as a bare traceback unless it is converted at
+  both the load and the re-serialisation boundary.
 - A provider node's label comes from the document's own `name` field, which is
   the container's declared display text rather than a protocol envelope, and
   receives the same treatment as a URI fragment: redacted, whitespace-folded,

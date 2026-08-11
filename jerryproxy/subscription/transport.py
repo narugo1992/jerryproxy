@@ -513,6 +513,11 @@ def _load_provider_document(value):  # type: (bytes) -> dict
     except yaml.YAMLError:
         # Not YAML at all, which the URI-line classifier may still accept.
         return None
+    except RecursionError as error:
+        # A provider-controlled body nested past the interpreter's limit is a
+        # rejected source, not a crash: RecursionError is not a subscription
+        # error, so letting it escape would surface as a bare traceback.
+        raise SubscriptionParseError("provider document is nested too deeply") from error
     if not isinstance(document, dict):
         return None
     proxies = document.get("proxies")
@@ -577,12 +582,21 @@ def _parse_provider_document(body):  # type: (bytes) -> ParsedSubscription
         if scheme not in PROVIDER_TYPES:
             skipped[scheme] = skipped.get(scheme, 0) + 1
             continue
-        payload = yaml.safe_dump(
-            {"proxies": [proxy]},
-            default_flow_style=False,
-            allow_unicode=True,
-            sort_keys=True,
-        )
+        try:
+            payload = yaml.safe_dump(
+                {"proxies": [proxy]},
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=True,
+            )
+        except RecursionError as error:
+            # Same boundary on the way out: a structure that loaded may still
+            # exceed the limit when it is written back.
+            raise SubscriptionParseError("provider node is nested too deeply") from error
+        except yaml.YAMLError as error:
+            # A value PyYAML declines to represent is a rejected record, not a
+            # crash in the middle of publishing state.
+            raise SubscriptionParseError("provider node cannot be re-serialised") from error
         if len(payload.encode("utf-8")) > MAXIMUM_URI_BYTES:
             raise SubscriptionParseError("subscription URI record exceeds the size bound")
         records.append((scheme, _provider_display(proxy, index), payload))

@@ -649,3 +649,40 @@ def test_an_explicitly_quoted_provider_scalar_keeps_its_own_meaning():
     proxy = yaml.safe_load(parse_subscription_body(body).records[0][2])["proxies"][0]
 
     assert proxy["password"] == "true"
+
+
+@pytest.mark.parametrize("depth", (2000, 20000))
+def test_a_deeply_nested_provider_document_is_refused_not_a_crash(depth):
+    """A provider-controlled body must not escape as a bare interpreter error.
+
+    `RecursionError` is not a subscription error, so letting it out means the
+    caller's `except SubscriptionError` misses it and the user sees a traceback
+    instead of a rejected source.
+    """
+
+    nested = "[" * depth + "]" * depth
+    body = (
+        "proxies: [{name: n, type: ss, server: 1.2.3.4, port: 1, cipher: c,"
+        " password: p, deep: %s}]\n" % nested
+    ).encode("ascii")
+
+    with pytest.raises(SubscriptionParseError, match="nested too deeply"):
+        parse_subscription_body(body)
+
+
+def test_an_alias_heavy_provider_document_stays_bounded():
+    """Shared references must not be expanded into an unbounded payload."""
+
+    body = "x0: &x0 [%s]\n" % ",".join(["aaaaaaaa"] * 9)
+    for level in range(1, 7):
+        body += "x%d: &x%d [%s]\n" % (level, level, ",".join(["*x%d" % (level - 1)] * 9))
+    body += (
+        "proxies: [{name: n, type: ss, server: 1.2.3.4, port: 1, cipher: c,"
+        " password: p, extra: *x6}]\n"
+    )
+
+    parsed = parse_subscription_body(body.encode("ascii"))
+
+    # 9**7 leaves if expanded; the payload stays a few kilobytes because the
+    # aliases survive as aliases.
+    assert len(parsed.records[0][2]) < 64 * 1024
