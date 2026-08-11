@@ -464,6 +464,36 @@ UNSAFE_PROVIDER_KEYS = frozenset(_FIELD_DISPOSITION_MANIFEST["unsafe"]["rejected
 MAXIMUM_PROVIDER_PROXIES = MAXIMUM_RECORDS
 
 
+class _VerbatimScalarLoader(yaml.SafeLoader):
+    """A safe loader that hands every plain scalar back as its literal text.
+
+    PyYAML implements YAML 1.1, where `NO` is boolean false, `12:30` is 750, and
+    `0755` is 493. The backend reads YAML 1.2, where all three are strings. A
+    provider node re-serialised through Python's interpretation therefore
+    changes meaning: measured against Mihomo 1.19.29, `password: NO` is accepted
+    as a string while the `password: false` it round-trips to is rejected
+    outright. Keeping scalars verbatim is what makes "carried through unchanged"
+    true rather than nearly true.
+
+    Quoted scalars keep their explicit tags, so an author who wrote `"true"` or
+    `!!int 8443` still gets what they asked for.
+    """
+
+
+def _verbatim_scalar(loader, node):  # type: (object, object) -> str
+    return node.value
+
+
+for _tag in (
+    "tag:yaml.org,2002:bool",
+    "tag:yaml.org,2002:int",
+    "tag:yaml.org,2002:float",
+    "tag:yaml.org,2002:null",
+    "tag:yaml.org,2002:timestamp",
+):
+    _VerbatimScalarLoader.add_constructor(_tag, _verbatim_scalar)
+
+
 def _looks_like_provider_document(value):  # type: (bytes) -> bool
     """Return whether these bytes are a proxy-provider document at all.
 
@@ -479,7 +509,7 @@ def _load_provider_document(value):  # type: (bytes) -> dict
     """Return the provider mapping, or None when this is not one."""
 
     try:
-        document = yaml.safe_load(value)
+        document = yaml.load(value, Loader=_VerbatimScalarLoader)
     except yaml.YAMLError:
         # Not YAML at all, which the URI-line classifier may still accept.
         return None

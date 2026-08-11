@@ -409,6 +409,12 @@ authentication, extraction, process, or permission errors to warnings.
   (`scripts`, `hooks`, `plugins`, `controller`, `tun`, `listeners`) must be
   refused outright rather than filtered. `PROVIDER_TYPES` spells the same
   measured protocol set the URI allowlist does, in that format's vocabulary.
+- Provider scalars are loaded verbatim, never through Python's YAML 1.1
+  interpretation. The backend reads YAML 1.2, so `NO`, `12:30`, `0755`, `0x1F`,
+  and `1.10` mean different things on the two sides; a naive round trip turns
+  `password: NO` into `password: false`, which the backend rejects. Anything
+  that re-serialises provider content must preserve the literal text of plain
+  scalars while still honouring an explicit tag.
 - A provider node's label comes from the document's own `name` field, which is
   the container's declared display text rather than a protocol envelope, and
   receives the same treatment as a URI fragment: redacted, whitespace-folded,

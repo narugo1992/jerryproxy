@@ -591,3 +591,61 @@ def test_a_provider_label_is_bounded_and_terminal_safe():
     parsed = parse_subscription_body(body)
 
     assert len(parsed.records[0][1]) <= 64
+
+
+@pytest.mark.parametrize(
+    "written, expected",
+    (
+        # PyYAML implements YAML 1.1 and the backend reads 1.2, so each of these
+        # means something different on the two sides. Measured against Mihomo
+        # 1.19.29: `password: NO` is accepted as a string, and the
+        # `password: false` a naive round trip produces is rejected outright.
+        ("NO", "NO"),
+        ("yes", "yes"),
+        ("Off", "Off"),
+        ("12:30", "12:30"),
+        ("0755", "0755"),
+        ("0x1F", "0x1F"),
+        ("1.10", "1.10"),
+        ("null", "null"),
+        ("~", "~"),
+        ("1_000", "1_000"),
+    ),
+)
+def test_a_provider_credential_survives_the_round_trip_verbatim(written, expected):
+    """A node that works in Clash must not be changed by passing through here.
+
+    The payload is published to the backend unchanged, so a scalar reinterpreted
+    on the way through is a credential silently replaced with a different one.
+    """
+
+    body = (
+        "proxies: [{name: a, type: ss, server: 192.0.2.1, port: 8443,"
+        " cipher: aes-256-gcm, password: %s}]\n" % written
+    ).encode("ascii")
+
+    payload = parse_subscription_body(body).records[0][2]
+    proxy = yaml.safe_load(payload)["proxies"][0]
+
+    assert proxy["password"] == expected
+    assert isinstance(proxy["password"], str), "a credential must not become another type"
+
+
+def test_a_provider_port_survives_as_written():
+    """Ports stay verbatim too, and the backend still accepts them quoted."""
+
+    body = b"proxies: [{name: a, type: ss, server: 192.0.2.1, port: 8443, cipher: c, password: p}]\n"
+
+    proxy = yaml.safe_load(parse_subscription_body(body).records[0][2])["proxies"][0]
+
+    assert proxy["port"] == "8443"
+
+
+def test_an_explicitly_quoted_provider_scalar_keeps_its_own_meaning():
+    """Only plain scalars are held verbatim; an explicit tag is still honoured."""
+
+    body = b'proxies: [{name: a, type: ss, server: 192.0.2.1, port: 1, cipher: c, password: "true"}]\n'
+
+    proxy = yaml.safe_load(parse_subscription_body(body).records[0][2])["proxies"][0]
+
+    assert proxy["password"] == "true"
