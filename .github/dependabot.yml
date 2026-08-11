@@ -51,6 +51,12 @@ updates:
       # tabulate 0.10 requires >= 3.10; 0.9.0 is the newest declaring 3.7.
       - dependency-name: tabulate
         versions: [">=0.10"]
+      # requests 2.32 requires >= 3.8; 2.31.0 is the newest declaring 3.7.
+      - dependency-name: requests
+        versions: [">=2.32"]
+      # wheel 0.45 requires >= 3.8; 0.42.0 is the newest declaring 3.7.
+      - dependency-name: wheel
+        versions: [">=0.45"]
       # urllib3 2 requires >= 3.10, and the standalone build additionally
       # targets OpenSSL 1.1.0, which urllib3 2 dropped. This ignore outlives
       # the 3.7 block: remove it only when both constraints are retired.

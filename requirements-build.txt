@@ -2,4 +2,4 @@ build==1.1.1
 pyinstaller>=5.13.2,<7
 setuptools==68.0.0
 twine<6
-wheel==0.41.3
+wheel==0.42.0
