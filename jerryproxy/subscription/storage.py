@@ -41,7 +41,7 @@ _ID_HEX = 32
 _MAXIMUM_DISPLAY_BYTES = 512
 _MAXIMUM_URI_BYTES = 16 * 1024
 _MAXIMUM_STATE_BYTES = 16 * 1024 * 1024
-_FORMATS = ("uri-lines", "base64-uri-lines")
+_FORMATS = ("uri-lines", "base64-uri-lines", "mihomo-provider")
 _IDENTITY_KEY_BYTES = 32
 _MAXIMUM_TOMBSTONES = 4096
 _IDENTITY_FILE = "identity.key"
@@ -570,6 +570,23 @@ def _remove_quarantine_locked(paths, operation, expected_identity):  # type: (ob
         raise SubscriptionStateError("subscription removal quarantine cleanup failed") from error
 
 
+def reparse_hint(format_name):  # type: (str) -> str
+    """Return the hint that reproduces this stored format exactly.
+
+    A stored projection is revalidated by reparsing its own bytes, so the hint
+    has to name the format it was classified as. Choosing between two formats
+    meant a third was reparsed as URI lines and reported as drift on every
+    read, for every record written in it.
+    """
+
+    if format_name == "base64-uri-lines":
+        # Base64 is recovered by the auto path, which unwraps it first.
+        return "auto"
+    if format_name == "mihomo-provider":
+        return "mihomo-provider"
+    return "uri-lines"
+
+
 def _node_mismatch_error(name, has_source=True):
     # type: (str, bool) -> SubscriptionNodesMismatchError
     """Report recoverable drift together with the command that repairs it.
@@ -700,7 +717,7 @@ def _record_from_value(value, parser=None):  # type: (dict, Optional[Subscriptio
     try:
         parser.parse(
             body,
-            format_hint="auto" if value["format"] == "base64-uri-lines" else "uri-lines",
+            format_hint=reparse_hint(value["format"]),
         )
     except (SubscriptionFetchError, SubscriptionParseError, SubscriptionStateError, ValueError) as error:
         # The digest-protected source must remain parseable at all before any
@@ -730,7 +747,7 @@ def _require_node_projection(record, parser):  # type: (SubscriptionRecord, Subs
     try:
         parsed = parser.parse(
             record.body,
-            format_hint="auto" if record.format == "base64-uri-lines" else "uri-lines",
+            format_hint=reparse_hint(record.format),
         )
     except (SubscriptionFetchError, SubscriptionParseError, SubscriptionStateError, ValueError) as error:
         # A tolerant read already accepted these bytes; a parse failure here is

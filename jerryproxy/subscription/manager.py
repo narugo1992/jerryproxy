@@ -21,7 +21,7 @@ from ..errors import (
 )
 from ..lock import JerryProxyOperationLock
 from .interfaces import SubscriptionParser
-from .storage import SubscriptionStore, _require_node_projection, build_record, validate_subscription_name
+from .storage import SubscriptionStore, _require_node_projection, build_record, reparse_hint, validate_subscription_name
 from .transport import MIHOMO_SUBSCRIPTION_PARSER, FetchedSubscription, fetch_subscription, validate_source_url
 
 _DEFAULT_FETCH_SUBSCRIPTION = fetch_subscription
@@ -542,7 +542,7 @@ class SubscriptionManager(object):
 
     def _validate_locked(self, name):  # type: (str) -> SubscriptionRecord
         record = self.store._get_locked(name)
-        parsed = self.parser.parse(record.body, record.format if record.format != "base64-uri-lines" else "auto")
+        parsed = self.parser.parse(record.body, reparse_hint(record.format))
         if len(parsed.records) != len(record.nodes):
             raise SubscriptionError("subscription validation changed node count")
         return record

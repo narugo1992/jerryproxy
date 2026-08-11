@@ -175,6 +175,16 @@
       "obligation": "notice"
     },
     {
+      "name": "pyyaml",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice",
+      "note": "Parses Mihomo/Clash provider YAML subscriptions. Loading goes through a SafeLoader subclass whose implicit resolvers follow the YAML 1.2 core schema, so no constructor can instantiate an arbitrary object from provider-controlled bytes."
+    },
+    {
       "name": "requests",
       "license": "Apache-2.0",
       "distribution": [

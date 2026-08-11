@@ -5,11 +5,12 @@ import os
 import tempfile
 from pathlib import Path
 
-from ..errors import JerryProxyError
+from ..errors import JerryProxyError, SubscriptionParseError
 from ..home import JerryProxyPaths
 from ..subscription import parse_subscription_body
 from ..subscription.interfaces import NodeSource, ProxyNode, SubscriptionParser
 from ..subscription.manager import SubscriptionManager
+from ..subscription.transport import MIHOMO_SUBSCRIPTION_PARSER
 from .result import CheckResult, _error_result
 
 
@@ -84,6 +85,59 @@ class _ProbeParser(SubscriptionParser):
     def parse(self, body, format_hint="auto"):  # type: (bytes, str) -> object
         self.parses += 1
         return parse_subscription_body(body, format_hint=format_hint)
+
+
+_PROVIDER_PROBE_BODY = (
+    b"proxies:\n"
+    b"  - {name: probe-ss, type: ss, server: 192.0.2.1, port: 8443,"
+    b" cipher: aes-256-gcm, password: PROBESSPASSWORD}\n"
+    b"  - {name: probe-hy2, type: hysteria2, server: 192.0.2.2, port: 443,"
+    b" password: PROBEHY2PASSWORD, sni: example.invalid}\n"
+    b"  - {name: probe-gone, type: wireguard, server: 192.0.2.3, port: 51820}\n"
+)
+
+
+def _check_provider_document():
+    """Classify the container format Clash-family providers actually serve.
+
+    A build that reads only URI lines rejects half of the subscriptions in the
+    wild as a format fault, so this reports whether the shipped parser accepts a
+    provider document, splits it into standalone per-node documents, refuses the
+    full-configuration fields, and keeps credentials out of what it renders.
+    """
+
+    try:
+        parsed = MIHOMO_SUBSCRIPTION_PARSER.parse(_PROVIDER_PROBE_BODY, format_hint="auto")
+    except (ValueError, JerryProxyError) as error:
+        # A packaged parser that cannot read its own fixture is a diagnostic error.
+        return _error_result(error)
+    if parsed.format != "mihomo-provider":
+        return CheckResult.fail("a provider document was not classified as one")
+    if tuple(item[0] for item in parsed.records) != ("ss", "hysteria2"):
+        return CheckResult.fail("provider classification produced an unexpected type set")
+    if parsed.skipped != (("wireguard", 1),):
+        return CheckResult.fail("the provider parser did not report the unsupported proxy")
+    for unused_scheme, display, payload in parsed.records:
+        if "PROBE" in display:
+            return CheckResult.fail("a provider label carried credential material")
+        if not payload.startswith("proxies:"):
+            return CheckResult.fail("a provider node payload is not a standalone document")
+
+    unsafe = _PROVIDER_PROBE_BODY + b"listeners: [{name: probe, type: tun}]\n"
+    try:
+        MIHOMO_SUBSCRIPTION_PARSER.parse(unsafe, format_hint="auto")
+    except SubscriptionParseError:
+        # The only accepted outcome: honouring these fields would let a
+        # provider-controlled body reach the controller or the host's routing.
+        pass
+    except (ValueError, JerryProxyError) as error:
+        return _error_result(error)
+    else:
+        return CheckResult.fail("a provider document carrying listeners was accepted")
+    return CheckResult.ok(
+        "provider documents are split into %d standalone node documents and "
+        "configuration fields are refused" % len(parsed.records)
+    )
 
 
 def _check_subscription_state():

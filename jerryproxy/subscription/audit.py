@@ -30,6 +30,11 @@ from copy import deepcopy
 # JerryProxy still parses none of these. It forwards the URI verbatim, and the
 # runtime session refuses to report readiness unless the backend confirms it
 # accepted that exact line -- which is what makes widening this list safe.
+#: Proxy `type:` values accepted from a provider document. These are the same
+#: protocols as :data:`SUPPORTED_SCHEMES`, spelled the way the provider format
+#: spells them: it says `hysteria2`, never the `hy2` URI alias, and it says
+#: `ss` for Shadowsocks. Membership is the same measured claim -- each has a
+#: data-plane fixture proving it carries traffic.
 SUPPORTED_SCHEMES = (
     "ss",
     "vmess",
@@ -40,6 +45,12 @@ SUPPORTED_SCHEMES = (
     "tuic",
     "anytls",
 )
+
+#: Proxy `type:` values accepted from a provider document. Derived from the one
+#: allowlist rather than written out again: two hand-maintained copies drifted
+#: once already. The provider format has no `hy2` alias -- it always spells the
+#: protocol `hysteria2` -- so that URI-only spelling is the single exclusion.
+PROVIDER_TYPES = tuple(scheme for scheme in SUPPORTED_SCHEMES if scheme != "hy2")
 
 #: Credential-free source-pinned Mihomo parser identity.
 MIHOMO_PARSER_IDENTITY = {

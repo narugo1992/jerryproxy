@@ -62,6 +62,20 @@ READ\_TIMEOUT
    :no-value:
 
 
+UNSAFE\_PROVIDER\_KEYS
+-----------------------------------------------------
+
+.. autodata:: UNSAFE_PROVIDER_KEYS
+   :no-value:
+
+
+MAXIMUM\_PROVIDER\_PROXIES
+-----------------------------------------------------
+
+.. autodata:: MAXIMUM_PROVIDER_PROXIES
+   :no-value:
+
+
 MIHOMO\_SUBSCRIPTION\_PARSER
 -----------------------------------------------------
 

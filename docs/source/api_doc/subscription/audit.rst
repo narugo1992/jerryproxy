@@ -13,6 +13,13 @@ SUPPORTED\_SCHEMES
    :no-value:
 
 
+PROVIDER\_TYPES
+-----------------------------------------------------
+
+.. autodata:: PROVIDER_TYPES
+   :no-value:
+
+
 MIHOMO\_PARSER\_IDENTITY
 -----------------------------------------------------
 

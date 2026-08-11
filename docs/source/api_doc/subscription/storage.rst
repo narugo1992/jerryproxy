@@ -26,6 +26,12 @@ validate\_subscription\_name
 .. autofunction:: validate_subscription_name
 
 
+reparse\_hint
+-----------------------------------------------------
+
+.. autofunction:: reparse_hint
+
+
 build\_record
 -----------------------------------------------------
 

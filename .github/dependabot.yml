@@ -57,6 +57,9 @@ updates:
       # wheel 0.45 requires >= 3.8; 0.42.0 is the newest declaring 3.7.
       - dependency-name: wheel
         versions: [">=0.45"]
+      # PyYAML 6.0.2 requires >= 3.8; 6.0.1 is the newest declaring 3.7.
+      - dependency-name: PyYAML
+        versions: [">=6.0.2"]
       # urllib3 2 requires >= 3.10, and the standalone build additionally
       # targets OpenSSL 1.1.0, which urllib3 2 dropped. This ignore outlives
       # the 3.7 block: remove it only when both constraints are retired.

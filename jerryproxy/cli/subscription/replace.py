@@ -40,10 +40,10 @@ the environment value remains hidden and other names are rejected.
 @click.option(
     "--format",
     "format_hint",
-    type=click.Choice(["auto", "uri-lines"]),
+    type=click.Choice(["auto", "uri-lines", "mihomo-provider"]),
     default="auto",
     show_default=True,
-    help="Classify the source as Base64 or plaintext URI lines.",
+    help="Classify the source: Base64 or plaintext URI lines, or provider YAML.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit sanitized JSON.")
 @click.pass_context

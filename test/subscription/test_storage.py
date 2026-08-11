@@ -1050,3 +1050,44 @@ def test_drift_names_the_command_that_can_actually_repair_it(tmp_path, source_ur
     assert expected in message
     other = "replace" if source_url else "refresh"
     assert "subscription %s drifted" % other not in message
+
+
+PROVIDER = b"""proxies:
+  - {name: tokyo, type: ss, server: 192.0.2.1, port: 8443, cipher: aes-256-gcm, password: sspass}
+  - {name: osaka, type: hysteria2, server: 192.0.2.2, port: 443, password: hy2pass, sni: e.invalid}
+"""
+
+
+def test_a_provider_subscription_survives_a_store_and_reload(tmp_path):
+    """A stored projection is revalidated by reparsing its own bytes.
+
+    That reparse has to reproduce the format it was classified as. Choosing
+    between only two formats meant a third was reparsed as URI lines and
+    reported as drift on every read, for every record written in it.
+    """
+
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+
+    stored = manager.add("clash", None, body=PROVIDER)
+    reloaded = manager.get("clash")
+
+    assert stored.format == "mihomo-provider"
+    assert [node.node_id for node in reloaded.nodes] == [node.node_id for node in stored.nodes]
+    assert [node.scheme for node in reloaded.nodes] == ["ss", "hysteria2"]
+    # Every read path, not just `get`: drift here would block the inventory.
+    assert [record.name for record in manager.list()] == ["clash"]
+    assert manager.validate("clash").node_count == 2
+
+
+def test_a_provider_node_keeps_its_credentials_off_the_public_view(tmp_path):
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    record = SubscriptionManager(paths).add("clash", None, body=PROVIDER)
+
+    public = json.dumps(record.public(include_nodes=True))
+
+    for secret in ("sspass", "hy2pass", "192.0.2.1", "192.0.2.2"):
+        assert secret not in public
+    # The runtime boundary still returns the payload the backend consumes.
+    assert record.nodes[0].secret_uri().startswith("proxies:")
+    assert "sspass" in record.nodes[0].secret_uri()

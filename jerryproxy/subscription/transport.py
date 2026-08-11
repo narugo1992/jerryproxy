@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import requests
+import yaml
 from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
@@ -19,7 +20,12 @@ from urllib3.poolmanager import PoolManager
 from urllib3.util.connection import create_connection
 
 from ..errors import SubscriptionFetchError, SubscriptionParseError
-from .audit import MIHOMO_PARSER_IDENTITY, SUPPORTED_SCHEMES
+from .audit import (
+    _FIELD_DISPOSITION_MANIFEST,
+    MIHOMO_PARSER_IDENTITY,
+    PROVIDER_TYPES,
+    SUPPORTED_SCHEMES,
+)
 from .interfaces import SubscriptionParser
 from .model import ParsedSubscription
 from .redaction import redact_text, terminal_safe_text
@@ -450,6 +456,216 @@ def _validate_uri_line(line):  # type: (str) -> Tuple[str, str, str]
     return scheme, _display_for_uri(line), line
 
 
+#: Top-level keys a provider document must not carry. A proxy provider holds
+#: proxies; these belong to a full Clash configuration and would let a
+#: provider-controlled body reach code execution, the controller, or the host's
+#: routing. Kept in one place with the audit manifest that records them.
+UNSAFE_PROVIDER_KEYS = frozenset(_FIELD_DISPOSITION_MANIFEST["unsafe"]["rejected_fields"])
+MAXIMUM_PROVIDER_PROXIES = MAXIMUM_RECORDS
+
+
+class _CoreSchemaLoader(yaml.SafeLoader):
+    """A safe loader that resolves plain scalars the way the backend does.
+
+    PyYAML implements YAML 1.1; the backend reads YAML 1.2. Where the two
+    disagree, re-serialising a parsed entry changes what a value means -- and
+    measured against Mihomo 1.19.29, `password: NO` is accepted as a string
+    while the `password: false` a 1.1 round trip produces is rejected outright.
+
+    This replaces the implicit resolvers with the YAML 1.2 core schema, rather
+    than making every scalar a string. Reading a document the way its consumer
+    reads it is the property that matters: `true` stays boolean, `8443` stays an
+    integer, `null` stays null, and only the spellings the two versions actually
+    disagree about -- `NO`, `on`, `12:30`, `1_000` -- stay text. An explicitly
+    tagged or quoted scalar is untouched, because only implicit resolution is
+    replaced.
+    """
+
+
+_CoreSchemaLoader.yaml_implicit_resolvers = {}
+for _tag, _pattern, _first in (
+    ("tag:yaml.org,2002:bool", r"^(?:true|True|TRUE|false|False|FALSE)$", list("tTfF")),
+    (
+        "tag:yaml.org,2002:int",
+        r"^[-+]?(?:[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+)$",
+        list("-+0123456789"),
+    ),
+    (
+        "tag:yaml.org,2002:float",
+        r"^[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?$"
+        r"|^[-+]?\.(?:inf|Inf|INF)$|^\.(?:nan|NaN|NAN)$",
+        list("-+0123456789."),
+    ),
+    ("tag:yaml.org,2002:null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
+    ("tag:yaml.org,2002:merge", r"^<<$", ["<"]),
+):
+    _CoreSchemaLoader.add_implicit_resolver(_tag, re.compile(_pattern), _first)
+
+
+def _core_schema_int(loader, node):  # type: (object, object) -> int
+    """Read an integer the way YAML 1.2 does, not the way YAML 1.1 does.
+
+    Replacing the resolvers is not enough: PyYAML's own integer constructor
+    treats a leading zero as octal, so `0755` becomes 493 where the backend
+    reads 755. Only an explicit `0o` prefix is octal in the core schema.
+    """
+
+    value = loader.construct_scalar(node)
+    negative = value.startswith("-")
+    digits = value[1:] if value[:1] in ("-", "+") else value
+    if digits.startswith(("0o", "0O")):
+        number = int(digits[2:], 8)
+    elif digits.startswith(("0x", "0X")):
+        number = int(digits[2:], 16)
+    else:
+        number = int(digits, 10)
+    return -number if negative else number
+
+
+_CoreSchemaLoader.add_constructor("tag:yaml.org,2002:int", _core_schema_int)
+
+
+def _looks_like_provider_document(value):  # type: (bytes) -> bool
+    """Return whether these bytes are a proxy-provider document at all.
+
+    Deliberately narrow: a mapping carrying a `proxies` list. A Base64 blob
+    parses as a YAML scalar rather than a mapping, so this cannot misfire on
+    the URI-line formats and take a body away from them.
+    """
+
+    return _load_provider_document(value) is not None
+
+
+def _load_provider_document(value):  # type: (bytes) -> dict
+    """Return the provider mapping, or None when this is not one."""
+
+    try:
+        document = yaml.load(value, Loader=_CoreSchemaLoader)
+    except yaml.composer.ComposerError as error:
+        # A body that is YAML but carries several documents is a provider
+        # mistake, not "neither Base64 nor URI lines", which would send the
+        # reader hunting for a newline or encoding fault that is not there.
+        raise SubscriptionParseError(
+            "provider body carries more than one YAML document"
+        ) from error
+    except yaml.YAMLError:
+        # Not YAML at all, which the URI-line classifier may still accept.
+        return None
+    except RecursionError as error:
+        # A provider-controlled body nested past the interpreter's limit is a
+        # rejected source, not a crash: RecursionError is not a subscription
+        # error, so letting it escape would surface as a bare traceback.
+        raise SubscriptionParseError("provider document is nested too deeply") from error
+    if not isinstance(document, dict):
+        return None
+    proxies = document.get("proxies")
+    if not isinstance(proxies, list):
+        return None
+    return document
+
+
+def _provider_display(proxy, index):  # type: (dict, int) -> str
+    """Derive a label from the provider's own display field.
+
+    This format has no URI fragment, and `name` is the container's declared
+    display text rather than a protocol envelope, so it is the same kind of
+    provider-controlled string the fragment is -- and gets the same treatment:
+    redacted, terminal-safe, whitespace-folded, and bounded.
+    """
+
+    value = proxy.get("name")
+    if not isinstance(value, str) or not value.strip():
+        kind = proxy.get("type")
+        if isinstance(kind, str) and kind.strip():
+            # Bounded like the `name` branch: an unbounded fallback could push a
+            # record past the stored display limit and reject a usable node.
+            return terminal_safe_text(kind.strip())[:MAXIMUM_LABEL_CHARACTERS] or "proxy-%d" % index
+        return "proxy-%d" % index
+    label = " ".join(value.split())
+    label = terminal_safe_text(redact_text(label))
+    return label[:MAXIMUM_LABEL_CHARACTERS] or "proxy-%d" % index
+
+
+def _parse_provider_document(body):  # type: (bytes) -> ParsedSubscription
+    """Split one provider document into per-proxy provider documents.
+
+    Each node keeps a complete single-proxy document as its payload, so the
+    runtime publishes it unchanged and no protocol field is ever interpreted
+    here. Re-serialising one entry is not the same as understanding it.
+    """
+
+    document = _load_provider_document(body)
+    if document is None:
+        raise SubscriptionParseError("subscription body is not a proxy provider document")
+    # Compared case-insensitively: the contract says such a document is
+    # refused outright, and `Listeners` is the same field as `listeners`.
+    unsafe = sorted(
+        key
+        for key in document
+        if isinstance(key, str) and key.strip().lower() in UNSAFE_PROVIDER_KEYS
+    )
+    if unsafe:
+        # Naming the keys is safe: they are format vocabulary, not values.
+        raise SubscriptionParseError(
+            "provider document carries fields a subscription must not set: %s"
+            % ", ".join(unsafe)
+        )
+    proxies = document["proxies"]
+    if len(proxies) > MAXIMUM_PROVIDER_PROXIES:
+        raise SubscriptionParseError("subscription record count exceeds the bound")
+    records = []
+    skipped = {}
+    for index, proxy in enumerate(proxies):
+        if not isinstance(proxy, dict):
+            skipped["malformed"] = skipped.get("malformed", 0) + 1
+            continue
+        kind = proxy.get("type")
+        if not isinstance(kind, str) or not kind.strip():
+            skipped["malformed"] = skipped.get("malformed", 0) + 1
+            continue
+        scheme = kind.strip().lower()
+        if not _SCHEME_NAME.match(scheme) or len(scheme) > _MAXIMUM_SCHEME_NAME:
+            skipped["malformed"] = skipped.get("malformed", 0) + 1
+            continue
+        if scheme not in PROVIDER_TYPES:
+            skipped[scheme] = skipped.get(scheme, 0) + 1
+            continue
+        try:
+            payload = yaml.safe_dump(
+                {"proxies": [proxy]},
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=True,
+            )
+        except RecursionError as error:
+            # Same boundary on the way out: a structure that loaded may still
+            # exceed the limit when it is written back.
+            raise SubscriptionParseError("provider node is nested too deeply") from error
+        except yaml.YAMLError as error:
+            # A value PyYAML declines to represent is a rejected record, not a
+            # crash in the middle of publishing state.
+            raise SubscriptionParseError("provider node cannot be re-serialised") from error
+        if len(payload.encode("utf-8")) > MAXIMUM_URI_BYTES:
+            raise SubscriptionParseError("subscription URI record exceeds the size bound")
+        records.append((scheme, _provider_display(proxy, index), payload))
+    if not records:
+        raise _unsupported_provider_error(skipped)
+    return ParsedSubscription(
+        "mihomo-provider", body, tuple(records), tuple(sorted(skipped.items()))
+    )
+
+
+def _unsupported_provider_error(skipped):  # type: (dict) -> SubscriptionParseError
+    """Report a provider document whose every proxy type is unusable."""
+
+    if not skipped:
+        raise SubscriptionParseError("provider document declares no proxies")
+    return SubscriptionParseError(
+        "subscription contains no supported nodes; it declares %s and this build "
+        "supports %s" % (_describe(skipped), ", ".join(PROVIDER_TYPES))
+    )
+
+
 def _parse_v2ray_subscription_body(body, format_hint="auto"):
     # type: (bytes, str) -> ParsedSubscription
     """Classify Base64/plain URI lines and preserve each accepted URI exactly."""
@@ -461,7 +677,9 @@ def _parse_v2ray_subscription_body(body, format_hint="auto"):
     if format_hint not in ("auto", "uri-lines", "mihomo-provider"):
         raise SubscriptionParseError("unsupported subscription format: %s" % format_hint)
     if format_hint == "mihomo-provider":
-        raise SubscriptionParseError("mihomo provider YAML requires a native provider projection")
+        return _parse_provider_document(body)
+    if format_hint == "auto" and _looks_like_provider_document(body):
+        return _parse_provider_document(body)
     candidates = []
     if format_hint in ("auto", "uri-lines"):
         if _looks_like_uri_lines(body):
