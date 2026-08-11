@@ -575,7 +575,7 @@ def test_a_provider_document_of_only_unsupported_types_names_them():
 def test_a_base64_body_is_not_mistaken_for_a_provider_document():
     """The provider probe must not take a body away from the URI formats."""
 
-    encoded = base64.b64encode(SS if isinstance(SS, bytes) else SS.encode("ascii"))
+    encoded = base64.b64encode(SS)
 
     parsed = parse_subscription_body(encoded)
 
@@ -597,22 +597,19 @@ def test_a_provider_label_is_bounded_and_terminal_safe():
     "written, expected",
     (
         # PyYAML implements YAML 1.1 and the backend reads 1.2, so each of these
-        # means something different on the two sides. Measured against Mihomo
+        # resolves differently on the two sides. Measured against Mihomo
         # 1.19.29: `password: NO` is accepted as a string, and the
-        # `password: false` a naive round trip produces is rejected outright.
+        # `password: false` a 1.1 round trip produces is rejected outright.
         ("NO", "NO"),
         ("yes", "yes"),
         ("Off", "Off"),
         ("12:30", "12:30"),
-        ("0755", "0755"),
-        ("0x1F", "0x1F"),
-        ("1.10", "1.10"),
-        ("null", "null"),
-        ("~", "~"),
         ("1_000", "1_000"),
+        ("y", "y"),
+        ("On", "On"),
     ),
 )
-def test_a_provider_credential_survives_the_round_trip_verbatim(written, expected):
+def test_a_scalar_the_two_yaml_versions_disagree_about_stays_text(written, expected):
     """A node that works in Clash must not be changed by passing through here.
 
     The payload is published to the backend unchanged, so a scalar reinterpreted
@@ -631,14 +628,45 @@ def test_a_provider_credential_survives_the_round_trip_verbatim(written, expecte
     assert isinstance(proxy["password"], str), "a credential must not become another type"
 
 
-def test_a_provider_port_survives_as_written():
-    """Ports stay verbatim too, and the backend still accepts them quoted."""
+@pytest.mark.parametrize(
+    "written, expected",
+    (
+        # Where the two versions agree, the value keeps its type: holding these
+        # as text would invent a divergence rather than remove one.
+        ("8443", 8443),
+        ("true", True),
+        ("false", False),
+        ("null", None),
+        ("~", None),
+        ("1.5", 1.5),
+        ("0x1F", 31),
+        ("0o755", 493),
+        # A leading zero is decimal in 1.2; PyYAML's own constructor reads it as
+        # octal, which is why the constructor is replaced as well as the resolver.
+        ("0755", 755),
+        ("010", 10),
+    ),
+)
+def test_a_scalar_the_two_yaml_versions_agree_about_keeps_its_type(written, expected):
+    body = (
+        "proxies: [{name: a, type: ss, server: 192.0.2.1, port: 8443,"
+        " cipher: aes-256-gcm, extra: %s}]\n" % written
+    ).encode("ascii")
+
+    proxy = yaml.safe_load(parse_subscription_body(body).records[0][2])["proxies"][0]
+
+    assert proxy["extra"] == expected
+    assert type(proxy["extra"]) is type(expected)
+
+
+def test_a_provider_port_stays_an_integer():
+    """Reading the document the way the backend reads it leaves ports alone."""
 
     body = b"proxies: [{name: a, type: ss, server: 192.0.2.1, port: 8443, cipher: c, password: p}]\n"
 
     proxy = yaml.safe_load(parse_subscription_body(body).records[0][2])["proxies"][0]
 
-    assert proxy["port"] == "8443"
+    assert proxy["port"] == 8443 and isinstance(proxy["port"], int)
 
 
 def test_an_explicitly_quoted_provider_scalar_keeps_its_own_meaning():
@@ -682,7 +710,86 @@ def test_an_alias_heavy_provider_document_stays_bounded():
     )
 
     parsed = parse_subscription_body(body.encode("ascii"))
+    payload = parsed.records[0][2]
 
-    # 9**7 leaves if expanded; the payload stays a few kilobytes because the
-    # aliases survive as aliases.
-    assert len(parsed.records[0][2]) < 64 * 1024
+    # The named property, not a size bound the parser already enforces: the
+    # shared structure is written back as an anchor and an alias rather than
+    # expanded into 9**6 leaves.
+    assert "&id" in payload and "*id" in payload
+    assert payload.count("aaaaaaaa") == 9, "the shared list must be written once"
+
+
+def test_the_published_provider_payload_is_byte_stable():
+    """A stored provider projection is revalidated by re-emitting it.
+
+    So the emitter's exact output is part of the stored contract, not an
+    implementation detail: any change to quoting, key order, or line folding
+    inside the allowed PyYAML range would turn every stored provider record
+    into drift at once, forcing a refetch or a hard error where no source URL
+    was saved. Pinning one payload makes that fail here instead.
+    """
+
+    body = (
+        b"proxies:\n"
+        b"  - {name: tokyo, type: ss, server: 192.0.2.1, port: 8443,"
+        b" cipher: aes-256-gcm, password: NO, udp: true}\n"
+    )
+
+    payload = parse_subscription_body(body).records[0][2]
+
+    assert payload == (
+        "proxies:\n"
+        "- cipher: aes-256-gcm\n"
+        "  name: tokyo\n"
+        "  password: 'NO'\n"
+        "  port: 8443\n"
+        "  server: 192.0.2.1\n"
+        "  type: ss\n"
+        "  udp: true\n"
+    )
+
+
+def test_a_multi_document_body_says_so():
+    """Reporting it as a format fault would send the reader after nothing."""
+
+    body = b"proxies: [{name: a, type: ss, server: 1.2.3.4, port: 1, cipher: c, password: p}]\n---\nother: 1\n"
+
+    with pytest.raises(SubscriptionParseError, match="more than one YAML document"):
+        parse_subscription_body(body)
+
+
+@pytest.mark.parametrize("spelling", ("listeners", "Listeners", "LISTENERS", " tun "))
+def test_a_configuration_field_is_refused_whatever_its_case(spelling):
+    """The contract says refused outright, so case must not be a way past it."""
+
+    body = (
+        "proxies: [{name: a, type: ss, server: 1.2.3.4, port: 1, cipher: c, password: p}]\n"
+        '"%s": anything\n' % spelling
+    ).encode("ascii")
+
+    with pytest.raises(SubscriptionParseError, match="must not set"):
+        parse_subscription_body(body)
+
+
+def test_a_provider_type_fallback_label_is_bounded():
+    """A node with no name must not be rejected by its own fallback label.
+
+    The label falls back to the proxy's type. Surrounding whitespace is stripped
+    before the type is matched, so a heavily padded `type` still names a
+    supported protocol -- and an unbounded label built from the raw value would
+    push the record past the stored display limit, rejecting a node that works.
+    """
+
+    padded = "ss" + "\t" * 200
+    body = (
+        'proxies: [{type: "%s", server: 1.2.3.4, port: 1, cipher: c, password: p}]\n' % padded
+    ).encode("ascii")
+
+    parsed = parse_subscription_body(body)
+
+    scheme, label, unused_payload = parsed.records[0]
+    assert scheme == "ss", "padding must not change which protocol this is"
+    # Each tab renders as a six-character escape, so an unbounded label here
+    # would be over 1200 characters.
+    assert label == "ss"
+    assert len(label) <= 64

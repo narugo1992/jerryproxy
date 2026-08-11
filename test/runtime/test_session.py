@@ -1019,7 +1019,9 @@ def test_a_backend_that_bypasses_the_node_is_refused(tmp_path):
 
     message = str(failure.value)
     assert "would route traffic directly" in message
-    assert "ss://" in message, "the message must name the protocol that was refused"
+    # The protocol, not a URI scheme: provider YAML nodes have no URI, so
+    # naming a "dialect" there would point at something that does not exist.
+    assert "Its ss configuration" in message, "the message must name the protocol refused"
     assert record.nodes[0].secret_uri() not in message, "it must not name the URI"
     # A refused start leaves no child and no secret-bearing artifact.
     assert runtime.process is None or runtime.process.stopped

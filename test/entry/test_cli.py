@@ -179,6 +179,7 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     assert "[7/28] packaged backend catalog: OK" in result.output
     assert "[8/28] catalog platform selection: OK" in result.output
     assert "[9/28] subscription parser: OK" in result.output
+    assert "[10/28] provider document parser: OK" in result.output
     assert "[11/28] subscription state: OK" in result.output
     assert "[12/28] node source boundary: OK" in result.output
     assert "[13/28] runtime projection: OK" in result.output

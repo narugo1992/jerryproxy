@@ -409,12 +409,17 @@ authentication, extraction, process, or permission errors to warnings.
   (`scripts`, `hooks`, `plugins`, `controller`, `tun`, `listeners`) must be
   refused outright rather than filtered. `PROVIDER_TYPES` spells the same
   measured protocol set the URI allowlist does, in that format's vocabulary.
-- Provider scalars are loaded verbatim, never through Python's YAML 1.1
-  interpretation. The backend reads YAML 1.2, so `NO`, `12:30`, `0755`, `0x1F`,
-  and `1.10` mean different things on the two sides; a naive round trip turns
-  `password: NO` into `password: false`, which the backend rejects. Anything
-  that re-serialises provider content must preserve the literal text of plain
-  scalars while still honouring an explicit tag.
+- A provider document is read the way its consumer reads it: PyYAML implements
+  YAML 1.1 and the backend reads YAML 1.2, so the loader replaces the implicit
+  resolvers with the 1.2 core schema *and* the integer constructor, which still
+  treats a leading zero as octal. Holding every scalar as text instead would
+  invent a divergence where the two versions agree; only the spellings they
+  actually disagree about -- `NO`, `on`, `12:30`, `1_000` -- stay text, while
+  `true`, `8443`, and `null` keep their types.
+- A provider node's stored payload is emitter output, so the emitter's exact
+  bytes are part of the stored contract: any change to quoting, key order, or
+  folding would turn every stored provider record into drift at once. One exact
+  payload is pinned in a test so that fails there instead.
 - A provider body is provider-controlled input, so every failure it can cause
   must arrive as a subscription error. `RecursionError` from a deeply nested
   document is not one and escapes as a bare traceback unless it is converted at

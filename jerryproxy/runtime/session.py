@@ -565,8 +565,8 @@ class RuntimeSession(object):
             raise RuntimeSessionError(
                 "%s did not accept node %s: it parsed %d nodes from the published "
                 "source and would route traffic directly instead of through the "
-                "node. The %s:// protocol or that provider's URI dialect is not "
-                "usable by %s %s. Choose another node with `jerryproxy node list`."
+                "node. Its %s configuration is not usable by %s %s. Choose another "
+                "node with `jerryproxy node list`."
                 % (
                     self.driver.name,
                     self.node.node_id,

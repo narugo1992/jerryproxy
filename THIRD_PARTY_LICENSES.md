@@ -46,7 +46,7 @@ executables, where there is no dependency resolution to defer to.
 - **importlib-metadata** — Reached only on Python versions without a sufficient standard-library implementation.
 - **pyinstaller** — Build-time only, except for the bootloader that is linked into every frozen executable. PyInstaller's licence grants an explicit exception permitting the resulting executable to be distributed under terms of the author's choosing. JerryProxy relies on that exception; without it the standalone artifacts could not be Apache-2.0. The exception does not extend to a modified bootloader, so the bootloader must stay unmodified.
 - **pyinstaller-hooks-contrib** — Build-time only, except for runtime hooks that PyInstaller embeds in the frozen executable. Distributed under the same dual arrangement as PyInstaller itself, so the same bootloader exception governs the result.
-- **pyyaml** — Parses Mihomo/Clash provider YAML subscriptions. Only `safe_load` is used, so no constructor can instantiate an arbitrary object from provider-controlled bytes.
+- **pyyaml** — Parses Mihomo/Clash provider YAML subscriptions. Loading goes through a SafeLoader subclass whose implicit resolvers follow the YAML 1.2 core schema, so no constructor can instantiate an arbitrary object from provider-controlled bytes.
 - **tqdm** — Shipped unmodified; MPL-2.0 section 3.2 is satisfied by naming the upstream release as the source form.
 - **typing-extensions** — Reached only on Python versions that need the backported typing constructs.
 - **zipp** — Reached through importlib-metadata.

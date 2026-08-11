@@ -464,34 +464,65 @@ UNSAFE_PROVIDER_KEYS = frozenset(_FIELD_DISPOSITION_MANIFEST["unsafe"]["rejected
 MAXIMUM_PROVIDER_PROXIES = MAXIMUM_RECORDS
 
 
-class _VerbatimScalarLoader(yaml.SafeLoader):
-    """A safe loader that hands every plain scalar back as its literal text.
+class _CoreSchemaLoader(yaml.SafeLoader):
+    """A safe loader that resolves plain scalars the way the backend does.
 
-    PyYAML implements YAML 1.1, where `NO` is boolean false, `12:30` is 750, and
-    `0755` is 493. The backend reads YAML 1.2, where all three are strings. A
-    provider node re-serialised through Python's interpretation therefore
-    changes meaning: measured against Mihomo 1.19.29, `password: NO` is accepted
-    as a string while the `password: false` it round-trips to is rejected
-    outright. Keeping scalars verbatim is what makes "carried through unchanged"
-    true rather than nearly true.
+    PyYAML implements YAML 1.1; the backend reads YAML 1.2. Where the two
+    disagree, re-serialising a parsed entry changes what a value means -- and
+    measured against Mihomo 1.19.29, `password: NO` is accepted as a string
+    while the `password: false` a 1.1 round trip produces is rejected outright.
 
-    Quoted scalars keep their explicit tags, so an author who wrote `"true"` or
-    `!!int 8443` still gets what they asked for.
+    This replaces the implicit resolvers with the YAML 1.2 core schema, rather
+    than making every scalar a string. Reading a document the way its consumer
+    reads it is the property that matters: `true` stays boolean, `8443` stays an
+    integer, `null` stays null, and only the spellings the two versions actually
+    disagree about -- `NO`, `on`, `12:30`, `1_000` -- stay text. An explicitly
+    tagged or quoted scalar is untouched, because only implicit resolution is
+    replaced.
     """
 
 
-def _verbatim_scalar(loader, node):  # type: (object, object) -> str
-    return node.value
-
-
-for _tag in (
-    "tag:yaml.org,2002:bool",
-    "tag:yaml.org,2002:int",
-    "tag:yaml.org,2002:float",
-    "tag:yaml.org,2002:null",
-    "tag:yaml.org,2002:timestamp",
+_CoreSchemaLoader.yaml_implicit_resolvers = {}
+for _tag, _pattern, _first in (
+    ("tag:yaml.org,2002:bool", r"^(?:true|True|TRUE|false|False|FALSE)$", list("tTfF")),
+    (
+        "tag:yaml.org,2002:int",
+        r"^[-+]?(?:[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+)$",
+        list("-+0123456789"),
+    ),
+    (
+        "tag:yaml.org,2002:float",
+        r"^[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?$"
+        r"|^[-+]?\.(?:inf|Inf|INF)$|^\.(?:nan|NaN|NAN)$",
+        list("-+0123456789."),
+    ),
+    ("tag:yaml.org,2002:null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
+    ("tag:yaml.org,2002:merge", r"^<<$", ["<"]),
 ):
-    _VerbatimScalarLoader.add_constructor(_tag, _verbatim_scalar)
+    _CoreSchemaLoader.add_implicit_resolver(_tag, re.compile(_pattern), _first)
+
+
+def _core_schema_int(loader, node):  # type: (object, object) -> int
+    """Read an integer the way YAML 1.2 does, not the way YAML 1.1 does.
+
+    Replacing the resolvers is not enough: PyYAML's own integer constructor
+    treats a leading zero as octal, so `0755` becomes 493 where the backend
+    reads 755. Only an explicit `0o` prefix is octal in the core schema.
+    """
+
+    value = loader.construct_scalar(node)
+    negative = value.startswith("-")
+    digits = value[1:] if value[:1] in ("-", "+") else value
+    if digits.startswith(("0o", "0O")):
+        number = int(digits[2:], 8)
+    elif digits.startswith(("0x", "0X")):
+        number = int(digits[2:], 16)
+    else:
+        number = int(digits, 10)
+    return -number if negative else number
+
+
+_CoreSchemaLoader.add_constructor("tag:yaml.org,2002:int", _core_schema_int)
 
 
 def _looks_like_provider_document(value):  # type: (bytes) -> bool
@@ -509,7 +540,14 @@ def _load_provider_document(value):  # type: (bytes) -> dict
     """Return the provider mapping, or None when this is not one."""
 
     try:
-        document = yaml.load(value, Loader=_VerbatimScalarLoader)
+        document = yaml.load(value, Loader=_CoreSchemaLoader)
+    except yaml.composer.ComposerError as error:
+        # A body that is YAML but carries several documents is a provider
+        # mistake, not "neither Base64 nor URI lines", which would send the
+        # reader hunting for a newline or encoding fault that is not there.
+        raise SubscriptionParseError(
+            "provider body carries more than one YAML document"
+        ) from error
     except yaml.YAMLError:
         # Not YAML at all, which the URI-line classifier may still accept.
         return None
@@ -538,7 +576,11 @@ def _provider_display(proxy, index):  # type: (dict, int) -> str
     value = proxy.get("name")
     if not isinstance(value, str) or not value.strip():
         kind = proxy.get("type")
-        return terminal_safe_text(kind) if isinstance(kind, str) and kind.strip() else "proxy-%d" % index
+        if isinstance(kind, str) and kind.strip():
+            # Bounded like the `name` branch: an unbounded fallback could push a
+            # record past the stored display limit and reject a usable node.
+            return terminal_safe_text(kind.strip())[:MAXIMUM_LABEL_CHARACTERS] or "proxy-%d" % index
+        return "proxy-%d" % index
     label = " ".join(value.split())
     label = terminal_safe_text(redact_text(label))
     return label[:MAXIMUM_LABEL_CHARACTERS] or "proxy-%d" % index
@@ -555,7 +597,13 @@ def _parse_provider_document(body):  # type: (bytes) -> ParsedSubscription
     document = _load_provider_document(body)
     if document is None:
         raise SubscriptionParseError("subscription body is not a proxy provider document")
-    unsafe = sorted(UNSAFE_PROVIDER_KEYS.intersection(document))
+    # Compared case-insensitively: the contract says such a document is
+    # refused outright, and `Listeners` is the same field as `listeners`.
+    unsafe = sorted(
+        key
+        for key in document
+        if isinstance(key, str) and key.strip().lower() in UNSAFE_PROVIDER_KEYS
+    )
     if unsafe:
         # Naming the keys is safe: they are format vocabulary, not values.
         raise SubscriptionParseError(
