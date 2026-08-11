@@ -111,3 +111,67 @@ jobs:
           name: python-package
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Publish the GitHub release
+    # After PyPI: a release that advertises a version pip cannot install would
+    # be worse than a late release. Both artifact sets come from this same run,
+    # so the executables attached here are the ones the clean-runner stage
+    # verified and the wheel is the one that was published.
+    needs: [standalone, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-package
+          path: staging/python
+      - uses: actions/download-artifact@v8
+        with:
+          name: jerryproxy-linux-amd64
+          path: staging/linux
+      - uses: actions/download-artifact@v8
+        with:
+          name: jerryproxy-windows-amd64
+          path: staging/windows
+      - uses: actions/download-artifact@v8
+        with:
+          name: jerryproxy-macos-amd64
+          path: staging/macos
+      - name: Collect the assets and merge their digests
+        id: assets
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          # Exactly the files a user downloads: the two installable packages and
+          # one archive per platform. The staged loose binaries stay behind.
+          cp staging/python/*.whl staging/python/*.tar.gz assets/
+          cp staging/linux/jerryproxy-linux-amd64.tar.gz assets/
+          cp staging/windows/jerryproxy-windows-amd64.zip assets/
+          cp staging/macos/jerryproxy-macos-amd64.tar.gz assets/
+          # One manifest over exactly what is attached, recomputed here rather
+          # than concatenated: a digest copied from an upstream file could
+          # describe a different byte sequence than the one being uploaded.
+          ( cd assets && sha256sum -- * > SHA256SUMS )
+          cat assets/SHA256SUMS
+          count=$(find assets -maxdepth 1 -type f ! -name SHA256SUMS | wc -l)
+          if [ "$count" -ne 5 ]; then
+            echo "::error::expected 5 release assets, staged $count" >&2
+            exit 1
+          fi
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # `--verify-tag` refuses to invent a tag, so a mistyped ref fails here
+          # instead of creating a release that points at nothing.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --verify-tag \
+            --generate-notes \
+            assets/*
