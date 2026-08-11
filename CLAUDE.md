@@ -22,7 +22,8 @@ The canonical technical identifiers are all `jerryproxy`:
 
 The backend version manager, official release resolution, verified downloads,
 safe extraction, manifests, active-link switching, bounded
-`V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS/VMess/VLESS URI lines that
+`V2RAY_SUBSCRIPTION` ingestion for Base64/plain URI lines of the encrypted
+protocols the qualified backend was measured to use, which
 keeps the supported nodes of a mixed-protocol container and reports the rest as
 a scheme-name aggregate, and a
 Mihomo `1.19.29` foreground session now exist. The public server listener is

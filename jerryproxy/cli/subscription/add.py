@@ -24,8 +24,10 @@ The URL is bearer material. It is never placed in argv, output, logs, or child
 environment. A URL source is retained only in owner-private state so an
 explicit refresh can reuse it; it is never public evidence or CLI output.
 Base64-wrapped and plaintext URI lines
-for SS, VMess, and VLESS are accepted; provider/native profiles are outside
-this first implementation slice. Use --json for deterministic automation.
+are accepted for the encrypted protocols the qualified backend was measured to
+use: SS, VMess, VLESS, Trojan, Hysteria2 (also spelled hy2), TUIC, and AnyTLS.
+Other schemes are skipped and reported as an aggregate. Provider and native
+profiles are outside this first implementation slice. Use --json for deterministic automation.
 """
 
 

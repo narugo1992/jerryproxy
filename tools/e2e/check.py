@@ -13,7 +13,6 @@ Run through ``make e2e_check``. Nothing here contacts a network or starts Docker
 """
 
 import argparse
-import inspect
 import os
 import re
 import subprocess
@@ -57,6 +56,10 @@ SUPPLIED_SECRETS = {
 # server: a second URI spelling, not a second protocol, so it shares a fixture.
 # Written out rather than inferred from the name, because guessing by prefix
 # would silently accept a scheme that no service actually serves.
+#: The one scheme that is an alias rather than a protocol: `hy2` reaches the
+#: hysteria2 server, so its service declares `E2E_PROTOCOL: hysteria2`.
+SCHEME_ALIASES = {"hy2": "hysteria2"}
+
 SCHEME_SERVICES = {
     "ss": "ss-server",
     "vmess": "vmess-server",
@@ -137,7 +140,7 @@ def _check_every_value_stays_emitted():  # type: () -> list
 
 # Provisioned values that are not secret-bearing, so their absence from the
 # failure-log redaction list is correct rather than an omission.
-PUBLIC_OUTPUTS = ("marker", "tls_certificate", "tls_server_name", "subscription_body")
+PUBLIC_OUTPUTS = ("marker", "tls_certificate", "tls_server_name")
 
 
 def _check_every_secret_reaches_redaction():  # type: () -> list
@@ -167,8 +170,6 @@ def _check_every_secret_reaches_redaction():  # type: () -> list
         "the redaction script is given R_%s, which the provisioner does not emit" % name
         for name in sorted(set(stale))
     )
-    # `subscription_body` is Base64 of every node URI, so redacting the parts is
-    # what covers it; assert the classification is deliberate, not forgotten.
     unknown = sorted(set(PUBLIC_OUTPUTS) - set(provision.OUTPUT_NAMES))
     failures.extend(
         "%s is classified as public but is not provisioned at all" % name for name in unknown
@@ -280,9 +281,25 @@ def _check_enforcement_is_declared():  # type: () -> list
     # GITHUB_ENV by an earlier step, because the runner's credential heuristic
     # silently drops an output that looks like a credential URI.
     composed = set(provision.NODE_VARIABLES.values())
-    emitter = re.search(r"provision\.py --emit-nodes", text)
+    emitter = re.search(r"^ +env:\n((?: +[A-Z0-9_]+: .*\n)+) +run: python tools/e2e/provision\.py --emit-nodes",
+                        text, re.MULTILINE)
     if composed and emitter is None:
         failures.append("nothing composes the node URIs, so the lane would see none")
+    elif composed:
+        # Greping for the command is not enough: the step also has to be handed
+        # every value the composer demands, or it exits before the tests run.
+        supplied = set(re.findall(r"^ +([A-Z0-9_]+):", emitter.group(1), re.MULTILINE))
+        failures.extend(
+            "the composing step does not supply %s, which --emit-nodes requires" % name.upper()
+            for name in provision.COMPOSITION_INPUTS
+            if name.upper() not in supplied
+        )
+        # And nothing more: the step has no use for private key material.
+        extra = sorted(supplied - {name.upper() for name in provision.COMPOSITION_INPUTS})
+        failures.extend(
+            "the composing step is handed %s, which composition never reads" % name
+            for name in extra
+        )
     for name in contract.REQUIRED:
         if name in composed:
             continue
@@ -340,35 +357,39 @@ def _check_housekeeping_cannot_gate_the_lane():  # type: () -> list
 
 
 def _required_names(module, builder):  # type: (object, object) -> list
-    """Every variable a builder demands, including through the helpers it calls.
+    """Every variable a builder demands, by running it and recording the asks.
 
-    Reading only the builder's own source misses requirements moved into a
-    shared helper -- the TLS material is required by `_tls()`, not by the four
-    builders that call it, and a guard that stopped at the builder reported
-    those services as fully supplied while their containers would die at start.
+    A regex walk over the source missed a requirement reached through an alias,
+    a dispatch table, or a helper without a leading underscore, and missed it
+    *silently* -- the guard stayed green while the container would die at start.
+    Running the builder with `_required` replaced answers for every call shape,
+    which is also what this repository prefers over static inference.
+
+    The builders only read the environment and format a dict, so calling one has
+    no side effect beyond the recorded names. `_write_private` is neutralised
+    because it would otherwise write the TLS files.
     """
 
-    seen = set()
-    pending = [builder]
-    names = []
-    while pending:
-        target = pending.pop()
-        name = getattr(target, "__name__", None)
-        if name is None or name in seen:
-            continue
-        seen.add(name)
-        try:
-            source = inspect.getsource(target)
-        except (OSError, TypeError):
-            # A callable with no retrievable source cannot be scanned; say so
-            # rather than silently treating it as requiring nothing.
-            raise AssertionError("cannot read the source of %s" % name)
-        names.extend(re.findall(r'_required\("([A-Z0-9_]+)"\)', source))
-        for called in re.findall(r"\b(_[a-z][a-z0-9_]*)\s*\(", source):
-            helper = getattr(module, called, None)
-            if callable(helper) and called not in seen:
-                pending.append(helper)
-    return names
+    recorded = []
+
+    def record(name):  # type: (str) -> str
+        recorded.append(name)
+        # A plausible value, so a builder that parses what it reads still runs.
+        return "10001" if name.endswith("_PORT") else "recorded-%s" % name.lower()
+
+    originals = {"_required": module._required}
+    module._required = record
+    if hasattr(module, "_write_private"):
+        originals["_write_private"] = module._write_private
+        module._write_private = lambda path, encoded: None
+    try:
+        builder()
+    except SystemExit as error:
+        raise AssertionError("%s could not be exercised: %s" % (builder.__name__, error))
+    finally:
+        for name, value in originals.items():
+            setattr(module, name, value)
+    return recorded
 
 
 def _check_images_get_what_they_require():  # type: () -> list
@@ -437,8 +458,23 @@ def _check_every_supported_scheme_has_a_fixture():  # type: () -> list
             )
         elif service not in PROXY_SERVICES:
             failures.append("%s:// names service %s, which does not exist" % (scheme, service))
-        elif not _service_block(_workflow(), service):
-            failures.append("%s:// names service %s, which the workflow omits" % (scheme, service))
+        else:
+            block = _service_block(_workflow(), service)
+            if not block:
+                failures.append(
+                    "%s:// names service %s, which the workflow omits" % (scheme, service)
+                )
+                continue
+            # Naming a service is not enough: it has to serve this protocol.
+            # A table row pointing at a server configured for something else
+            # would leave the scheme untested while the guard read green.
+            declared = re.search(r"E2E_PROTOCOL:\s*(\S+)", block)
+            expected = SCHEME_ALIASES.get(scheme, scheme)
+            if declared is None or declared.group(1) != expected:
+                failures.append(
+                    "%s:// names service %s, which serves %s"
+                    % (scheme, service, declared.group(1) if declared else "no declared protocol")
+                )
     extra = sorted(set(contract.NODE_VARIABLES) - set(SUPPORTED_SCHEMES))
     failures.extend(
         "the lane tests %s://, which the product no longer accepts" % scheme for scheme in extra

@@ -25,12 +25,12 @@ from ..errors import (
 )
 from ..home import is_path_alias
 from ..lock import JerryProxyOperationLock
+from .audit import SUPPORTED_SCHEMES
 from .interfaces import SubscriptionParser
 from .model import NodeRecord, SubscriptionRecord
 from .transport import (
     MAXIMUM_BODY_BYTES,
     MIHOMO_SUBSCRIPTION_PARSER,
-    SUPPORTED_SCHEMES,
     source_digest,
     validate_source_url,
 )

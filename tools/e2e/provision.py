@@ -246,11 +246,31 @@ def compose_nodes(values):  # type: (dict) -> dict
     }
 
 
+#: Exactly what :func:`compose_nodes` reads. Demanding more than this would fail
+#: the composing step over values it never uses -- and it did: `subscription_body`
+#: is produced *by* composition, so requiring it made the step unsatisfiable. It
+#: also keeps the step from being handed the private key material it has no use
+#: for.
+COMPOSITION_INPUTS = (
+    "ss_password",
+    "vmess_id",
+    "vless_id",
+    "reality_public_key",
+    "short_id",
+    "trojan_password",
+    "hysteria2_password",
+    "tuic_uuid",
+    "tuic_password",
+    "anytls_password",
+    "tls_server_name",
+)
+
+
 def _emit_nodes(path):  # type: (str) -> int
     """Write the node URIs to a GITHUB_ENV file from parts already in the env."""
 
     parts = {}
-    for name in OUTPUT_NAMES:
+    for name in COMPOSITION_INPUTS:
         parts[name] = os.environ.get(name.upper(), "")
     missing = sorted(name for name, value in parts.items() if not value)
     if missing:
@@ -266,7 +286,11 @@ def _emit_nodes(path):  # type: (str) -> int
 def main():  # type: () -> int
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--xray", help="pinned proxy binary used for key generation")
-    parser.add_argument("--output", required=True, help="GITHUB_OUTPUT file to append to")
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="file to append to: GITHUB_OUTPUT normally, GITHUB_ENV with --emit-nodes",
+    )
     parser.add_argument(
         "--emit-nodes",
         action="store_true",

@@ -181,7 +181,12 @@ def test_subscription_source_serves_bounded_base64_uri_lines():
     lines = [line for line in decoded.decode("utf-8").splitlines() if line.strip()]
     schemes = sorted(line.split("://", 1)[0].lower() for line in lines)
 
-    assert schemes == ["ss", "vless", "vmess"], "source must serve exactly the three schemes"
+    # Derived from the lane contract, so a scheme added to the product arrives
+    # here rather than leaving a stale literal that passes by describing less
+    # than the fixture actually serves.
+    assert schemes == sorted(_contract.NODE_VARIABLES), (
+        "the source must serve exactly the schemes the lane claims to cover"
+    )
 
 
 def _fixture_body():  # type: () -> bytes

@@ -1107,9 +1107,10 @@ def test_a_recovery_candidate_that_the_backend_bypasses_is_not_accepted(tmp_path
     """A bypassing alternate must be refused even though it probes healthy.
 
     This is the dangerous shape, not a candidate that simply fails: routing
-    directly makes egress succeed, so the probe passes and the sweep would
-    otherwise settle on a node the backend never used. The probe therefore
-    reports the alternate as healthy, and only the load check can reject it.
+    directly makes egress succeed, so the probe would pass and the sweep would
+    otherwise settle on a node the backend never used. The probe is therefore
+    set to report the alternate healthy; the load check rejects it first, inside
+    the launch, so the probe is never reached for that candidate at all.
     """
 
     record = _record(nodes=2)

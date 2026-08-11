@@ -565,7 +565,7 @@ tampering and is never repaired automatically.
 - [x] Add guided backend operations and confirmed scoped cleanup/removal.
 - [ ] Add offline archive installation with an explicit digest.
 - [x] Implement managed `V2RAY_SUBSCRIPTION` fetch, private state, and URI
-  inventory for SS/VMess/VLESS.
+  inventory for every encrypted protocol the qualified backend accepts.
 - [x] Implement the Mihomo foreground driver, loopback listener, merged named
   backend stream, and bounded health recovery.
 - [ ] Implement durable controller operations, measurements, and service

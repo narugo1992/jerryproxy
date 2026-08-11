@@ -49,10 +49,16 @@ def main():  # type: () -> int
     except (binascii.Error, ValueError):
         sys.stderr.write("%s must be base64\n" % BODY_VARIABLE)
         return 2
-    # Served exactly as received: a subscription body is Base64 URI lines, and
-    # re-encoding here would hide a malformed value behind a valid-looking one.
+    # Served as received apart from a trailing newline: a subscription body is
+    # Base64 URI lines, and re-encoding it here would hide a malformed value
+    # behind a valid-looking one.
     body = encoded.encode("ascii") + b"\n"
     records = len([line for line in decoded.splitlines() if line.strip()])
+    if not records:
+        # Serving an empty body would start cleanly, pass the health check, and
+        # surface much later as a product parse error against the wrong suspect.
+        sys.stderr.write("%s decodes to no records\n" % BODY_VARIABLE)
+        return 2
     port = int(os.environ.get("E2E_PORT", "8081"))
     server = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
     server.body = body

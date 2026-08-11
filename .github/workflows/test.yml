@@ -437,11 +437,9 @@ jobs:
         # variable rather than on anything real. The URIs are derived, so they
         # are rebuilt here from the parts instead.
         env:
-          MARKER: ${{ needs.provision.outputs.marker }}
           SS_PASSWORD: ${{ needs.provision.outputs.ss_password }}
           VMESS_ID: ${{ needs.provision.outputs.vmess_id }}
           VLESS_ID: ${{ needs.provision.outputs.vless_id }}
-          REALITY_PRIVATE_KEY: ${{ needs.provision.outputs.reality_private_key }}
           REALITY_PUBLIC_KEY: ${{ needs.provision.outputs.reality_public_key }}
           SHORT_ID: ${{ needs.provision.outputs.short_id }}
           TROJAN_PASSWORD: ${{ needs.provision.outputs.trojan_password }}
@@ -449,8 +447,6 @@ jobs:
           TUIC_UUID: ${{ needs.provision.outputs.tuic_uuid }}
           TUIC_PASSWORD: ${{ needs.provision.outputs.tuic_password }}
           ANYTLS_PASSWORD: ${{ needs.provision.outputs.anytls_password }}
-          TLS_CERTIFICATE: ${{ needs.provision.outputs.tls_certificate }}
-          TLS_KEY: ${{ needs.provision.outputs.tls_key }}
           TLS_SERVER_NAME: ${{ needs.provision.outputs.tls_server_name }}
         run: python tools/e2e/provision.py --emit-nodes --output "$GITHUB_ENV"
 
@@ -480,8 +476,10 @@ jobs:
           fail_ci_if_error: true
       - name: Capture fixture logs on failure
         if: failure()
-        # Every provisioned value goes into the redaction script, and the logs
-        # are actually piped through it. A fixture that rejects its
+        # Every secret-bearing provisioned value goes into the redaction script,
+        # and the logs are actually piped through it. `make e2e_check` enforces
+        # that in both directions; the non-secret values it exempts are named
+        # there rather than left to inference. A fixture that rejects its
         # configuration can echo a credential, and the Reality private key
         # reaches no other variable in this job.
         env:
@@ -498,6 +496,7 @@ jobs:
           R_tuic_password: ${{ needs.provision.outputs.tuic_password }}
           R_anytls_password: ${{ needs.provision.outputs.anytls_password }}
           R_tls_key: ${{ needs.provision.outputs.tls_key }}
+          R_subscription_body: ${{ needs.provision.outputs.subscription_body }}
         run: |
           set -uo pipefail
           umask 077

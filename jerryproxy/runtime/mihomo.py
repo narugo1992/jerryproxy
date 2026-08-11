@@ -134,6 +134,16 @@ def _private_bytes(path, payload, boundary=None):  # type: (Path, bytes, object)
                 pass
 
 
+def _splice_before(lines, marker, addition):  # type: (list, str, list) -> None
+    """Insert lines before an exact existing line, or fail rather than guess."""
+
+    try:
+        index = lines.index(marker)
+    except ValueError:
+        raise RuntimeSessionError("mihomo projection is missing its %r line" % marker)
+    lines[index:index] = addition
+
+
 def _control_request(port, secret, path, timeout):  # type: (int, str, str, float) -> dict
     """Read one small JSON document from the private loopback control endpoint.
 
@@ -288,18 +298,26 @@ def build_provider_config(
         "rules:",
         "  - MATCH,jerryproxy",
     ]
+    # Spliced at a named marker rather than a fixed index: with both the control
+    # channel and authentication present, index arithmetic on the first splice
+    # silently moves the second one's target.
     if control_port is not None:
         # Always loopback, even when the proxy listener is bound to 0.0.0.0:
         # `--bind-all` opts into exposing the proxy, never the control channel.
-        lines[2:2] = [
-            "external-controller: 127.0.0.1:%d" % control_port,
-            "secret: '%s'" % control_secret.replace("'", "''"),
-        ]
+        _splice_before(
+            lines,
+            "mode: rule",
+            [
+                "external-controller: 127.0.0.1:%d" % control_port,
+                "secret: '%s'" % control_secret.replace("'", "''"),
+            ],
+        )
     if username is not None:
-        lines[6:6] = [
-            "authentication:",
-            "  - '%s:%s'" % (username, password),
-        ]
+        _splice_before(
+            lines,
+            "proxy-providers:",
+            ["authentication:", "  - '%s:%s'" % (username, password)],
+        )
     del uri_bytes
     return ("\n".join(lines) + "\n").encode("utf-8")
 

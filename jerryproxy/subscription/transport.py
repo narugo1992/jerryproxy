@@ -536,7 +536,7 @@ class MihomoSubscriptionParser(SubscriptionParser):
     """Source-pinned Mihomo 1.19.29 adapter for opaque URI-line records.
 
     Mihomo consumes the resulting private provider projection and is the sole
-    authority for SS, VMess, and VLESS URI semantics.
+    authority for every accepted protocol's URI semantics.
     """
 
     @property
