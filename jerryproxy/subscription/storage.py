@@ -570,17 +570,29 @@ def _remove_quarantine_locked(paths, operation, expected_identity):  # type: (ob
         raise SubscriptionStateError("subscription removal quarantine cleanup failed") from error
 
 
-def _node_mismatch_error(name):  # type: (str) -> SubscriptionNodesMismatchError
+def _node_mismatch_error(name, has_source=True):
+    # type: (str, bool) -> SubscriptionNodesMismatchError
     """Report recoverable drift together with the command that repairs it.
+
+    Which command that is depends on whether a source URL was saved: repair
+    refetches, so a subscription added from a file or stdin cannot be refreshed
+    and must be supplied again.  Naming the wrong one sends the reader to a
+    command that fails.
 
     The name has already passed :func:`validate_subscription_name`, so it is
     bounded ASCII and safe to render.  No source bytes, URL, or node material
     is included.
     """
 
+    if has_source:
+        instruction = "run `jerryproxy subscription refresh %s` to rebuild them" % name
+    else:
+        instruction = (
+            "it has no saved source URL, so run `jerryproxy subscription replace %s` "
+            "to supply the source again" % name
+        )
     return SubscriptionNodesMismatchError(
-        "subscription nodes do not match source bytes: %s; "
-        "run `jerryproxy subscription refresh %s` to rebuild them" % (name, name)
+        "subscription nodes do not match source bytes: %s; %s" % (name, instruction)
     )
 
 
@@ -725,7 +737,7 @@ def _require_node_projection(record, parser):  # type: (SubscriptionRecord, Subs
         # still corrupt private state rather than recoverable drift.
         raise SubscriptionStateError("subscription source bytes cannot be revalidated") from error
     if tuple(parsed.records) != tuple((node.scheme, node.display, node.uri) for node in record.nodes):
-        raise _node_mismatch_error(record.name)
+        raise _node_mismatch_error(record.name, has_source=bool(record.source_url))
 
 
 def _record_value(record):  # type: (SubscriptionRecord) -> dict

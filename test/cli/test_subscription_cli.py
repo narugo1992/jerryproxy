@@ -765,10 +765,29 @@ def _publish_drifted(home, source_url=None):
     return manager.add("main", source_url, format_hint="uri-lines")
 
 
-def test_read_only_commands_name_the_repair_for_a_drifted_projection(tmp_path):
+@pytest.mark.parametrize(
+    "source_url, repair",
+    (
+        # Repair refetches, so which command is named depends on whether the
+        # subscription has a URL to refetch from. Both are covered, because a
+        # message naming a command that cannot work is worse than none.
+        ("https://provider.example/secret", "refresh"),
+        (None, "replace"),
+    ),
+)
+def test_read_only_commands_name_the_repair_for_a_drifted_projection(
+    tmp_path, monkeypatch, source_url, repair
+):
     runner = CliRunner()
     home = tmp_path / "home"
-    _publish_drifted(home)
+    if source_url is not None:
+        # Publishing a URL-bearing record would otherwise fetch; unit tests stay
+        # offline, and the fetch itself is not what this asserts.
+        monkeypatch.setattr(
+            "jerryproxy.subscription.manager.fetch_subscription",
+            lambda *args, **kwargs: FetchedSubscription(SS.encode("ascii"), source_url),
+        )
+    _publish_drifted(home, source_url=source_url)
 
     for arguments in (
         ("subscription", "list"),
@@ -778,7 +797,9 @@ def test_read_only_commands_name_the_repair_for_a_drifted_projection(tmp_path):
     ):
         result = _invoke(runner, home, *arguments)
         assert result.exit_code == 1, result.output
-        assert "jerryproxy subscription refresh main" in str(result.exception)
+        assert "jerryproxy subscription %s main" % repair in str(result.exception)
+        other = "replace" if repair == "refresh" else "refresh"
+        assert "jerryproxy subscription %s main" % other not in str(result.exception)
 
 
 def test_guided_node_selection_repairs_a_drifted_projection(tmp_path, monkeypatch):
