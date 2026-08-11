@@ -86,7 +86,14 @@ Python.
 
 ## Installation
 
-The project is not published on PyPI yet. For development:
+The project is not published on PyPI yet. When a `v*` tag is pushed, one
+release publishes the wheel and sdist to PyPI and attaches those two files plus
+a standalone executable archive for Linux, Windows, and macOS to the GitHub
+release, alongside a `SHA256SUMS` manifest covering exactly those assets. The
+standalone archives are the ones the clean-runner compatibility stage of that
+same run verified.
+
+For development:
 
 ```shell
 git clone https://github.com/narugo1992/jerryproxy.git

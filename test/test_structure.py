@@ -1,4 +1,5 @@
 import ast
+import re
 from pathlib import Path
 
 
@@ -169,3 +170,44 @@ def test_product_tests_do_not_import_repository_tools():
             if isinstance(node, ast.Import) and any(alias.name.split(".", 1)[0] == "tools" for alias in node.names):
                 violations.append(str(source.relative_to(test_root)))
     assert not violations, "test/ must only exercise the jerryproxy product: %s" % ", ".join(violations)
+
+
+def _workflow(name):
+    root = Path(__file__).parent.parent / ".github" / "workflows"
+    return (root / name).read_text(encoding="utf-8")
+
+
+def test_the_release_publishes_every_artifact_a_user_downloads():
+    """A tag must produce the packages *and* the executables, in one run.
+
+    Publishing to PyPI while the release page carries no binaries, or a release
+    page whose binaries came from a different run than the wheel, are both ways
+    to ship something nobody can check. The assets are collected from the same
+    workflow run that published, so this asserts the wiring that guarantees it.
+    """
+
+    release = _workflow("release.yml")
+    standalone = _workflow("standalone.yml")
+
+    assert "pypa/gh-action-pypi-publish" in release, "the wheel and sdist must reach PyPI"
+    assert "gh release create" in release, "a tag must create a GitHub release"
+    # Not `github.token` by accident: creating a release needs write.
+    assert "contents: write" in release
+
+    # Every platform the standalone lane builds must be attached. Derived from
+    # that lane rather than restated, so adding a platform without attaching it
+    # fails here instead of shipping a release that silently omits it.
+    archives = set(re.findall(r"archive: (jerryproxy-[a-z0-9-]+\.(?:tar\.gz|zip))", standalone))
+    assert archives, "the standalone lane declares no archives"
+    for archive in sorted(archives):
+        assert archive in release, "%s is built but never attached to the release" % archive
+
+    # The release job must consume the same run's artifacts, not rebuild them.
+    assert "needs: [standalone, publish]" in release
+    assert "SHA256SUMS" in release, "attached assets need a digest manifest"
+
+
+def test_the_release_refuses_to_invent_a_tag():
+    """`--verify-tag` keeps a mistyped ref from creating a dangling release."""
+
+    assert "--verify-tag" in _workflow("release.yml")
