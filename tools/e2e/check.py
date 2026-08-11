@@ -13,7 +13,6 @@ Run through ``make e2e_check``. Nothing here contacts a network or starts Docker
 """
 
 import argparse
-import inspect
 import os
 import re
 import subprocess
@@ -26,7 +25,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from test.e2e import _contract as contract  # noqa: E402 - path is set immediately above
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "images"))
+import singbox_entrypoint  # noqa: E402 - path is set immediately above
 import xray_entrypoint  # noqa: E402 - path is set immediately above
+
+from jerryproxy.subscription.audit import SUPPORTED_SCHEMES  # noqa: E402 - see above
+
+ENTRYPOINTS = {"xray_entrypoint": xray_entrypoint, "singbox_entrypoint": singbox_entrypoint}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKFLOW = os.path.join(HERE, "..", "..", ".github", "workflows", "test.yml")
@@ -46,12 +50,36 @@ SUPPLIED_SECRETS = {
     "reality_private_key": "SYNTHETICREALITYPRIVATEKEYSAMPLE",
     "reality_public_key": "SYNTHETICREALITYPUBLICKEYSAMPLEV",
     "short_id": "0f1e2d3c4b5a6978",
-    "ss_node": "ss://c3ludGhldGljc2FtcGxldXNlcmluZm8@127.0.0.1:10001#e2e-ss",
-    "vmess_node": "vmess://eyJhZGQiOiIxMjcuMC4wLjEiLCJpZCI6ImFiY2RlZiJ9",
-    "vless_node": (
-        "vless://abcdef12-3456-7890-abcd-ef1234567890@127.0.0.1:10003"
-        "?type=tcp&security=reality&pbk=SYNTHETICREALITYPUBLICKEYSAMPLEV&sid=0f1e2d3c4b5a6978#e2e"
-    ),
+}
+
+# Which service serves each scheme. `hy2` is an alias reaching the hysteria2
+# server: a second URI spelling, not a second protocol, so it shares a fixture.
+# Written out rather than inferred from the name, because guessing by prefix
+# would silently accept a scheme that no service actually serves.
+#: The one scheme that is an alias rather than a protocol: `hy2` reaches the
+#: hysteria2 server, so its service declares `E2E_PROTOCOL: hysteria2`.
+SCHEME_ALIASES = {"hy2": "hysteria2"}
+
+SCHEME_SERVICES = {
+    "ss": "ss-server",
+    "vmess": "vmess-server",
+    "vless": "vless-server",
+    "trojan": "trojan-server",
+    "hysteria2": "hysteria2-server",
+    "hy2": "hysteria2-server",
+    "tuic": "tuic-server",
+    "anytls": "anytls-server",
+}
+
+# Every proxy service, and the entrypoint module that renders its inbound.
+PROXY_SERVICES = {
+    "ss-server": "xray_entrypoint",
+    "vmess-server": "xray_entrypoint",
+    "vless-server": "xray_entrypoint",
+    "trojan-server": "xray_entrypoint",
+    "hysteria2-server": "singbox_entrypoint",
+    "tuic-server": "singbox_entrypoint",
+    "anytls-server": "singbox_entrypoint",
 }
 
 
@@ -108,6 +136,45 @@ def _check_every_value_stays_emitted():  # type: () -> list
         "the provisioner no longer emits %s, so redaction would never cover it" % name
         for name in dropped
     ]
+
+
+# Provisioned values that are not secret-bearing, so their absence from the
+# failure-log redaction list is correct rather than an omission.
+PUBLIC_OUTPUTS = ("marker", "tls_certificate", "tls_server_name")
+
+
+def _check_every_secret_reaches_redaction():  # type: () -> list
+    """Every secret-bearing output must appear in the failure-log redaction env.
+
+    The subset check next to this one only proves the hand-listed samples still
+    exist. Without this direction, a new secret-bearing output could reach a
+    service and never enter the redaction script, while every guard stayed green
+    and the workflow comment claiming otherwise stayed false.
+    """
+
+    text = _workflow()
+    failures = []
+    for name in provision.OUTPUT_NAMES:
+        if name in PUBLIC_OUTPUTS:
+            continue
+        if "R_%s:" % name not in text:
+            failures.append(
+                "%s is provisioned but never reaches the failure-log redaction script" % name
+            )
+    stale = [
+        name
+        for name in re.findall(r"^\s+R_([a-z0-9_]+):", text, re.MULTILINE)
+        if name not in provision.OUTPUT_NAMES
+    ]
+    failures.extend(
+        "the redaction script is given R_%s, which the provisioner does not emit" % name
+        for name in sorted(set(stale))
+    )
+    unknown = sorted(set(PUBLIC_OUTPUTS) - set(provision.OUTPUT_NAMES))
+    failures.extend(
+        "%s is classified as public but is not provisioned at all" % name for name in unknown
+    )
+    return failures
 
 
 def _check_redaction():  # type: () -> list
@@ -168,13 +235,23 @@ def _check_workflow_matches_the_provisioner():  # type: () -> list
     a missing credential rather than about the rename that caused it.
     """
 
-    referenced = set(re.findall(r"needs\.provision\.outputs\.([a-z_0-9]+)", _workflow()))
+    text = _workflow()
+    referenced = set(re.findall(r"needs\.provision\.outputs\.([a-z_0-9]+)", text))
     failures = [
         "the workflow references needs.provision.outputs.%s, which is not emitted" % name
         for name in sorted(referenced - set(provision.OUTPUT_NAMES))
     ]
     if not referenced:
         failures.append("the workflow references no provisioner output")
+    # The other direction, which this guard used to ignore: a value the tool
+    # emits but the job never declares as an output is simply invisible, and a
+    # consumer of it receives an empty string. That is how the subscription
+    # fixture came to fail on a value that had been generated correctly.
+    declared = set(re.findall(r"^      ([a-z_0-9]+): \$\{\{ steps\.generate\.outputs\.", text, re.MULTILINE))
+    failures.extend(
+        "the provisioner emits %s, which the provision job never declares as an output" % name
+        for name in sorted(set(provision.OUTPUT_NAMES) - declared)
+    )
     return failures
 
 
@@ -200,9 +277,40 @@ def _check_enforcement_is_declared():  # type: () -> list
             "the data-plane step does not set JERRYPROXY_E2E_ENFORCE=1, so a missing "
             "contract would skip silently and still report success"
         )
+    # Node URIs no longer arrive as step `env:`; they are composed into
+    # GITHUB_ENV by an earlier step, because the runner's credential heuristic
+    # silently drops an output that looks like a credential URI.
+    composed = set(provision.NODE_VARIABLES.values())
+    emitter = re.search(r"^ +env:\n((?: +[A-Z0-9_]+: .*\n)+) +run: python tools/e2e/provision\.py --emit-nodes",
+                        text, re.MULTILINE)
+    if composed and emitter is None:
+        failures.append("nothing composes the node URIs, so the lane would see none")
+    elif composed:
+        # Greping for the command is not enough: the step also has to be handed
+        # every value the composer demands, or it exits before the tests run.
+        supplied = set(re.findall(r"^ +([A-Z0-9_]+):", emitter.group(1), re.MULTILINE))
+        failures.extend(
+            "the composing step does not supply %s, which --emit-nodes requires" % name.upper()
+            for name in provision.COMPOSITION_INPUTS
+            if name.upper() not in supplied
+        )
+        # And nothing more: the step has no use for private key material.
+        extra = sorted(supplied - {name.upper() for name in provision.COMPOSITION_INPUTS})
+        failures.extend(
+            "the composing step is handed %s, which composition never reads" % name
+            for name in extra
+        )
     for name in contract.REQUIRED:
+        if name in composed:
+            continue
         if "%s:" % name not in block:
             failures.append("the data-plane step does not supply %s" % name)
+    # The composer and the lane must agree on the exact variable names.
+    mismatch = sorted(set(contract.NODE_VARIABLES.values()) ^ composed)
+    failures.extend(
+        "%s is composed or expected by only one side of the lane contract" % name
+        for name in mismatch
+    )
     return failures
 
 
@@ -248,6 +356,42 @@ def _check_housekeeping_cannot_gate_the_lane():  # type: () -> list
     ]
 
 
+def _required_names(module, builder):  # type: (object, object) -> list
+    """Every variable a builder demands, by running it and recording the asks.
+
+    A regex walk over the source missed a requirement reached through an alias,
+    a dispatch table, or a helper without a leading underscore, and missed it
+    *silently* -- the guard stayed green while the container would die at start.
+    Running the builder with `_required` replaced answers for every call shape,
+    which is also what this repository prefers over static inference.
+
+    The builders only read the environment and format a dict, so calling one has
+    no side effect beyond the recorded names. `_write_private` is neutralised
+    because it would otherwise write the TLS files.
+    """
+
+    recorded = []
+
+    def record(name):  # type: (str) -> str
+        recorded.append(name)
+        # A plausible value, so a builder that parses what it reads still runs.
+        return "10001" if name.endswith("_PORT") else "recorded-%s" % name.lower()
+
+    originals = {"_required": module._required}
+    module._required = record
+    if hasattr(module, "_write_private"):
+        originals["_write_private"] = module._write_private
+        module._write_private = lambda path, encoded: None
+    try:
+        builder()
+    except SystemExit as error:
+        raise AssertionError("%s could not be exercised: %s" % (builder.__name__, error))
+    finally:
+        for name, value in originals.items():
+            setattr(module, name, value)
+    return recorded
+
+
 def _check_images_get_what_they_require():  # type: () -> list
     """Each proxy service must supply the variables its entrypoint demands.
 
@@ -259,7 +403,7 @@ def _check_images_get_what_they_require():  # type: () -> list
 
     text = _workflow()
     failures = []
-    for service in ("ss-server", "vmess-server", "vless-server"):
+    for service in sorted(PROXY_SERVICES):
         block = _service_block(text, service)
         if not block:
             failures.append("service %s is missing from the workflow" % service)
@@ -269,16 +413,72 @@ def _check_images_get_what_they_require():  # type: () -> list
         if protocol is None:
             failures.append("service %s does not declare E2E_PROTOCOL" % service)
             continue
-        builder = xray_entrypoint.BUILDERS.get(protocol.group(1))
+        module = ENTRYPOINTS[PROXY_SERVICES[service]]
+        builder = module.BUILDERS.get(protocol.group(1))
         if builder is None:
             failures.append("service %s declares an unknown protocol" % service)
             continue
-        needed = re.findall(r'_required\("([A-Z0-9_]+)"\)', inspect.getsource(builder))
+        needed = _required_names(module, builder)
         failures.extend(
             "service %s does not supply %s, which its entrypoint requires" % (service, name)
             for name in sorted(set(needed) | {"E2E_PROTOCOL"} - supplied)
             if name not in supplied
         )
+    return failures
+
+
+def _check_every_supported_scheme_has_a_fixture():  # type: () -> list
+    """A scheme the product accepts must be proved to carry traffic.
+
+    Widening the product allowlist without a fixture would turn "measured to
+    work" back into "assumed to work", which is the whole reason this lane
+    exists. Each scheme needs a node variable the tests can select, and each
+    variable needs a provisioned value that the workflow injects.
+    """
+
+    failures = []
+    for scheme in SUPPORTED_SCHEMES:
+        variable = contract.NODE_VARIABLES.get(scheme)
+        if variable is None:
+            failures.append(
+                "the product accepts %s:// but the data-plane lane has no node for it, so "
+                "nothing proves it carries traffic" % scheme
+            )
+            continue
+        if variable not in provision.NODE_VARIABLES.values():
+            failures.append("the provisioner never composes %s" % variable)
+        if scheme not in provision.NODE_VARIABLES:
+            failures.append("the provisioner composes no node URI for %s://" % scheme)
+        # A scheme also needs a server, or nothing serves the protocol it names.
+        service = SCHEME_SERVICES.get(scheme)
+        if service is None:
+            failures.append(
+                "no proxy service is recorded for %s://, so its node URI would "
+                "address nothing" % scheme
+            )
+        elif service not in PROXY_SERVICES:
+            failures.append("%s:// names service %s, which does not exist" % (scheme, service))
+        else:
+            block = _service_block(_workflow(), service)
+            if not block:
+                failures.append(
+                    "%s:// names service %s, which the workflow omits" % (scheme, service)
+                )
+                continue
+            # Naming a service is not enough: it has to serve this protocol.
+            # A table row pointing at a server configured for something else
+            # would leave the scheme untested while the guard read green.
+            declared = re.search(r"E2E_PROTOCOL:\s*(\S+)", block)
+            expected = SCHEME_ALIASES.get(scheme, scheme)
+            if declared is None or declared.group(1) != expected:
+                failures.append(
+                    "%s:// names service %s, which serves %s"
+                    % (scheme, service, declared.group(1) if declared else "no declared protocol")
+                )
+    extra = sorted(set(contract.NODE_VARIABLES) - set(SUPPORTED_SCHEMES))
+    failures.extend(
+        "the lane tests %s://, which the product no longer accepts" % scheme for scheme in extra
+    )
     return failures
 
 
@@ -289,11 +489,16 @@ def main():  # type: () -> int
         ("private services publish no port", _check_private_services_publish_nothing()),
         ("every provisioned value stays emitted", _check_every_value_stays_emitted()),
         ("redaction covers every provisioned value", _check_redaction()),
+        ("every secret reaches redaction", _check_every_secret_reaches_redaction()),
         ("workflow references only real outputs", _check_workflow_matches_the_provisioner()),
         ("the data-plane step demands the contract", _check_enforcement_is_declared()),
         ("services supply what their images require", _check_images_get_what_they_require()),
         ("a skipped data-plane lane fails", _check_the_lane_cannot_skip_silently()),
         ("housekeeping cannot gate the lane", _check_housekeeping_cannot_gate_the_lane()),
+        (
+            "every supported scheme has a fixture",
+            _check_every_supported_scheme_has_a_fixture(),
+        ),
     )
     failed = False
     for label, failures in checks:

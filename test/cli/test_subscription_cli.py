@@ -765,10 +765,29 @@ def _publish_drifted(home, source_url=None):
     return manager.add("main", source_url, format_hint="uri-lines")
 
 
-def test_read_only_commands_name_the_repair_for_a_drifted_projection(tmp_path):
+@pytest.mark.parametrize(
+    "source_url, repair",
+    (
+        # Repair refetches, so which command is named depends on whether the
+        # subscription has a URL to refetch from. Both are covered, because a
+        # message naming a command that cannot work is worse than none.
+        ("https://provider.example/secret", "refresh"),
+        (None, "replace"),
+    ),
+)
+def test_read_only_commands_name_the_repair_for_a_drifted_projection(
+    tmp_path, monkeypatch, source_url, repair
+):
     runner = CliRunner()
     home = tmp_path / "home"
-    _publish_drifted(home)
+    if source_url is not None:
+        # Publishing a URL-bearing record would otherwise fetch; unit tests stay
+        # offline, and the fetch itself is not what this asserts.
+        monkeypatch.setattr(
+            "jerryproxy.subscription.manager.fetch_subscription",
+            lambda *args, **kwargs: FetchedSubscription(SS.encode("ascii"), source_url),
+        )
+    _publish_drifted(home, source_url=source_url)
 
     for arguments in (
         ("subscription", "list"),
@@ -778,7 +797,9 @@ def test_read_only_commands_name_the_repair_for_a_drifted_projection(tmp_path):
     ):
         result = _invoke(runner, home, *arguments)
         assert result.exit_code == 1, result.output
-        assert "jerryproxy subscription refresh main" in str(result.exception)
+        assert "jerryproxy subscription %s main" % repair in str(result.exception)
+        other = "replace" if repair == "refresh" else "refresh"
+        assert "jerryproxy subscription %s main" % other not in str(result.exception)
 
 
 def test_guided_node_selection_repairs_a_drifted_projection(tmp_path, monkeypatch):
@@ -864,16 +885,16 @@ def test_mixed_protocol_subscription_reports_what_it_skipped(tmp_path):
     body = tmp_path / "mixed.txt"
     body.write_text(
         SS
-        + "trojan://secret@example.invalid:443#unsupported\n"
+        + "ssr://c2VjcmV0\n"
         + VMESS
-        + "hysteria2://secret@example.invalid:443#also\n",
+        + "wireguard://secret@example.invalid:51820#also\n",
         encoding="ascii",
     )
 
     added = _invoke(runner, home, "subscription", "add", "main", "--file", str(body))
     assert added.exit_code == 0, added.output
     assert "Nodes: 2" in added.output
-    assert "Skipped: 1 hysteria2, 1 trojan (unsupported by this build)" in added.output
+    assert "Skipped: 1 ssr, 1 wireguard (unsupported by this build)" in added.output
     assert "secret" not in added.output
 
     shown = _invoke(runner, home, "subscription", "show", "main", "--json")
@@ -881,8 +902,8 @@ def test_mixed_protocol_subscription_reports_what_it_skipped(tmp_path):
     value = json.loads(shown.output)
     assert value["node_count"] == 2
     assert value["skipped"] == [
-        {"count": 1, "scheme": "hysteria2"},
-        {"count": 1, "scheme": "trojan"},
+        {"count": 1, "scheme": "ssr"},
+        {"count": 1, "scheme": "wireguard"},
     ]
 
 
@@ -891,7 +912,7 @@ def test_a_fully_unsupported_subscription_explains_the_gap(tmp_path):
     home = tmp_path / "home"
     body = tmp_path / "unsupported.txt"
     body.write_text(
-        "trojan://a@example.invalid:443#x\nhysteria2://b@example.invalid:443#y\n",
+        "ssr://YWJj\nwireguard://b@example.invalid:51820#y\n",
         encoding="ascii",
     )
 
@@ -900,7 +921,7 @@ def test_a_fully_unsupported_subscription_explains_the_gap(tmp_path):
     assert result.exit_code != 0
     message = str(result.exception)
     assert "no supported nodes" in message
-    assert "ss, vmess, vless" in message
+    assert "trojan" in message and "hysteria2" in message
     # Naming it a format error would send the reader after a fault that is not
     # there; this is a support gap.
     assert "Base64" not in message

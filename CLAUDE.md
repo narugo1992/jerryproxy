@@ -22,7 +22,8 @@ The canonical technical identifiers are all `jerryproxy`:
 
 The backend version manager, official release resolution, verified downloads,
 safe extraction, manifests, active-link switching, bounded
-`V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS/VMess/VLESS URI lines that
+`V2RAY_SUBSCRIPTION` ingestion for Base64/plain URI lines of the encrypted
+protocols the qualified backend was measured to use, which
 keeps the supported nodes of a mixed-protocol container and reports the rest as
 a scheme-name aggregate, and a
 Mihomo `1.19.29` foreground session now exist. The public server listener is
@@ -384,6 +385,27 @@ authentication, extraction, process, or permission errors to warnings.
   bounded redacted lines, and forwarded/persisted according to the configured
   backend log level. Future runtime drivers own other cores, native profiles,
   and backend control APIs.
+- A backend that starts and listens is not evidence that traffic uses the
+  selected node. Mihomo replaces a selector group it could not fill with a
+  direct-routing placeholder, so egress succeeds and a connectivity quorum
+  passes while nothing is proxied. `RuntimeSession` must therefore confirm
+  through a private loopback control channel, with a fresh per-session secret,
+  that the backend parsed exactly the published node and is not routing
+  directly, and must fail closed naming the scheme rather than the URI. The
+  control endpoint stays on loopback even when `--bind-all` exposes the proxy
+  listener, and its secret never reaches a log, an access file, or JSON output.
+- The control channel's port is reserved by binding and releasing, so a
+  same-UID local process can squat it between reservation and the backend's
+  bind, answer the query, and make a bypassed session look verified. That is the
+  same reserve-then-release window the proxy listener already has, and
+  continuous same-UID interference remains outside the supported threat
+  boundary; disclose it rather than claiming the check authenticates the peer.
+- A URI scheme enters `SUPPORTED_SCHEMES` only after the qualified backend was
+  measured to parse it into a usable proxy *and* a data-plane fixture proves it
+  carries traffic. `make e2e_check` fails when an allowlisted scheme has no
+  fixture. Plaintext `http://` and `socks5://` stay out: they carry no
+  encryption, and `http://` is also a subscription source scheme, so accepting
+  it as a node would let an error page be reported as usable nodes.
 - `jerryproxy.runtime.interfaces` owns the `RuntimeDriver` and
   `RuntimeProjection` contracts. Drivers own backend config syntax and child
   lifecycle; `RuntimeSession` owns the home-wide lock, private publication,

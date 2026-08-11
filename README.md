@@ -6,7 +6,8 @@ PyPI distribution, Python import, GitHub repository, CLI command, and default
 home directory all use the same name: `jerryproxy`.
 
 > **Work in progress:** the first runtime slice is implemented: bounded
-> `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, and VLESS URI
+> `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, VLESS, Trojan,
+> Hysteria2, TUIC, and AnyTLS URI
 > lines, which keeps the supported nodes of a mixed-protocol list usable and
 > reports the rest as a sanitized aggregate, sanitized home-local state, and a
 > synchronous Mihomo 1.19.29 foreground server with bounded health diagnostics
@@ -50,7 +51,8 @@ Implemented now:
 - a packaged-CLI self-check with isolated local diagnostics plus bounded,
   integrity-checked availability probes for the three built-in relays;
 - bounded `V2RAY_SUBSCRIPTION` source ingestion with private state below
-  `JERRYPROXY_HOME`, stable sanitized node IDs, SS/VMess/VLESS URI support, and
+  `JERRYPROXY_HOME`, stable sanitized node IDs, URI support for SS, VMess,
+  VLESS, Trojan, Hysteria2, TUIC, and AnyTLS, and
   mixed-protocol lists reduced to their supported nodes with an aggregate
   report of what was skipped;
 - a synchronous Mihomo 1.19.29 foreground server with an open loopback
@@ -500,6 +502,25 @@ VMess with its Base64 payload, shows its scheme instead. Labels are decoded,
 redacted, made terminal-safe, and truncated, and they are never used to select
 a node — `--node NODE_ID` remains the exact selector.
 
+A node is only reported as ready when the backend confirms it is using it.
+Mihomo silently drops a node whose protocol or URI dialect it cannot parse and
+then substitutes a direct-routing placeholder, so the listener answers, egress
+succeeds, and a health check passes while nothing is proxied at all. JerryProxy
+therefore asks the backend, over a loopback control channel with a fresh secret
+per session, whether it parsed exactly the published node and is not routing
+directly; if it is not, the session refuses to start and names the protocol
+rather than reporting a working proxy. That control endpoint stays on loopback
+even when `--bind-all` exposes the proxy listener.
+
+Because of that check, the supported scheme list can be exactly what the
+qualified backend was measured to accept: `ss`, `vmess`, `vless`, `trojan`,
+`hysteria2` (and its `hy2` spelling), `tuic`, and `anytls`. Each one has a
+data-plane fixture proving it carries traffic. `ssr` and `wireguard` are
+measured to be dropped by the backend and are reported as skipped rather than
+counted. Plaintext `http://` and `socks5://` are deliberately excluded: they
+offer no encryption, and `http://` is also the scheme of a subscription source,
+so accepting it as a node would let an error page be reported as usable nodes.
+
 Providers routinely mix protocols in one list. A subscription is accepted when
 it carries at least one node this build supports, and the entries it cannot
 interpret are skipped rather than allowed to reject the whole container. What
@@ -544,7 +565,7 @@ tampering and is never repaired automatically.
 - [x] Add guided backend operations and confirmed scoped cleanup/removal.
 - [ ] Add offline archive installation with an explicit digest.
 - [x] Implement managed `V2RAY_SUBSCRIPTION` fetch, private state, and URI
-  inventory for SS/VMess/VLESS.
+  inventory for every encrypted protocol the qualified backend accepts.
 - [x] Implement the Mihomo foreground driver, loopback listener, merged named
   backend stream, and bounded health recovery.
 - [ ] Implement durable controller operations, measurements, and service

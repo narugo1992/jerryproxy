@@ -738,11 +738,13 @@ def test_node_projection_drift_is_a_distinct_recoverable_state_error(tmp_path):
         upgraded.get("main")
     assert issubclass(SubscriptionNodesMismatchError, SubscriptionStateError)
     # Every read path reports the repair command, so a user is never left with
-    # an inconsistency and no next step.
-    assert "jerryproxy subscription refresh main" in str(drift.value)
-    with pytest.raises(SubscriptionNodesMismatchError, match="subscription refresh main"):
+    # an inconsistency and no next step. This subscription was added from a
+    # body with no saved URL, so refetching it is impossible and the command
+    # named must be the one that can actually supply the source again.
+    assert "jerryproxy subscription replace main" in str(drift.value)
+    with pytest.raises(SubscriptionNodesMismatchError, match="subscription replace main"):
         upgraded.validate("main")
-    with pytest.raises(SubscriptionNodesMismatchError, match="subscription refresh main"):
+    with pytest.raises(SubscriptionNodesMismatchError, match="subscription replace main"):
         upgraded.list()
 
 
@@ -1015,3 +1017,36 @@ def test_unparseable_source_bytes_are_corrupt_state_rather_than_drift(tmp_path):
     with pytest.raises(SubscriptionStateError, match="cannot be revalidated") as failure:
         manager.get("main")
     assert not isinstance(failure.value, SubscriptionNodesMismatchError)
+
+
+@pytest.mark.parametrize(
+    "source_url, expected",
+    (
+        ("https://example.invalid/sub", "subscription refresh drifted"),
+        (None, "subscription replace drifted"),
+    ),
+)
+def test_drift_names_the_command_that_can_actually_repair_it(tmp_path, source_url, expected):
+    """Repair refetches, so a record with no saved URL cannot be refreshed.
+
+    Naming `refresh` for a subscription added from a file or stdin sends the
+    reader to a command that fails with a second error. This matters on upgrade:
+    a build that supports more protocols reparses the same stored bytes into
+    more nodes, so every file-based subscription drifts at once.
+    """
+
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    parsed = parse_subscription_body(SS, format_hint="uri-lines")
+    manager.store.publish(build_record("drifted", "a" * 32, parsed, source_url=source_url))
+
+    # Drift the stored projection the way an upgrade does: the same bytes parse
+    # into a different node set than the one persisted beside them.
+    upgraded = SubscriptionManager(paths, parser=_DriftingParser(SS))
+    with pytest.raises(SubscriptionNodesMismatchError) as failure:
+        upgraded.get("drifted")
+
+    message = str(failure.value)
+    assert expected in message
+    other = "replace" if source_url else "refresh"
+    assert "subscription %s drifted" % other not in message

@@ -5,11 +5,16 @@ import socket
 import tempfile
 from pathlib import Path
 
-from ..errors import JerryProxyBusyError, JerryProxyError, UnsupportedPlatformError
+from ..errors import (
+    JerryProxyBusyError,
+    JerryProxyError,
+    RuntimeSessionError,
+    UnsupportedPlatformError,
+)
 from ..home import JerryProxyPaths
 from ..lock import JerryProxyOperationLock
 from ..runtime.health import DEFAULT_HEALTH_TARGETS, HealthSnapshot, RecoveryPolicy
-from ..runtime.interfaces import RuntimeDriver, RuntimeProjection
+from ..runtime.interfaces import LoadedNodes, RuntimeDriver, RuntimeProjection
 from ..runtime.mihomo import build_provider_config
 from ..runtime.session import RuntimeSession
 from ..subscription.manager import SubscriptionManager
@@ -65,11 +70,13 @@ class _ProbeProcess(object):
 class _ProbeDriver(RuntimeDriver):
     """A driver that is not Mihomo, to prove the session does not assume one."""
 
-    def __init__(self, backend_name):
+    def __init__(self, backend_name, bypassing=False):
         self._backend_name = backend_name
+        self.bypassing = bypassing
         self.projections = 0
         self.created = 0
         self.stopped = 0
+        self.inspections = 0
 
     @property
     def name(self):  # type: () -> str
@@ -85,9 +92,11 @@ class _ProbeDriver(RuntimeDriver):
         listener_protocol,
         backend_log_level,
         bind_address="127.0.0.1",
+        control_port=None,
+        control_secret=None,
     ):
         del provider_path, port, username, password, listener_protocol, backend_log_level
-        del bind_address
+        del bind_address, control_port, control_secret
         self.projections += 1
         # Reading the node through the runtime boundary is the point: a driver
         # receives the secret URI, while everything public went through public().
@@ -105,6 +114,15 @@ class _ProbeDriver(RuntimeDriver):
 
     def wait_ready(self, process, port, timeout):
         del process, port, timeout
+
+    def loaded_nodes(self, control_port, control_secret, timeout):
+        del control_port, control_secret, timeout
+        self.inspections += 1
+        if self.bypassing:
+            # What a backend reports when it dropped the node and would route
+            # traffic directly instead.
+            return LoadedNodes(accepted=(), selected="COMPATIBLE", bypassing=True)
+        return LoadedNodes(accepted=("probe-node",), selected="probe-node", bypassing=False)
 
     def stop(self, process, timeout=None):
         del timeout
@@ -175,6 +193,8 @@ def _check_runtime_driver_contract():
                 session.stop()
             if driver.stopped == 0:
                 return CheckResult.fail("session cleanup did not stop the injected driver")
+            if driver.inspections == 0:
+                return CheckResult.fail("the session never asked whether the node was in use")
             with JerryProxyOperationLock(paths):
                 # Releasing only after cleanup is the contract; a second holder
                 # must be able to take the lock once stop() has returned.
@@ -184,6 +204,38 @@ def _check_runtime_driver_contract():
                 return CheckResult.fail(
                     "session cleanup left secret-bearing runtime state: %s" % ", ".join(remaining)
                 )
+
+            # The same machinery must refuse a backend that would route directly.
+            # A listener can be ready and a probe can pass while nothing is
+            # proxied, so this refusal is the boundary that keeps a bypassed
+            # session from being reported as a protected one.
+            bypassing = _ProbeDriver(spec.name, bypassing=True)
+            refused = RuntimeSession(
+                paths,
+                manager=manager,
+                subscription_manager=subscriptions,
+                backend_version=installed.version,
+                driver=bypassing,
+                health_probe=_ProbeHealth(),
+                recovery_policy=RecoveryPolicy(
+                    startup_retry_delays=(0.0,),
+                    recovery_deadline=5.0,
+                ),
+                sleeper=lambda delay: None,
+            )
+            try:
+                refused.start(subscription_name="self-check", node_id=selected)
+            except RuntimeSessionError:
+                # The only accepted outcome: a bypassing backend must not start.
+                pass
+            else:
+                refused.stop()
+                return CheckResult.fail(
+                    "a backend that routes traffic directly was reported as ready"
+                )
+            with JerryProxyOperationLock(paths):
+                # A refused start must still release the home lock.
+                pass
     except UnsupportedPlatformError as error:
         # The synthetic backend has no meaningful asset shape on this host.
         return _unsupported_recovery_platform(error)
@@ -191,7 +243,8 @@ def _check_runtime_driver_contract():
         # Installation, publication, session start, and cleanup are real operations.
         return _recovery_failure(error)
     return CheckResult.ok(
-        "a substitute driver ran the session, which held the home lock and cleaned up"
+        "a substitute driver ran the session, which held the home lock, verified the "
+        "node was in use, refused a bypassing backend, and cleaned up"
     )
 
 

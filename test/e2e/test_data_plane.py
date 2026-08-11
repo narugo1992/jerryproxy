@@ -181,7 +181,12 @@ def test_subscription_source_serves_bounded_base64_uri_lines():
     lines = [line for line in decoded.decode("utf-8").splitlines() if line.strip()]
     schemes = sorted(line.split("://", 1)[0].lower() for line in lines)
 
-    assert schemes == ["ss", "vless", "vmess"], "source must serve exactly the three schemes"
+    # Derived from the lane contract, so a scheme added to the product arrives
+    # here rather than leaving a stale literal that passes by describing less
+    # than the fixture actually serves.
+    assert schemes == sorted(_contract.NODE_VARIABLES), (
+        "the source must serve exactly the schemes the lane claims to cover"
+    )
 
 
 def _fixture_body():  # type: () -> bytes
@@ -418,7 +423,11 @@ def unused_port():
 
 
 @pytest.mark.timeout(CASE_TIMEOUT)
-@pytest.mark.parametrize("scheme", ["ss", "vmess", "vless"])
+# Driven from the contract rather than a list written out again here, so a
+# scheme added to the product allowlist arrives with a case instead of being
+# quietly untested. `make e2e_check` separately refuses an allowlist entry that
+# has no node variable at all.
+@pytest.mark.parametrize("scheme", sorted(_contract.NODE_VARIABLES))
 def test_each_protocol_reaches_the_private_sentinel(scheme, home, unused_port, isolated_sentinel):
     """Traffic must traverse the selected protocol to obtain the run nonce."""
 

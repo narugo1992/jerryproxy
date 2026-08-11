@@ -90,7 +90,7 @@ cannot race backend replacement or runtime projection cleanup.
 The current protocol slice is implemented behind extension seams. A
 ``SubscriptionParser`` turns one bounded source container into the generic
 ``ParsedSubscription`` model; the shipped ``MihomoSubscriptionParser`` keeps
-SS, VMess, and VLESS records opaque and defers their semantics to Mihomo
+accepted records opaque and defers their semantics to Mihomo
 1.19.29. ``ProxyNode`` and ``NodeSource`` are the common model contracts for
 both subscription-backed nodes and a future single-node input. A
 ``RuntimeDriver`` owns only backend-specific projection and child lifecycle;

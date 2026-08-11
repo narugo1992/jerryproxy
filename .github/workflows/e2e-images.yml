@@ -27,6 +27,9 @@ on:
       camouflage:
         description: Digest-pinned Reality camouflage image
         value: ${{ jobs.publish.outputs.camouflage }}
+      singbox:
+        description: Digest-pinned server image for the protocols Xray rejects
+        value: ${{ jobs.publish.outputs.singbox }}
   workflow_dispatch:
 
 permissions:
@@ -46,6 +49,7 @@ jobs:
       sentinel: ${{ steps.digests.outputs.sentinel }}
       subscription: ${{ steps.digests.outputs.subscription }}
       camouflage: ${{ steps.digests.outputs.camouflage }}
+      singbox: ${{ steps.digests.outputs.singbox }}
     steps:
       - uses: actions/checkout@v7
 
@@ -53,13 +57,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Resolve the pinned proxy release from the repository catalog
+      - name: Resolve the pinned proxy releases from the repository catalog
         id: pinned
         run: |
           set -euo pipefail
           python -m pip install -q -e .
           for field in version asset sha256; do
             printf '%s=%s\n' "$field" "$(python tools/e2e/pinned.py --field "$field")" >> "$GITHUB_OUTPUT"
+            printf 'singbox_%s=%s\n' "$field" \
+              "$(python tools/e2e/pinned.py --backend sing-box --field "$field")" >> "$GITHUB_OUTPUT"
           done
 
       - uses: docker/setup-buildx-action@v4
@@ -86,6 +92,24 @@ jobs:
             XRAY_ASSET=${{ steps.pinned.outputs.asset }}
             XRAY_SHA256=${{ steps.pinned.outputs.sha256 }}
           tags: ${{ env.REGISTRY }}/${{ github.repository }}/e2e-xray:${{ github.sha }}
+          push: true
+          no-cache: true
+          provenance: false
+
+      # Also built without a cache, and for the same reason as the Xray image:
+      # a cache hit would import the result of the release digest check instead
+      # of running it.
+      - name: Build and publish the server image for the protocols Xray rejects
+        id: singbox
+        uses: docker/build-push-action@v7
+        with:
+          context: tools/e2e/images
+          file: tools/e2e/images/Dockerfile.singbox
+          build-args: |
+            SINGBOX_VERSION=${{ steps.pinned.outputs.singbox_version }}
+            SINGBOX_ASSET=${{ steps.pinned.outputs.singbox_asset }}
+            SINGBOX_SHA256=${{ steps.pinned.outputs.singbox_sha256 }}
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/e2e-singbox:${{ github.sha }}
           push: true
           no-cache: true
           provenance: false
@@ -133,12 +157,13 @@ jobs:
           # Consume by digest, not by tag: a tag can be moved, a digest cannot,
           # so a test run is pinned to exactly the fixture it was built against.
           base="${REGISTRY}/${{ github.repository }}"
-          for name in xray sentinel subscription camouflage; do
+          for name in xray singbox sentinel subscription camouflage; do
             case "$name" in
               xray) digest='${{ steps.xray.outputs.digest }}' ;;
               sentinel) digest='${{ steps.sentinel.outputs.digest }}' ;;
               subscription) digest='${{ steps.subscription.outputs.digest }}' ;;
               camouflage) digest='${{ steps.camouflage.outputs.digest }}' ;;
+              singbox) digest='${{ steps.singbox.outputs.digest }}' ;;
             esac
             [ -n "$digest" ] || { echo "::error::$name has no digest"; exit 1; }
             printf '%s=%s/e2e-%s@%s\n' "$name" "$base" "$name" "$digest" >> "$GITHUB_OUTPUT"

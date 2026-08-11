@@ -4,11 +4,16 @@ The fixture servers emit access records, so a captured log can carry a password,
 UUID, key, or short ID. Redaction that covers only the sentinel nonce would be
 one value wide while the log surface is much wider.
 
-The caller supplies every generated value, including the ones that reach no
-service variable of their own — the Reality private key is passed only to the
-vless fixture, and the SS password and VMess UUID otherwise exist only inside
-base64 payloads. Deriving the set from what was generated, rather than from
-what happens to be exported, is what makes the coverage complete.
+The caller supplies every secret-bearing generated value, including the ones
+that reach no service variable of their own — the Reality private key is passed
+only to the vless fixture, and the SS password and VMess UUID otherwise exist
+only inside base64 payloads. Deriving the set from what was generated, rather
+than from what happens to be exported, is what makes the coverage complete, and
+``make e2e_check`` enforces that in both directions.
+
+Composite values are passed whole rather than split into parts. The Base64
+subscription body contains every node URI, but none of them as plaintext, so
+redacting the parts would not touch it.
 
 Non-secret entries — service addresses, ports, backend identity — are kept so a
 failure log stays readable.
@@ -63,10 +68,6 @@ def build(values):  # type: (dict) -> list
         unpadded = value.rstrip("=")
         if unpadded != value and len(unpadded) >= _MINIMUM_TOKEN:
             secrets.add(unpadded)
-        if name.upper().endswith("_NODE"):
-            secrets.update(
-                part for part in _SEPARATOR.split(value) if len(part) >= _MINIMUM_TOKEN
-            )
     return [
         "s|%s|[REDACTED]|g" % _sed_literal(secret)
         for secret in sorted(secrets, key=len, reverse=True)

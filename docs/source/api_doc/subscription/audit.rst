@@ -6,6 +6,13 @@ jerryproxy.subscription.audit
 .. automodule:: jerryproxy.subscription.audit
 
 
+SUPPORTED\_SCHEMES
+-----------------------------------------------------
+
+.. autodata:: SUPPORTED_SCHEMES
+   :no-value:
+
+
 MIHOMO\_PARSER\_IDENTITY
 -----------------------------------------------------
 

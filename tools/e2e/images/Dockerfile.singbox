@@ -1,0 +1,30 @@
+# Server fixture for the protocols Xray's validator rejects: Hysteria2, TUIC,
+# and AnyTLS. Built from the exact official sing-box release the packaged catalog
+# already records, so this trusts the same release evidence the product does
+# instead of introducing a second pin.
+#
+# Built without a layer cache for the same reason as the Xray fixture: a cache
+# hit would import the result of the digest check below without executing it, and
+# re-verifying at start would compare against a reference in the same layer.
+ARG BASE_IMAGE=python:3.12-alpine
+FROM ${BASE_IMAGE}
+
+ARG SINGBOX_VERSION
+ARG SINGBOX_ASSET
+ARG SINGBOX_SHA256
+
+RUN set -eu; \
+    apk add --no-cache ca-certificates curl tar; \
+    curl -fsSL -o /tmp/sing-box.tar.gz \
+      "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${SINGBOX_ASSET}"; \
+    echo "${SINGBOX_SHA256}  /tmp/sing-box.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/sing-box.tar.gz -C /tmp; \
+    find /tmp -type f -name sing-box -perm -u+x -exec mv {} /usr/local/bin/sing-box \; ; \
+    chmod 0755 /usr/local/bin/sing-box; \
+    rm -rf /tmp/sing-box.tar.gz /tmp/sing-box-*; \
+    /usr/local/bin/sing-box version
+
+COPY singbox_entrypoint.py /srv/entrypoint.py
+# A protocol inbound is rendered from the environment at start, because service
+# containers exist before any step could mount a generated file.
+ENTRYPOINT ["python", "/srv/entrypoint.py"]

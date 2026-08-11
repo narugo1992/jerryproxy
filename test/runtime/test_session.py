@@ -17,6 +17,8 @@ from jerryproxy.errors import (
 from jerryproxy.home import JerryProxyPaths
 from jerryproxy.runtime import (
     HealthSnapshot,
+    LoadedNodes,
+    MihomoDriver,
     RecoveryPolicy,
     RuntimeDriver,
     RuntimeProjection,
@@ -98,6 +100,24 @@ class FakeSubscriptionManager(object):
         return self.refreshed or self.record
 
 
+def _control_documents(accepted=("fixture-node",), selected="fixture-node"):
+    """Stand in for Mihomo's control endpoint with its real document shapes.
+
+    The session refuses to report readiness unless the backend confirms it is
+    routing through the node, so a test that fakes the process must also answer
+    that question. Defaults describe a backend that accepted the node; a test
+    exercising the refusal passes a bypassing selection instead.
+    """
+
+    def request(port, secret, path, timeout):
+        del port, secret, timeout
+        if path.startswith("/providers/proxies/"):
+            return {"proxies": [{"name": name, "type": "Shadowsocks"} for name in accepted]}
+        return {"now": selected, "all": list(accepted) or ["COMPATIBLE"], "emptyFallback": "COMPATIBLE"}
+
+    return request
+
+
 def _record(name="main", nodes=2, source_url=None):
     body = b"\n".join(
         URI_TEMPLATE.encode("ascii") % (443 + index, index) for index in range(nodes)
@@ -117,6 +137,7 @@ def _session(
     log_sink=None,
     clock=None,
     sleeper=None,
+    inspector=None,
 ):
     paths = JerryProxyPaths(tmp_path / ".jerryproxy")
     paths.ensure()
@@ -131,7 +152,10 @@ def _session(
         authenticate=authenticate,
         bind_address=bind_address,
         log_sink=log_sink,
-        process_factory=FakeProcess,
+        driver=MihomoDriver(
+            process_factory=FakeProcess,
+            inspector=inspector or _control_documents(),
+        ),
         recovery_policy=policy or RecoveryPolicy(
             startup_retry_delays=(0.0,),
             same_node_delay=0.0,
@@ -392,7 +416,7 @@ def test_runtime_bootstraps_missing_backend_through_manager_install(tmp_path):
         manager=InstallingManager(tmp_path / "mihomo"),
         subscription_manager=FakeSubscriptionManager(record),
         health_probe=FakeProbe([True]),
-        process_factory=FakeProcess,
+        driver=MihomoDriver(process_factory=FakeProcess, inspector=_control_documents()),
         recovery_policy=RecoveryPolicy(startup_retry_delays=(0.0,), recovery_deadline=10.0),
     )
     runtime.start("main", node_id=record.nodes[0].node_id, install_missing=True)
@@ -595,8 +619,11 @@ def test_runtime_accepts_a_driver_without_changing_session_ownership(tmp_path):
             listener_protocol,
             backend_log_level,
             bind_address="127.0.0.1",
+            control_port=None,
+            control_secret=None,
         ):
             del provider_path, node, port, username, password, listener_protocol, backend_log_level, bind_address
+            del control_port, control_secret
             return RuntimeProjection(config=b"fake-config\n", provider=b"fake-provider\n")
 
         def create_process(self, executable, config_path, session_root, log_path, backend_log_level, log_sink=None):
@@ -605,6 +632,10 @@ def test_runtime_accepts_a_driver_without_changing_session_ownership(tmp_path):
 
         def wait_ready(self, process, port, timeout):
             del process, port, timeout
+
+        def loaded_nodes(self, control_port, control_secret, timeout):
+            del control_port, control_secret, timeout
+            return LoadedNodes(accepted=("fake-node",), selected="fake-node", bypassing=False)
 
         def stop(self, process, timeout=None):
             del timeout
@@ -964,3 +995,156 @@ def test_a_subscription_source_without_locked_helpers_stays_replaceable(tmp_path
     assert source.repair_calls == 1
     assert runtime.node.node_id == healthy.nodes[0].node_id
     runtime.stop()
+
+
+def test_a_backend_that_bypasses_the_node_is_refused(tmp_path):
+    """A ready listener is not enough: traffic must actually use the node.
+
+    Mihomo replaces a selector group it could not fill with a direct-routing
+    placeholder, so egress succeeds and a connectivity quorum passes while
+    nothing is proxied. For a proxy that is worse than failing to start,
+    because the user is told they are protected when they are not.
+    """
+
+    record = _record(nodes=1)
+    runtime = _session(
+        tmp_path,
+        record,
+        FakeProbe([True]),
+        inspector=_control_documents(accepted=(), selected="COMPATIBLE"),
+    )
+
+    with pytest.raises(RuntimeSessionError) as failure:
+        runtime.start("main", node_id=record.nodes[0].node_id)
+
+    message = str(failure.value)
+    assert "would route traffic directly" in message
+    assert "ss://" in message, "the message must name the protocol that was refused"
+    assert record.nodes[0].secret_uri() not in message, "it must not name the URI"
+    # A refused start leaves no child and no secret-bearing artifact.
+    assert runtime.process is None or runtime.process.stopped
+
+
+def test_a_backend_that_loads_more_than_the_published_node_is_refused(tmp_path):
+    """One node is published, so anything else means the answer is not trusted."""
+
+    record = _record(nodes=1)
+    runtime = _session(
+        tmp_path,
+        record,
+        FakeProbe([True]),
+        inspector=_control_documents(accepted=("a", "b"), selected="a"),
+    )
+
+    with pytest.raises(RuntimeSessionError, match="parsed 2 nodes"):
+        runtime.start("main", node_id=record.nodes[0].node_id)
+
+
+def test_a_selection_matching_the_backend_empty_fallback_is_refused(tmp_path):
+    """The placeholder is whatever the backend names, not a fixed word.
+
+    Relying only on a hard-coded list of placeholder names would miss a rename,
+    so the check also compares against the fallback the backend reports.
+    """
+
+    record = _record(nodes=1)
+
+    def inspector(port, secret, path, timeout):
+        del port, secret, timeout
+        if path.startswith("/providers/proxies/"):
+            return {"proxies": [{"name": "placeholder"}]}
+        return {"now": "placeholder", "all": ["placeholder"], "emptyFallback": "placeholder"}
+
+    runtime = _session(tmp_path, record, FakeProbe([True]), inspector=inspector)
+
+    with pytest.raises(RuntimeSessionError, match="route traffic directly"):
+        runtime.start("main", node_id=record.nodes[0].node_id)
+
+
+def test_the_control_channel_stays_on_loopback_when_the_proxy_is_public(tmp_path):
+    """`--bind-all` exposes the proxy listener, never the control endpoint."""
+
+    record = _record(nodes=1)
+    runtime = _session(tmp_path, record, FakeProbe([True]), bind_address="0.0.0.0")
+    runtime.start("main", node_id=record.nodes[0].node_id)
+    try:
+        config = runtime.config_path.read_text(encoding="utf-8")
+    finally:
+        runtime.stop()
+
+    assert "external-controller: 127.0.0.1:%d" % runtime.control_port in config
+    assert "external-controller: 0.0.0.0" not in config
+    assert runtime.control_port != runtime.port
+
+
+def test_the_control_secret_never_reaches_the_log_or_access_file(tmp_path):
+    lines = []
+    record = _record(nodes=1)
+    runtime = _session(
+        tmp_path,
+        record,
+        FakeProbe([True]),
+        log_sink=lambda owner, level, message: lines.append("%s %s %s" % (owner, level, message)),
+    )
+    runtime.start("main", node_id=record.nodes[0].node_id)
+    secret = runtime.control_secret
+    access = runtime.access_path.read_text(encoding="utf-8") if runtime.access_path.exists() else ""
+    # The on-disk log is the only channel that receives captured backend output;
+    # the sink never sees it, so checking the sink alone would miss a leak there.
+    log = runtime.log_path.read_text(encoding="utf-8") if runtime.log_path.exists() else ""
+    try:
+        assert secret
+        assert all(secret not in line for line in lines)
+        assert secret not in access
+        assert secret not in log
+        # The access file may name the endpoint, but never the secret that opens it.
+        assert "127.0.0.1:%d" % runtime.control_port in access
+    finally:
+        runtime.stop()
+
+
+def test_a_recovery_candidate_that_the_backend_bypasses_is_not_accepted(tmp_path):
+    """A bypassing alternate must be refused even though it probes healthy.
+
+    This is the dangerous shape, not a candidate that simply fails: routing
+    directly makes egress succeed, so the probe would pass and the sweep would
+    otherwise settle on a node the backend never used. The probe is therefore
+    set to report the alternate healthy; the load check rejects it first, inside
+    the launch, so the probe is never reached for that candidate at all.
+    """
+
+    record = _record(nodes=2)
+    inspections = []
+
+    def inspector(port, secret, path, timeout):
+        del port, secret, timeout
+        if path.startswith("/providers/proxies/"):
+            inspections.append(path)
+            # The first launch is accepted. Every later launch reports what a
+            # backend says about a node whose protocol or dialect it refused.
+            if len(inspections) == 1:
+                return {"proxies": [{"name": "first"}]}
+            return {"proxies": []}
+        if len(inspections) <= 1:
+            return {"now": "first", "all": ["first"], "emptyFallback": "COMPATIBLE"}
+        return {"now": "COMPATIBLE", "all": ["COMPATIBLE"], "emptyFallback": "COMPATIBLE"}
+
+    runtime = _session(
+        tmp_path,
+        record,
+        # Healthy at start, unhealthy once so recovery begins, then healthy
+        # again -- exactly what a bypassed alternate looks like from a probe.
+        FakeProbe([True, False, True, True, True, True]),
+        inspector=inspector,
+    )
+    runtime.start("main", node_id=record.nodes[0].node_id)
+    try:
+        with pytest.raises(RuntimeSessionError, match="recovery exhausted"):
+            runtime._recover()
+    finally:
+        runtime.stop()
+
+    assert len(inspections) > 1, "the sweep must have attempted at least one alternate"
+    # A candidate the backend is not using never becomes the effective node,
+    # even though it answered the probe.
+    assert runtime.node is None or runtime.node.node_id == record.nodes[0].node_id
