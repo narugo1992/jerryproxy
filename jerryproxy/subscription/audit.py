@@ -30,6 +30,21 @@ from copy import deepcopy
 # JerryProxy still parses none of these. It forwards the URI verbatim, and the
 # runtime session refuses to report readiness unless the backend confirms it
 # accepted that exact line -- which is what makes widening this list safe.
+#: Proxy `type:` values accepted from a provider document. These are the same
+#: protocols as :data:`SUPPORTED_SCHEMES`, spelled the way the provider format
+#: spells them: it says `hysteria2`, never the `hy2` URI alias, and it says
+#: `ss` for Shadowsocks. Membership is the same measured claim -- each has a
+#: data-plane fixture proving it carries traffic.
+PROVIDER_TYPES = (
+    "ss",
+    "vmess",
+    "vless",
+    "trojan",
+    "hysteria2",
+    "tuic",
+    "anytls",
+)
+
 SUPPORTED_SCHEMES = (
     "ss",
     "vmess",

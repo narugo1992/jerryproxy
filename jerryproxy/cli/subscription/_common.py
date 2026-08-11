@@ -11,6 +11,7 @@ from tabulate import tabulate
 
 from ...errors import SubscriptionError
 from ...subscription.redaction import terminal_safe_text
+from ...subscription.storage import reparse_hint
 from ...subscription.transport import MAXIMUM_BODY_BYTES, MIHOMO_SUBSCRIPTION_PARSER
 from .. import _common as cli_common
 
@@ -130,7 +131,7 @@ def _skipped_summary(record):  # type: (object) -> tuple
     try:
         parsed = MIHOMO_SUBSCRIPTION_PARSER.parse(
             record.body,
-            format_hint="auto" if record.format == "base64-uri-lines" else "uri-lines",
+            format_hint=reparse_hint(record.format),
         )
     except (SubscriptionError, ValueError):
         # A body that no longer parses is reported by the read path itself;

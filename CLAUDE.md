@@ -400,6 +400,23 @@ authentication, extraction, process, or permission errors to warnings.
   same reserve-then-release window the proxy listener already has, and
   continuous same-UID interference remains outside the supported threat
   boundary; disclose it rather than claiming the check authenticates the peer.
+- Mihomo/Clash proxy-provider YAML is a second accepted container. Its nodes
+  stay opaque the same way URI records do: one entry is carried through and
+  re-serialised as a complete single-proxy provider document, which the runtime
+  publishes unchanged. Re-serialising an entry is not interpreting it, and no
+  protocol field may be read, normalised, or converted to a URI. A provider
+  document carrying the full-configuration fields recorded in `audit.py`
+  (`scripts`, `hooks`, `plugins`, `controller`, `tun`, `listeners`) must be
+  refused outright rather than filtered. `PROVIDER_TYPES` spells the same
+  measured protocol set the URI allowlist does, in that format's vocabulary.
+- A provider node's label comes from the document's own `name` field, which is
+  the container's declared display text rather than a protocol envelope, and
+  receives the same treatment as a URI fragment: redacted, whitespace-folded,
+  terminal-safe, and bounded.
+- A stored projection is revalidated by reparsing its own bytes, so the reparse
+  hint must reproduce the format it was classified as. Derive it in one place;
+  choosing between two formats silently reported every record in a third format
+  as drift on every read.
 - A URI scheme enters `SUPPORTED_SCHEMES` only after the qualified backend was
   measured to parse it into a usable proxy *and* a data-plane fixture proves it
   carries traffic. `make e2e_check` fails when an allowlisted scheme has no

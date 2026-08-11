@@ -6,6 +6,13 @@ jerryproxy.subscription.audit
 .. automodule:: jerryproxy.subscription.audit
 
 
+PROVIDER\_TYPES
+-----------------------------------------------------
+
+.. autodata:: PROVIDER_TYPES
+   :no-value:
+
+
 SUPPORTED\_SCHEMES
 -----------------------------------------------------
 

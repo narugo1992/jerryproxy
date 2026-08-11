@@ -175,6 +175,16 @@
       "obligation": "notice"
     },
     {
+      "name": "pyyaml",
+      "license": "MIT",
+      "distribution": [
+        "wheel",
+        "standalone"
+      ],
+      "obligation": "notice",
+      "note": "Parses Mihomo/Clash provider YAML subscriptions. Only `safe_load` is used, so no constructor can instantiate an arbitrary object from provider-controlled bytes."
+    },
+    {
       "name": "requests",
       "license": "Apache-2.0",
       "distribution": [

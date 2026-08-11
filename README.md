@@ -8,7 +8,8 @@ home directory all use the same name: `jerryproxy`.
 > **Work in progress:** the first runtime slice is implemented: bounded
 > `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, VLESS, Trojan,
 > Hysteria2, TUIC, and AnyTLS URI
-> lines, which keeps the supported nodes of a mixed-protocol list usable and
+> lines and Mihomo/Clash provider YAML, which keeps the supported nodes of a
+> mixed-protocol list usable and
 > reports the rest as a sanitized aggregate, sanitized home-local state, and a
 > synchronous Mihomo 1.19.29 foreground server with bounded health diagnostics
 > and bounded recovery from subscription state drift. The CLI binds an open
@@ -527,6 +528,15 @@ measured to be dropped by the backend and are reported as skipped rather than
 counted. Plaintext `http://` and `socks5://` are deliberately excluded: they
 offer no encryption, and `http://` is also the scheme of a subscription source,
 so accepting it as a node would let an error page be reported as usable nodes.
+
+Two container formats are accepted: Base64 or plaintext URI lines, and the
+Mihomo/Clash proxy-provider YAML that Clash-family providers serve. A provider
+document's proxies stay as opaque as URI records — each node keeps a complete
+single-proxy document that the runtime publishes unchanged, and no protocol
+field is read or converted. A document carrying full-configuration fields such
+as `scripts`, `hooks`, `plugins`, `controller`, `tun`, or `listeners` is refused
+outright, because honouring them would let a provider-controlled body reach code
+execution, the controller, or the host's routing.
 
 Providers routinely mix protocols in one list. A subscription is accepted when
 it carries at least one node this build supports, and the entries it cannot

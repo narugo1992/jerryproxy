@@ -925,3 +925,60 @@ def test_a_fully_unsupported_subscription_explains_the_gap(tmp_path):
     # Naming it a format error would send the reader after a fault that is not
     # there; this is a support gap.
     assert "Base64" not in message
+
+
+def test_a_clash_provider_subscription_works_through_the_cli(tmp_path):
+    """The format Clash-family providers actually serve must be usable.
+
+    Before this it was reported as "neither Base64 nor URI lines", which is a
+    format fault the reader cannot act on when the body is a perfectly valid
+    provider document.
+    """
+
+    runner = CliRunner()
+    home = tmp_path / "home"
+    body = tmp_path / "clash.yaml"
+    body.write_text(
+        "proxies:\n"
+        "  - {name: Tokyo, type: ss, server: 192.0.2.1, port: 8443,"
+        " cipher: aes-256-gcm, password: sspass}\n"
+        "  - {name: Osaka, type: hysteria2, server: 192.0.2.2, port: 443,"
+        " password: hy2pass, sni: e.invalid}\n"
+        "  - {name: Legacy, type: wireguard, server: 192.0.2.3, port: 51820}\n",
+        encoding="ascii",
+    )
+
+    added = _invoke(runner, home, "subscription", "add", "clash", "--file", str(body))
+    assert added.exit_code == 0, added.output
+    assert "Format: mihomo-provider" in added.output
+    assert "Nodes: 2" in added.output
+    # The skip aggregate has to survive the reparse the renderer performs, which
+    # needs the hint that reproduces this format rather than a URI-line guess.
+    assert "Skipped: 1 wireguard (unsupported by this build)" in added.output
+    for secret in ("sspass", "hy2pass", "192.0.2.1"):
+        assert secret not in added.output
+
+    listed = _invoke(runner, home, "node", "list", "clash")
+    assert listed.exit_code == 0, listed.output
+    assert "Tokyo" in listed.output and "hysteria2" in listed.output
+    for secret in ("sspass", "hy2pass", "192.0.2.2"):
+        assert secret not in listed.output
+
+
+def test_a_provider_document_with_configuration_fields_is_refused(tmp_path):
+    """Honouring these would let a provider body reach the host."""
+
+    runner = CliRunner()
+    body = tmp_path / "bad.yaml"
+    body.write_text(
+        "proxies: [{name: a, type: ss, server: 192.0.2.1, port: 1,"
+        " cipher: aes-256-gcm, password: p}]\n"
+        "listeners: [{name: evil, type: tun}]\n",
+        encoding="ascii",
+    )
+
+    result = _invoke(runner, tmp_path / "home", "subscription", "add", "bad", "--file", str(body))
+
+    assert result.exit_code != 0
+    assert "must not set" in str(result.exception)
+    assert "listeners" in str(result.exception)

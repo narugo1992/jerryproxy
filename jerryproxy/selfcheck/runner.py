@@ -40,6 +40,7 @@ from .runtime import (
 )
 from .subscription import (
     _check_node_source_boundary,
+    _check_provider_document,
     _check_subscription_parser,
     _check_subscription_state,
 )
@@ -57,6 +58,7 @@ def build_checks(paths, relay_session_factory=None):
         ("packaged backend catalog", _check_backend_catalog),
         ("catalog platform selection", _check_backend_catalog_selection),
         ("subscription parser", _check_subscription_parser),
+        ("provider document parser", _check_provider_document),
         ("subscription state", _check_subscription_state),
         ("node source boundary", _check_node_source_boundary),
         ("runtime projection", _check_runtime_projection),

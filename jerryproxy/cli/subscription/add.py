@@ -24,9 +24,11 @@ The URL is bearer material. It is never placed in argv, output, logs, or child
 environment. A URL source is retained only in owner-private state so an
 explicit refresh can reuse it; it is never public evidence or CLI output.
 Base64-wrapped and plaintext URI lines
-are accepted for the encrypted protocols the qualified backend was measured to
-use: SS, VMess, VLESS, Trojan, Hysteria2 (also spelled hy2), TUIC, and AnyTLS.
-Other schemes are skipped and reported as an aggregate. Provider and native
+and Mihomo/Clash proxy-provider YAML are both accepted, for the encrypted
+protocols the qualified backend was measured to use: SS, VMess, VLESS, Trojan,
+Hysteria2 (also spelled hy2 in a URI), TUIC, and AnyTLS. Other protocols are
+skipped and reported as an aggregate. A provider document carrying full-config
+fields such as scripts, hooks, or listeners is refused outright. Native
 profiles are outside this first implementation slice. Use --json for deterministic automation.
 """
 
@@ -51,10 +53,10 @@ profiles are outside this first implementation slice. Use --json for determinist
 @click.option(
     "--format",
     "format_hint",
-    type=click.Choice(["auto", "uri-lines"]),
+    type=click.Choice(["auto", "uri-lines", "mihomo-provider"]),
     default="auto",
     show_default=True,
-    help="Classify the source as Base64 or plaintext URI lines.",
+    help="Classify the source: Base64 or plaintext URI lines, or provider YAML.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit sanitized JSON.")
 @click.pass_context

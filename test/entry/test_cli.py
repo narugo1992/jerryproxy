@@ -175,26 +175,26 @@ def test_self_check_reports_each_check_and_summary(tmp_path):
     assert "System:" in result.output
     # Positions are written out rather than derived, so that inserting or
     # removing a check has to be acknowledged here instead of passing silently.
-    assert "[1/27] Python runtime: OK" in result.output
-    assert "[7/27] packaged backend catalog: OK" in result.output
-    assert "[8/27] catalog platform selection: OK" in result.output
-    assert "[9/27] subscription parser: OK" in result.output
-    assert "[10/27] subscription state: OK" in result.output
-    assert "[11/27] node source boundary: OK" in result.output
-    assert "[12/27] runtime projection: OK" in result.output
-    assert "[13/27] runtime driver contract: OK" in result.output
-    assert "[14/27] loopback listener: OK" in result.output
-    assert "[15/27] console rendering: OK" in result.output
-    assert "[16/27] filelock compatibility:" in result.output
-    assert "[17/27] backend inventory: OK" in result.output
-    assert "[18/27] isolated backend lifecycle: OK" in result.output
-    assert "[19/27] recovery install rollback: OK" in result.output
-    assert "[20/27] recovery activation rollback: OK" in result.output
-    assert "[21/27] recovery activation rollforward: OK" in result.output
-    assert "[22/27] recovery removal rollback: OK" in result.output
-    assert "[23/27] recovery removal rollforward: OK" in result.output
-    assert "[26/27] relay gh.geekertao.top: OK" in result.output
-    assert "[27/27] delayed process cleanup: OK" in result.output
+    assert "[1/28] Python runtime: OK" in result.output
+    assert "[7/28] packaged backend catalog: OK" in result.output
+    assert "[8/28] catalog platform selection: OK" in result.output
+    assert "[9/28] subscription parser: OK" in result.output
+    assert "[11/28] subscription state: OK" in result.output
+    assert "[12/28] node source boundary: OK" in result.output
+    assert "[13/28] runtime projection: OK" in result.output
+    assert "[14/28] runtime driver contract: OK" in result.output
+    assert "[15/28] loopback listener: OK" in result.output
+    assert "[16/28] console rendering: OK" in result.output
+    assert "[17/28] filelock compatibility:" in result.output
+    assert "[18/28] backend inventory: OK" in result.output
+    assert "[19/28] isolated backend lifecycle: OK" in result.output
+    assert "[20/28] recovery install rollback: OK" in result.output
+    assert "[21/28] recovery activation rollback: OK" in result.output
+    assert "[22/28] recovery activation rollforward: OK" in result.output
+    assert "[23/28] recovery removal rollback: OK" in result.output
+    assert "[24/28] recovery removal rollforward: OK" in result.output
+    assert "[27/28] relay gh.geekertao.top: OK" in result.output
+    assert "[28/28] delayed process cleanup: OK" in result.output
     assert "0 FAIL, 0 ERR" in result.output
     expected_skips = 0 if os.name == "posix" else 1
     assert "%d SKIP" % expected_skips in result.output

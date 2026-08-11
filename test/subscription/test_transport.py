@@ -4,6 +4,7 @@ import threading
 
 import pytest
 import requests
+import yaml
 
 import jerryproxy.subscription.transport as transport_module
 from jerryproxy.errors import SubscriptionFetchError, SubscriptionParseError
@@ -505,3 +506,88 @@ def test_a_scheme_name_in_diagnostics_is_bounded_and_shaped():
     schemes = [scheme for scheme, _count in parsed.skipped]
 
     assert all(len(scheme) <= 16 for scheme in schemes), schemes
+
+
+PROVIDER_BODY = b"""proxies:
+  - {name: tokyo, type: ss, server: 192.0.2.1, port: 8443, cipher: aes-256-gcm, password: sspass}
+  - {name: osaka, type: hysteria2, server: 192.0.2.2, port: 443, password: hy2pass, sni: e.invalid}
+  - {name: gone, type: wireguard, server: 192.0.2.3, port: 51820}
+"""
+
+
+def test_a_provider_document_is_recognised_without_a_hint():
+    """Clash-family providers serve this format; it must not read as a fault."""
+
+    parsed = parse_subscription_body(PROVIDER_BODY)
+
+    assert parsed.format == "mihomo-provider"
+    assert [record[0] for record in parsed.records] == ["ss", "hysteria2"]
+    assert [record[1] for record in parsed.records] == ["tokyo", "osaka"]
+    assert parsed.skipped == (("wireguard", 1),)
+
+
+def test_each_provider_node_carries_a_complete_single_proxy_document():
+    """The payload is what the backend consumes, so it must stand alone.
+
+    Nothing here interprets a protocol field: one entry is carried through and
+    re-serialised, which is not the same as understanding it.
+    """
+
+    parsed = parse_subscription_body(PROVIDER_BODY)
+
+    for scheme, unused_display, payload in parsed.records:
+        document = yaml.safe_load(payload)
+        assert list(document) == ["proxies"], "a node payload must be a provider document"
+        assert len(document["proxies"]) == 1
+        assert document["proxies"][0]["type"] == scheme
+    # The original field values survive untouched, including ones this build
+    # has no opinion about.
+    first = yaml.safe_load(parsed.records[0][2])["proxies"][0]
+    assert first["cipher"] == "aes-256-gcm" and first["password"] == "sspass"
+
+
+@pytest.mark.parametrize("field", ("scripts", "hooks", "plugins", "controller", "tun", "listeners"))
+def test_a_provider_document_may_not_carry_configuration_fields(field):
+    """A provider holds proxies. These belong to a full Clash configuration.
+
+    Honouring them would let a provider-controlled body reach code execution,
+    the controller, or the host's routing.
+    """
+
+    body = b"proxies: [{name: a, type: ss, server: 192.0.2.1, port: 1, cipher: aes-256-gcm, password: p}]\n"
+    body += ("%s: anything\n" % field).encode("ascii")
+
+    with pytest.raises(SubscriptionParseError, match="must not set"):
+        parse_subscription_body(body)
+
+
+def test_a_provider_document_of_only_unsupported_types_names_them():
+    body = b"proxies: [{name: a, type: wireguard, server: 192.0.2.1, port: 1}]\n"
+
+    with pytest.raises(SubscriptionParseError) as failure:
+        parse_subscription_body(body)
+
+    message = str(failure.value)
+    assert "no supported nodes" in message and "1 wireguard" in message
+    assert "hysteria2" in message, "the message must say what this build does support"
+
+
+def test_a_base64_body_is_not_mistaken_for_a_provider_document():
+    """The provider probe must not take a body away from the URI formats."""
+
+    encoded = base64.b64encode(SS if isinstance(SS, bytes) else SS.encode("ascii"))
+
+    parsed = parse_subscription_body(encoded)
+
+    assert parsed.format == "base64-uri-lines"
+
+
+def test_a_provider_label_is_bounded_and_terminal_safe():
+    body = (
+        b"proxies:\n  - {name: \"" + b"n" * 300 + b"\", type: ss, server: 192.0.2.1,"
+        b" port: 1, cipher: aes-256-gcm, password: p}\n"
+    )
+
+    parsed = parse_subscription_body(body)
+
+    assert len(parsed.records[0][1]) <= 64

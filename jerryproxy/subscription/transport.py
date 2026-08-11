@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import requests
+import yaml
 from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
@@ -19,7 +20,12 @@ from urllib3.poolmanager import PoolManager
 from urllib3.util.connection import create_connection
 
 from ..errors import SubscriptionFetchError, SubscriptionParseError
-from .audit import MIHOMO_PARSER_IDENTITY, SUPPORTED_SCHEMES
+from .audit import (
+    _FIELD_DISPOSITION_MANIFEST,
+    MIHOMO_PARSER_IDENTITY,
+    PROVIDER_TYPES,
+    SUPPORTED_SCHEMES,
+)
 from .interfaces import SubscriptionParser
 from .model import ParsedSubscription
 from .redaction import redact_text, terminal_safe_text
@@ -450,6 +456,124 @@ def _validate_uri_line(line):  # type: (str) -> Tuple[str, str, str]
     return scheme, _display_for_uri(line), line
 
 
+#: Top-level keys a provider document must not carry. A proxy provider holds
+#: proxies; these belong to a full Clash configuration and would let a
+#: provider-controlled body reach code execution, the controller, or the host's
+#: routing. Kept in one place with the audit manifest that records them.
+UNSAFE_PROVIDER_KEYS = frozenset(_FIELD_DISPOSITION_MANIFEST["unsafe"]["rejected_fields"])
+MAXIMUM_PROVIDER_PROXIES = MAXIMUM_RECORDS
+
+
+def _looks_like_provider_document(value):  # type: (bytes) -> bool
+    """Return whether these bytes are a proxy-provider document at all.
+
+    Deliberately narrow: a mapping carrying a `proxies` list. A Base64 blob
+    parses as a YAML scalar rather than a mapping, so this cannot misfire on
+    the URI-line formats and take a body away from them.
+    """
+
+    return _load_provider_document(value) is not None
+
+
+def _load_provider_document(value):  # type: (bytes) -> dict
+    """Return the provider mapping, or None when this is not one."""
+
+    try:
+        document = yaml.safe_load(value)
+    except yaml.YAMLError:
+        # Not YAML at all, which the URI-line classifier may still accept.
+        return None
+    if not isinstance(document, dict):
+        return None
+    proxies = document.get("proxies")
+    if not isinstance(proxies, list):
+        return None
+    return document
+
+
+def _provider_display(proxy, index):  # type: (dict, int) -> str
+    """Derive a label from the provider's own display field.
+
+    This format has no URI fragment, and `name` is the container's declared
+    display text rather than a protocol envelope, so it is the same kind of
+    provider-controlled string the fragment is -- and gets the same treatment:
+    redacted, terminal-safe, whitespace-folded, and bounded.
+    """
+
+    value = proxy.get("name")
+    if not isinstance(value, str) or not value.strip():
+        kind = proxy.get("type")
+        return terminal_safe_text(kind) if isinstance(kind, str) and kind.strip() else "proxy-%d" % index
+    label = " ".join(value.split())
+    label = terminal_safe_text(redact_text(label))
+    return label[:MAXIMUM_LABEL_CHARACTERS] or "proxy-%d" % index
+
+
+def _parse_provider_document(body):  # type: (bytes) -> ParsedSubscription
+    """Split one provider document into per-proxy provider documents.
+
+    Each node keeps a complete single-proxy document as its payload, so the
+    runtime publishes it unchanged and no protocol field is ever interpreted
+    here. Re-serialising one entry is not the same as understanding it.
+    """
+
+    document = _load_provider_document(body)
+    if document is None:
+        raise SubscriptionParseError("subscription body is not a proxy provider document")
+    unsafe = sorted(UNSAFE_PROVIDER_KEYS.intersection(document))
+    if unsafe:
+        # Naming the keys is safe: they are format vocabulary, not values.
+        raise SubscriptionParseError(
+            "provider document carries fields a subscription must not set: %s"
+            % ", ".join(unsafe)
+        )
+    proxies = document["proxies"]
+    if len(proxies) > MAXIMUM_PROVIDER_PROXIES:
+        raise SubscriptionParseError("subscription record count exceeds the bound")
+    records = []
+    skipped = {}
+    for index, proxy in enumerate(proxies):
+        if not isinstance(proxy, dict):
+            skipped["malformed"] = skipped.get("malformed", 0) + 1
+            continue
+        kind = proxy.get("type")
+        if not isinstance(kind, str) or not kind.strip():
+            skipped["malformed"] = skipped.get("malformed", 0) + 1
+            continue
+        scheme = kind.strip().lower()
+        if not _SCHEME_NAME.match(scheme) or len(scheme) > _MAXIMUM_SCHEME_NAME:
+            skipped["malformed"] = skipped.get("malformed", 0) + 1
+            continue
+        if scheme not in PROVIDER_TYPES:
+            skipped[scheme] = skipped.get(scheme, 0) + 1
+            continue
+        payload = yaml.safe_dump(
+            {"proxies": [proxy]},
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=True,
+        )
+        if len(payload.encode("utf-8")) > MAXIMUM_URI_BYTES:
+            raise SubscriptionParseError("subscription URI record exceeds the size bound")
+        records.append((scheme, _provider_display(proxy, index), payload))
+    if not records:
+        raise _unsupported_provider_error(skipped)
+    return ParsedSubscription(
+        "mihomo-provider", body, tuple(records), tuple(sorted(skipped.items()))
+    )
+
+
+def _unsupported_provider_error(skipped):  # type: (dict) -> SubscriptionParseError
+    """Report a provider document whose every proxy type is unusable."""
+
+    if not skipped:
+        raise SubscriptionParseError("provider document declares no proxies")
+    return SubscriptionParseError(
+        "subscription contains no supported nodes; it declares %s and this build "
+        "supports %s" % (_describe(skipped), ", ".join(PROVIDER_TYPES))
+    )
+
+
 def _parse_v2ray_subscription_body(body, format_hint="auto"):
     # type: (bytes, str) -> ParsedSubscription
     """Classify Base64/plain URI lines and preserve each accepted URI exactly."""
@@ -461,7 +585,9 @@ def _parse_v2ray_subscription_body(body, format_hint="auto"):
     if format_hint not in ("auto", "uri-lines", "mihomo-provider"):
         raise SubscriptionParseError("unsupported subscription format: %s" % format_hint)
     if format_hint == "mihomo-provider":
-        raise SubscriptionParseError("mihomo provider YAML requires a native provider projection")
+        return _parse_provider_document(body)
+    if format_hint == "auto" and _looks_like_provider_document(body):
+        return _parse_provider_document(body)
     candidates = []
     if format_hint in ("auto", "uri-lines"):
         if _looks_like_uri_lines(body):
