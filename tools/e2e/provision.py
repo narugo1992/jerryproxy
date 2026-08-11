@@ -35,9 +35,10 @@ HYSTERIA2_PORT = 10005
 TUIC_PORT = 10006
 ANYTLS_PORT = 10007
 # The TLS-terminating fixtures serve a leaf generated here, so the job that
-# builds the node URIs is the one that produced the certificate. The URIs then
-# say `insecure` explicitly: these fixtures prove the protocol carries traffic,
-# not that certificate validation is enforced -- that guard has its own tests.
+# builds the node URIs is the one that produced the certificate. Each URI then
+# opts out of validating that leaf, using whichever parameter its protocol
+# actually honours. These fixtures prove the protocol carries traffic; they do
+# not prove certificate validation is enforced, which has its own tests.
 TLS_SERVER_NAME = "fixture.invalid"
 CAMOUFLAGE_SNI = "www.example.test"
 VLESS_FLOW = "xtls-rprx-vision"
@@ -235,8 +236,13 @@ def compose_nodes(values):  # type: (dict) -> dict
             "hy2://%s@%s:%d?sni=%s&insecure=1#e2e-hy2"
             % (values["hysteria2_password"], PROXY_HOST, HYSTERIA2_PORT, name)
         ),
+        # `disable_sni=1` is what the qualified backend honours for TUIC. The
+        # spellings the other protocols use -- `insecure`, `allow_insecure`,
+        # `skip-cert-verify`, `allowInsecure` -- are all silently ignored here,
+        # measured one by one: with any of them the client still rejected the
+        # fixture leaf with "certificate signed by unknown authority".
         "tuic": (
-            "tuic://%s:%s@%s:%d?sni=%s&alpn=h3&congestion_control=bbr&allow_insecure=1#e2e-tuic"
+            "tuic://%s:%s@%s:%d?sni=%s&alpn=h3&congestion_control=bbr&disable_sni=1#e2e-tuic"
             % (values["tuic_uuid"], values["tuic_password"], PROXY_HOST, TUIC_PORT, name)
         ),
         "anytls": (
