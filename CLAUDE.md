@@ -317,6 +317,29 @@ authentication, extraction, process, or permission errors to warnings.
 - Do not commit real subscriptions, backend caches, generated configs, runtime
   descriptors, release tokens, or logs.
 
+## Secret-leakage and TLS gates
+
+- `test/security/` holds the two universal release claims, and they are tested
+  as matrices rather than sampled. Every sensitive field the product can hold
+  is asserted **absent** from every channel that emits text: the public
+  subscription view, human CLI output, JSON output, subscription error
+  messages, the session log sink, the on-disk runtime log, the access file, the
+  public envelope, the runtime refusal message, and the stored-state
+  projection.
+- Assertions are stated in the negative. Checking that a redaction marker is
+  present passes just as happily when the value beside it was never redacted.
+- A meta-test binds both dimensions: a declared secret that no fixture plants,
+  a channel with no test behind it, and a leak test not bound to a channel each
+  fail. Naming a channel in a list and checking that the name appears in the
+  module is circular and does not count.
+- A fixture must exercise the fallback branches too. Every URI carrying a
+  fragment never reaches the label fallback, which is the one place a node host
+  could reach a display value.
+- The subscription fetch refuses a loopback or private source before any TLS
+  handshake, so that path cannot demonstrate certificate validation; say so
+  rather than implying otherwise. Backend download is the path that reaches it,
+  and its refusal must be classified as a TLS failure, not merely as an error.
+
 ## Architecture boundaries
 
 - `jerryproxy.backend.registry`: built-in backend identity and exact asset
