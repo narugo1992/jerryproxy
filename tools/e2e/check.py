@@ -234,13 +234,23 @@ def _check_workflow_matches_the_provisioner():  # type: () -> list
     a missing credential rather than about the rename that caused it.
     """
 
-    referenced = set(re.findall(r"needs\.provision\.outputs\.([a-z_0-9]+)", _workflow()))
+    text = _workflow()
+    referenced = set(re.findall(r"needs\.provision\.outputs\.([a-z_0-9]+)", text))
     failures = [
         "the workflow references needs.provision.outputs.%s, which is not emitted" % name
         for name in sorted(referenced - set(provision.OUTPUT_NAMES))
     ]
     if not referenced:
         failures.append("the workflow references no provisioner output")
+    # The other direction, which this guard used to ignore: a value the tool
+    # emits but the job never declares as an output is simply invisible, and a
+    # consumer of it receives an empty string. That is how the subscription
+    # fixture came to fail on a value that had been generated correctly.
+    declared = set(re.findall(r"^      ([a-z_0-9]+): \$\{\{ steps\.generate\.outputs\.", text, re.MULTILINE))
+    failures.extend(
+        "the provisioner emits %s, which the provision job never declares as an output" % name
+        for name in sorted(set(provision.OUTPUT_NAMES) - declared)
+    )
     return failures
 
 

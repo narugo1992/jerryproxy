@@ -205,6 +205,7 @@ jobs:
       tls_certificate: ${{ steps.generate.outputs.tls_certificate }}
       tls_key: ${{ steps.generate.outputs.tls_key }}
       tls_server_name: ${{ steps.generate.outputs.tls_server_name }}
+      subscription_body: ${{ steps.generate.outputs.subscription_body }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
