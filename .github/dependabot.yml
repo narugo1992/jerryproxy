@@ -54,9 +54,12 @@ updates:
       # requests 2.32 requires >= 3.8; 2.31.0 is the newest declaring 3.7.
       - dependency-name: requests
         versions: [">=2.32"]
-      # wheel 0.45 requires >= 3.8; 0.42.0 is the newest declaring 3.7.
+      # wheel 0.43 requires >= 3.8; 0.42.0 is the newest declaring 3.7. An
+      # earlier revision said 0.45 and was too loose, which let 0.43 and 0.44
+      # through -- take the boundary from the release that actually changed
+      # requires_python, not from a later one that happens to be noticed.
       - dependency-name: wheel
-        versions: [">=0.45"]
+        versions: [">=0.43"]
       # PyYAML 6.0.2 requires >= 3.8; 6.0.1 is the newest declaring 3.7.
       - dependency-name: PyYAML
         versions: [">=6.0.2"]
