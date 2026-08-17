@@ -789,14 +789,17 @@ commits. Releases, backend catalog changes, workflow permissions, and package
 publishing require `narugo1992` approval.
 
 A `v*` tag must produce one release carrying everything a user installs: the
-wheel and sdist on PyPI through Trusted Publishing, and those same two files
-plus one standalone archive per built platform attached to the GitHub release,
-with a `SHA256SUMS` manifest recomputed over exactly what is attached. Both
-artifact sets come from the same workflow run, the release job runs only after
-the publish succeeds, and `gh release create --verify-tag` refuses to invent a
-tag. Adding a platform to the standalone lane without attaching its archive
-fails a repository-structure test.
+wheel and sdist on PyPI through the configured `PYPI_PASSWORD` repository secret
+(a PyPI API token for the initial release), and those same two files plus one
+standalone archive per built platform attached to the GitHub release, with a
+`SHA256SUMS` manifest recomputed over exactly what is attached. Both artifact
+sets come from the same workflow run, the release job runs only after the
+publish succeeds, and `gh release create --verify-tag` refuses to invent a tag.
+Adding a platform to the standalone lane without attaching its archive fails a
+repository-structure test.
 
 Never commit a backend binary, secret, token, real subscription, or generated
-provider file. PyPI releases use Trusted Publishing instead of a long-lived
-token.
+provider file. The initial release reads the PyPI API token only from the
+`PYPI_PASSWORD` repository secret; it is never written to the repository or
+passed on a command line. A later Trusted Publishing migration may remove that
+secret path.
