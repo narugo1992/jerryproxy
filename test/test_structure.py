@@ -211,3 +211,10 @@ def test_the_release_refuses_to_invent_a_tag():
     """`--verify-tag` keeps a mistyped ref from creating a dangling release."""
 
     assert "--verify-tag" in _workflow("release.yml")
+
+
+def test_the_release_docs_build_installs_the_project_runtime_dependencies():
+    """The release docs job must import the package in its clean build environment."""
+
+    release = _workflow("release.yml")
+    assert "python -m pip install -e . -r requirements-build.txt -r requirements-doc.txt" in release

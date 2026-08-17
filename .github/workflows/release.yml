@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: python -m pip install -r requirements-build.txt -r requirements-doc.txt
+      - run: python -m pip install -e . -r requirements-build.txt -r requirements-doc.txt
       - name: Verify release tag matches package version
         run: |
           PACKAGE_VERSION=$(python -c 'from jerryproxy import __VERSION__; print(__VERSION__)')
