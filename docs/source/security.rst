@@ -140,5 +140,14 @@ Current URI-runtime invariants:
   reparses the source bytes or repairs first;
 * managed downloads enforce time, size, and redirect policy.
 
+Provider YAML has the same opaque-protocol boundary as URI input. A provider
+entry is re-serialised as a complete single-proxy document and is never
+normalised into a Python protocol model. The parser uses the YAML 1.2 core
+schema expected by Mihomo, bounds the document and proxy count, and rejects
+full-configuration fields such as ``scripts``, ``hooks``, ``plugins``,
+``controller``, ``tun``, and ``listeners`` before any runtime publication.
+Provider labels come only from the document's ``name`` field and receive the
+same redaction, terminal-safety, and length limits as URI-fragment labels.
+
 JerryProxy does not bundle external backends. Their upstream licenses and
 security policies remain independently applicable.

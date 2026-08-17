@@ -1,7 +1,8 @@
 # Security Policy
 
-JerryProxy is pre-alpha and has not published a stable release. Report
-vulnerabilities through GitHub private vulnerability reporting when available;
+JerryProxy 0.1.0 is an alpha-quality release and has not published a stable
+release. Report vulnerabilities through GitHub private vulnerability reporting
+when available;
 do not include live subscription credentials or provider bodies in a public
 issue.
 

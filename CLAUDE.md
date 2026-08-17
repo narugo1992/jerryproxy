@@ -22,20 +22,21 @@ The canonical technical identifiers are all `jerryproxy`:
 
 The backend version manager, official release resolution, verified downloads,
 safe extraction, manifests, active-link switching, bounded
-`V2RAY_SUBSCRIPTION` ingestion for Base64/plain URI lines of the encrypted
-protocols the qualified backend was measured to use, which
-keeps the supported nodes of a mixed-protocol container and reports the rest as
-a scheme-name aggregate, and a
+`V2RAY_SUBSCRIPTION` ingestion for Base64/plain URI lines and Mihomo/Clash
+provider YAML of the encrypted protocols the qualified backend was measured to
+use, which keeps the supported nodes of a mixed-protocol container and reports
+the rest as a scheme-name aggregate, and a
 Mihomo `1.19.29` foreground session now exist. The public server listener is
 open on `127.0.0.1` by default, with optional generated local credentials via
 `--auth`; `--bind-all` explicitly selects `0.0.0.0`. The session keeps
 subscription state below `JERRYPROXY_HOME`, probes the global health quorum,
 restarts the current node once, sweeps deterministic alternates, and may
 refresh the retained source once without rewriting the saved preference.
-Nodes are labelled from their URI fragment. A stored node projection that no
-longer matches its source bytes is recoverable drift rather than tampering, and
-one bounded refresh of the saved source repairs it before startup; that is a
-separate mechanism from the running-session health recovery above.
+Nodes are labelled from their URI fragment or provider name, depending on the
+container format. A stored node projection that no longer matches its source
+bytes is recoverable drift rather than tampering, and one bounded refresh of the
+saved source repairs it before startup; that is a separate mechanism from the
+running-session health recovery above.
 Native profiles, the other runtime cores, controller, measurement/ranking
 system, and historical `v2raycli` compatibility remain planned. README and docs
 must keep that boundary truthful.
@@ -288,7 +289,8 @@ authentication, extraction, process, or permission errors to warnings.
   journaled removal transaction still applies. Cover the supported Bash, Zsh,
   and Fish protocols, including Click choice completion for public option
   values such as relay modes.
-- The project is unpublished. CLI redesigns must remove obsolete commands,
+- The project is published as an alpha-quality `0.1.0` release. CLI redesigns
+  must remove obsolete commands,
   options, modules, aliases, and tests cleanly instead of retaining backward-
   compatibility shims without an explicit release requirement.
 - Every command help page begins with one sentence that states its purpose,

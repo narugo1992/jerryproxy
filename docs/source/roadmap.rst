@@ -31,5 +31,8 @@ Later compatibility work
 * Xray runtime driver for strict/new Xray-family cases;
 * V2Ray legacy runtime driver;
 * trusted configurable mirrors and explicit offline archives;
-* signed standalone executables and PyPI Trusted Publishing.
-* signed release artifacts and publication policy.
+* signed standalone executables and signed release artifacts.
+
+The first public ``0.1.0`` release publishes unsigned standalone archives and
+Python distributions. Release checksums are attached in ``SHA256SUMS``;
+artifact signatures remain future work.

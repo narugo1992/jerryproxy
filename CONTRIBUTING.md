@@ -1,6 +1,6 @@
 # Contributing to JerryProxy
 
-JerryProxy is pre-alpha. Start by reading [CLAUDE.md](CLAUDE.md), the WIP
+JerryProxy 0.1.0 is alpha-quality. Start by reading [CLAUDE.md](CLAUDE.md), the WIP
 boundary in [README.md](README.md), and the open implementation-plan issue.
 
 ## Development setup

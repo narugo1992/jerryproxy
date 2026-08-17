@@ -43,7 +43,7 @@ setup(
     },
     entry_points={"console_scripts": ["jerryproxy=jerryproxy.cli:main"]},
     classifiers=[
-        "Development Status :: 2 - Pre-Alpha",
+        "Development Status :: 3 - Alpha",
         "Environment :: Console",
         "Intended Audience :: End Users/Desktop",
         "Intended Audience :: System Administrators",

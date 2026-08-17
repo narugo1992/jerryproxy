@@ -223,7 +223,7 @@ _BACKENDS = {
         repository="MetaCubeX/mihomo",
         executable="mihomo",
         asset_family="mihomo",
-        description="Preferred default candidate pending compatibility/security PoC.",
+        description="Qualified foreground runtime pinned to Mihomo 1.19.29.",
         version_arguments=("-v",),
     ),
     "sing-box": BackendSpec(

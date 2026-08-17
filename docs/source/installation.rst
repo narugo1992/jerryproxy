@@ -1,8 +1,19 @@
 Installation
 ============
 
-JerryProxy supports Python 3.7 and newer and is designed as a pure-Python
-wheel. It is not published to PyPI yet.
+JerryProxy 0.1.0 is the first public, alpha-quality release. It supports Python
+3.7 and newer and is distributed as a pure-Python wheel. The ``0.x`` API and
+managed-state formats are not stable yet.
+
+Install the published package with:
+
+.. code-block:: shell
+
+   python -m pip install jerryproxy
+
+The GitHub release additionally provides standalone Linux, Windows, and macOS
+archives. Backend binaries are not bundled in either form; JerryProxy downloads
+an exact, digest-verified upstream asset when a backend is installed.
 
 Development installation
 ------------------------

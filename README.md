@@ -5,7 +5,7 @@ switching, and eventually orchestrating multiple external proxy backends. The
 PyPI distribution, Python import, GitHub repository, CLI command, and default
 home directory all use the same name: `jerryproxy`.
 
-> **Work in progress:** the first runtime slice is implemented: bounded
+> **0.1.0 alpha-quality release:** the first runtime slice is implemented: bounded
 > `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, VLESS, Trojan,
 > Hysteria2, TUIC, and AnyTLS URI
 > lines and Mihomo/Clash provider YAML, which keeps the supported nodes of a
@@ -16,7 +16,9 @@ home directory all use the same name: `jerryproxy`.
 > listener to `127.0.0.1` by default; `--auth` enables generated local
 > credentials and `--bind-all` explicitly selects `0.0.0.0`. Native profiles,
 > other core drivers, and the historical `v2raycli` compatibility layer remain
-> planned.
+> planned. This is the first public release; the `0.x` API and state formats are
+> not stable yet. See the [release notes](https://github.com/narugo1992/jerryproxy/blob/main/RELEASE_NOTES.md) for the complete
+> scope, verification evidence, and known limitations.
 
 ## Current status
 
@@ -72,7 +74,7 @@ Not implemented yet:
 - durable measurement/ranking, controller APIs, TUN/LAN integration, and
   background service wrappers;
 - the historical `v2raycli` option compatibility layer;
-- PyPI publication, signed standalone executables, and Read the Docs hosting.
+- signed standalone executables and artifact signatures.
 
 ## Why JerryProxy exists
 
@@ -87,12 +89,18 @@ Python.
 
 ## Installation
 
-The project is not published on PyPI yet. When a `v*` tag is pushed, one
-release publishes the wheel and sdist to PyPI and attaches those two files plus
-a standalone executable archive for Linux, Windows, and macOS to the GitHub
-release, alongside a `SHA256SUMS` manifest covering exactly those assets. The
-standalone archives are the ones the clean-runner compatibility stage of that
-same run verified.
+The first public release is `0.1.0`. It is an alpha-quality `0.x` release, so
+the API and managed-state formats may change between releases. Install it from
+PyPI with:
+
+```shell
+python -m pip install jerryproxy
+```
+
+The GitHub release also contains standalone archives for Linux, Windows, and
+macOS plus the wheel and source distribution. `SHA256SUMS` covers exactly the
+five attached files, and the standalone archives are the ones verified by the
+clean-runner compatibility stage of that release.
 
 For development:
 
@@ -101,12 +109,6 @@ git clone https://github.com/narugo1992/jerryproxy.git
 cd jerryproxy
 python -m pip install -e .
 python -m pip install -r requirements-test.txt
-```
-
-When published, the intended entry point will be:
-
-```shell
-pip install jerryproxy
 ```
 
 Backend catalogs are static package resources. Upgrade JerryProxy itself to
@@ -426,7 +428,7 @@ Official upstream repositories currently registered:
 
 | Backend | Upstream | Planned role |
 |---|---|---|
-| Mihomo | `MetaCubeX/mihomo` | Preferred default candidate pending compatibility/security PoC |
+| Mihomo | `MetaCubeX/mihomo` | Qualified foreground runtime (1.19.29) |
 | sing-box | `SagerNet/sing-box` | Optional backend for native sing-box profiles |
 | Xray | `XTLS/Xray-core` | Optional Xray-family specialist backend |
 | V2Ray | `v2fly/v2ray-core` | Legacy compatibility backend |
@@ -590,7 +592,7 @@ tampering and is never repaired automatically.
 - [ ] Preserve documented `v2raycli` inputs through deprecated aliases.
 - [ ] Add native HTTP-provider mode as an explicit alternative.
 - [ ] Add Xray and V2Ray runtime drivers only for concrete compatibility gaps.
-- [ ] Publish PyPI alpha and standalone cross-platform executables.
+- [x] Publish the first PyPI release and standalone cross-platform executables.
 - [ ] Add upgrade/rollback integration tests against real pinned backends.
 
 See [the documentation](docs/source/index.rst) for architecture and security

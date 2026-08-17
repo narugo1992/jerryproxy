@@ -15,25 +15,27 @@ JerryProxy separates backend distribution from backend runtime behavior:
     ├── Archive extractor (bounded and traversal-safe)
     ├── Removal transaction (private journal and alias-safe disposal)
     ├── Backend manager (versions, links, rollback)
-    ├── Subscription manager (V2RAY_SUBSCRIPTION URI slice)
+    ├── Subscription manager (URI lines and Mihomo/Clash provider YAML)
     │     ├── NodeSource/ProxyNode model contracts
     │     └── injected SubscriptionParser adapters
     └── Runtime drivers
           ├── RuntimeDriver contract
-          ├── MihomoDriver (foreground URI NodeSet)
+          ├── MihomoDriver (foreground URI/provider NodeSet)
           ├── SingBoxDriver (planned)
           ├── XrayDriver (planned)
           └── V2RayDriver (planned)
 
-The first Mihomo runtime slice is implemented for Base64/plain SS, VMess, and
-VLESS URI lines from the exact ``V2RAY_SUBSCRIPTION`` source format. It writes a
-private file provider below the session's Mihomo safe path, exposes an open
-loopback listener on ``127.0.0.1`` by default, and performs a global health
+The first Mihomo runtime slice is implemented for Base64/plain URI lines from
+the exact ``V2RAY_SUBSCRIPTION`` source format and for Mihomo/Clash
+proxy-provider YAML. URI records and provider entries remain opaque to Python;
+the runtime publishes them through Mihomo 1.19.29, the qualified version. It
+writes a private file provider below the session's Mihomo safe path, exposes an
+open loopback listener on ``127.0.0.1`` by default, and performs a global health
 quorum with deterministic restart/failover and one policy-controlled source
 refresh. ``server --auth`` enables generated local credentials and
 ``server --bind-all`` explicitly selects ``0.0.0.0``. Xray, V2Ray, and sing-box
-runtime drivers remain optional compatibility work; all four binaries can already be installed and
-version-switched by the generic manager.
+runtime drivers remain optional compatibility work; all four binaries can
+already be installed and version-switched by the generic manager.
 
 When the exact Mihomo release is absent, ``server`` bootstraps it automatically
 by default. A guided terminal asks for confirmation with Yes as the default;

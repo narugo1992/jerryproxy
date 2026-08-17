@@ -95,6 +95,9 @@ ENV/
 ENV*/
 __pypackages__/
 .python-version
+.env
+.env.*
+!.env.example
 
 # Packaging and generated artifacts
 build/
