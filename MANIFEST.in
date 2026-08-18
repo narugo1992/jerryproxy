@@ -1,7 +1,6 @@
 include LICENSE
 include THIRD_PARTY_LICENSES.md
 include README.md
-include RELEASE_NOTES.md
 include auto_rst.py
 include auto_rst_top_index.py
 include requirements.txt

@@ -17,7 +17,7 @@ home directory all use the same name: `jerryproxy`.
 > credentials and `--bind-all` explicitly selects `0.0.0.0`. Native profiles,
 > other core drivers, and the historical `v2raycli` compatibility layer remain
 > planned. This is the first public release; the `0.x` API and state formats are
-> not stable yet. See the [release notes](https://github.com/narugo1992/jerryproxy/blob/main/RELEASE_NOTES.md) for the complete
+> not stable yet. See the [release notes](https://github.com/narugo1992/jerryproxy/releases/latest) for the complete
 > scope, verification evidence, and known limitations.
 
 ## Current status

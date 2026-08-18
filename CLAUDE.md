@@ -55,8 +55,9 @@ must keep that boundary truthful.
   labels out of code identifiers and public APIs.
 - Use English in source, identifiers, docstrings, logs, CLI output, and project
   documents. Respond to collaborators in the language they use.
-- Keep every release-note prose paragraph, including list items, on one physical
-  line; separate paragraphs with blank lines and preserve code blocks as code.
+- Keep release notes in GitHub Releases rather than repository files. Keep every
+  release-note prose paragraph, including list items, on one physical line;
+  separate paragraphs with blank lines and preserve code blocks as code.
 
 ## Python 3.7 compatibility
 

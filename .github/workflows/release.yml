@@ -190,5 +190,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --verify-tag \
-            --notes-file RELEASE_NOTES.md \
+            --generate-notes \
             assets/*
