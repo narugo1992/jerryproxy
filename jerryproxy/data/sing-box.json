@@ -1,8 +1,248 @@
 {
   "backend": "sing-box",
-  "generated_at": "2026-08-09T07:55:08Z",
+  "generated_at": "2026-08-17T09:47:06Z",
   "repository": "SagerNet/sing-box",
   "versions": [
+    {
+      "artifacts": {
+        "darwin-amd64": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910491,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-darwin-amd64.tar.gz",
+          "sha256": "31ee722237d95774e101fbffeae6be6776249c5f7db229ad8ff00b45b22e6a00",
+          "size": 20492119,
+          "updated_at": "2026-08-17T09:38:09Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-darwin-amd64.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "darwin-arm64": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910383,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-darwin-arm64.tar.gz",
+          "sha256": "23bf191906f2dfc9f00e9f0092f274f3426ba9377327e903ff94e636b64d0997",
+          "size": 18765957,
+          "updated_at": "2026-08-17T09:38:04Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-darwin-arm64.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-386-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910381,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-386-glibc.tar.gz",
+          "sha256": "171465d48c5c73af3536ee652402dc0822b3d735b814c33767eaa8843172e5ba",
+          "size": 23843518,
+          "updated_at": "2026-08-17T09:38:05Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-386-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-386-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910407,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-386-musl.tar.gz",
+          "sha256": "103c37a2346ae97ea84c72a14569e85aff0473f8c9c1aa44c53bfbd2e9b5193f",
+          "size": 23856951,
+          "updated_at": "2026-08-17T09:38:05Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-386-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-amd64-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910421,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-amd64-glibc.tar.gz",
+          "sha256": "77e26226c111b8a269f559aec7999f6f5ae1961f25374b58b126d06405d4f516",
+          "size": 24727716,
+          "updated_at": "2026-08-17T09:38:07Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-amd64-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-amd64-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910426,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-amd64-musl.tar.gz",
+          "sha256": "150456f94fcf936fc2519de28d856422fb671a1ff181cd909b78f20e208fdcb8",
+          "size": 24753732,
+          "updated_at": "2026-08-17T09:38:07Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-amd64-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-arm64-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910431,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-arm64-glibc.tar.gz",
+          "sha256": "c79c76bf2f804579768ad4683dc58ff7f3873f0e8159131219290f1ae79b2a38",
+          "size": 22694304,
+          "updated_at": "2026-08-17T09:38:07Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-arm64-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-arm64-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910445,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-arm64-musl.tar.gz",
+          "sha256": "5146181884310ea2381e085ef504005c81bd09f80721542127efb0a73f12cd2f",
+          "size": 22735134,
+          "updated_at": "2026-08-17T09:38:07Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-arm64-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-armv5": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910454,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-armv5.tar.gz",
+          "sha256": "dca87a62480e2bdf26270a92165a9777d1c57c58a7e329dfb30c8240cd68180a",
+          "size": 18191953,
+          "updated_at": "2026-08-17T09:38:08Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-armv5.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-armv6": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910461,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-armv6.tar.gz",
+          "sha256": "b1815365caf2ce4c168e2e3415be51dbd69739034aa75cf422e42b44a11a7710",
+          "size": 18179772,
+          "updated_at": "2026-08-17T09:38:08Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-armv6.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-armv7-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910406,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-armv7-glibc.tar.gz",
+          "sha256": "68f01b083cac56b6f986abdfed0fbd5b4ba523b365d2efbad5ff9cd74f22087a",
+          "size": 22685156,
+          "updated_at": "2026-08-17T09:38:05Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-armv7-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-armv7-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910685,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-armv7-musl.tar.gz",
+          "sha256": "1fb4134b2deaa22f15cacd2156220cc6d3ba32d12fed9b0f23ad5666529b6b64",
+          "size": 22709374,
+          "updated_at": "2026-08-17T09:38:19Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-armv7-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-loong64-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910688,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-loong64-glibc.tar.gz",
+          "sha256": "f0a467c7b4914624348bfe07f68a50aa1d9c80a6c561f03dccc41e08ee8145c2",
+          "size": 23472437,
+          "updated_at": "2026-08-17T09:38:19Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-loong64-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-loong64-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910699,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-loong64-musl.tar.gz",
+          "sha256": "996a45410770b151c3c4656b82c61c8ddd8c04f293353cdb07f042ea8ebde393",
+          "size": 23504781,
+          "updated_at": "2026-08-17T09:38:20Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-loong64-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-ppc64le": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910496,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-ppc64le.tar.gz",
+          "sha256": "c4dc2a963032ef6098e1a8da5df87ff64fa5e48007f4ae2f596e6a51c8a90253",
+          "size": 17785761,
+          "updated_at": "2026-08-17T09:38:10Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-ppc64le.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-riscv64-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910506,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-riscv64-glibc.tar.gz",
+          "sha256": "107a6da05f68f0d1fb632627bfb7974fe91770a4606b74747f108af57fe99182",
+          "size": 23360194,
+          "updated_at": "2026-08-17T09:38:10Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-riscv64-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-riscv64-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910507,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-riscv64-musl.tar.gz",
+          "sha256": "a8ee0d0e65613033c4d18c8a0809a7d837d4c285d36daf6c6631edc70a49c191",
+          "size": 23392183,
+          "updated_at": "2026-08-17T09:38:11Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-riscv64-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-s390x": {
+          "archive_format": "tar.gz",
+          "asset_id": 517910517,
+          "executable": "sing-box",
+          "name": "sing-box-1.13.19-linux-s390x.tar.gz",
+          "sha256": "23843202066901798b1df4a136a9c275f82e2ac3f27f24e82604206bcfd717b0",
+          "size": 19099736,
+          "updated_at": "2026-08-17T09:38:11Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-s390x.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "windows-386": {
+          "archive_format": "zip",
+          "asset_id": 517910526,
+          "executable": "sing-box.exe",
+          "name": "sing-box-1.13.19-windows-386.zip",
+          "sha256": "96ce47e98a553b0bfe7965492c5f38c62a04e84352a25ede09f7720aa4baa5a8",
+          "size": 15767549,
+          "updated_at": "2026-08-17T09:38:11Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-windows-386.zip",
+          "verification": "github-release-digest"
+        },
+        "windows-amd64": {
+          "archive_format": "zip",
+          "asset_id": 517910532,
+          "executable": "sing-box.exe",
+          "name": "sing-box-1.13.19-windows-amd64.zip",
+          "sha256": "e011a4def2f5e2b143ed54adb2b1a20a6be407806ab4442f3667f1dd817a2c8d",
+          "size": 21046252,
+          "updated_at": "2026-08-17T09:38:12Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-windows-amd64.zip",
+          "verification": "github-release-digest"
+        },
+        "windows-arm64": {
+          "archive_format": "zip",
+          "asset_id": 517910533,
+          "executable": "sing-box.exe",
+          "name": "sing-box-1.13.19-windows-arm64.zip",
+          "sha256": "dbb6c4803f94a997fcc4a1cce313eff65a901abc197731b55109ea4fbd412c88",
+          "size": 18951300,
+          "updated_at": "2026-08-17T09:38:13Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-windows-arm64.zip",
+          "verification": "github-release-digest"
+        }
+      },
+      "published_at": "2026-08-17T09:47:06Z",
+      "release_id": 371636056,
+      "release_url": "https://github.com/SagerNet/sing-box/releases/tag/v1.13.19",
+      "tag": "v1.13.19",
+      "version": "1.13.19"
+    },
     {
       "artifacts": {
         "darwin-amd64": {
