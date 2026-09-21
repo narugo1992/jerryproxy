@@ -204,7 +204,7 @@ def test_runtime_session_mihomo_authenticated_loopback_marker(tmp_path, protocol
             authenticate=True,
             listener_protocol="http",
             process_factory=None,
-            recovery_policy=RecoveryPolicy(startup_retry_delays=(0.0,), recovery_deadline=10.0),
+            recovery_policy=RecoveryPolicy(recovery_deadline=10.0),
         )
         runtime.start("loopback", node_id=record.nodes[0].node_id, install_missing=False)
         deadline = time.time() + 10.0

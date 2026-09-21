@@ -3,7 +3,6 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -24,7 +23,6 @@ from jerryproxy.runtime import (
     RuntimeProjection,
     RuntimeSession,
 )
-from jerryproxy.runtime.health import RecoveryDeadline
 from jerryproxy.subscription import SingleNodeSource, SubscriptionManager, V2RaySubscriptionParser
 from jerryproxy.subscription.model import ParsedSubscription
 from jerryproxy.subscription.storage import build_record
@@ -160,9 +158,7 @@ def _session(
             inspector=inspector or _control_documents(),
         ),
         recovery_policy=policy or RecoveryPolicy(
-            startup_retry_delays=(0.0,),
-            same_node_delay=0.0,
-            alternate_delays=(0.0, 0.0),
+
             recovery_deadline=10.0,
         ),
         clock=clock,
@@ -207,14 +203,13 @@ def test_startup_health_result_is_logged_as_info(tmp_path):
     runtime.stop()
 
 
-def test_startup_health_failure_logs_warning_then_error_and_action(tmp_path):
+def test_disabled_recovery_logs_startup_failure_and_cleanup(tmp_path):
     record = _record(nodes=1)
     events = []
     policy = RecoveryPolicy(
-        startup_retry_delays=(0.0, 0.0),
+        retry_policy="none",
         recovery_deadline=10.0,
-        same_node_delay=0.0,
-        alternate_delays=(0.0, 0.0),
+
     )
     runtime = _session(
         tmp_path,
@@ -228,8 +223,8 @@ def test_startup_health_failure_logs_warning_then_error_and_action(tmp_path):
         runtime.start("main", node_id=record.nodes[0].node_id, install_missing=False)
 
     health_events = [event for event in events if "startup health check" in event[2]]
-    assert any(event[1] == "WARN" and "retrying current node" in event[2] for event in health_events)
-    assert any(event[1] == "ERROR" and "stopping session" in event[2] for event in health_events)
+    assert any(event[1] == "WARN" for event in health_events)
+    assert any(event[1] == "ERROR" and "stopping session" in event[2] for event in events)
 
 
 def test_periodic_health_failure_logs_recovery_action_and_failure(tmp_path):
@@ -248,10 +243,9 @@ def test_periodic_health_failure_logs_recovery_action_and_failure(tmp_path):
     events = []
     policy = RecoveryPolicy(
         health_interval=1.0,
-        startup_retry_delays=(0.0,),
+        retry_policy="none",
         recovery_deadline=2.0,
-        same_node_delay=0.0,
-        alternate_delays=(0.0, 0.0),
+
     )
     runtime = _session(
         tmp_path,
@@ -272,7 +266,7 @@ def test_periodic_health_failure_logs_recovery_action_and_failure(tmp_path):
 
     periodic = [event for event in events if event[0] == "jerryproxy" and "periodic health check" in event[2]]
     assert any(event[1] == "WARN" and "one more failed check" in event[2] for event in periodic)
-    assert any(event[1] == "ERROR" and "starting recovery" in event[2] for event in periodic)
+    assert any(event[1] == "ERROR" and "starting persistent recovery" in event[2] for event in periodic)
     assert any(event[1] == "ERROR" and "health recovery action failed" in event[2] for event in events)
 
 
@@ -420,7 +414,7 @@ def test_runtime_bootstraps_missing_backend_through_manager_install(tmp_path):
         subscription_manager=FakeSubscriptionManager(record),
         health_probe=FakeProbe([True]),
         driver=MihomoDriver(process_factory=FakeProcess, inspector=_control_documents()),
-        recovery_policy=RecoveryPolicy(startup_retry_delays=(0.0,), recovery_deadline=10.0),
+        recovery_policy=RecoveryPolicy(recovery_deadline=10.0),
     )
     runtime.start("main", node_id=record.nodes[0].node_id, install_missing=True)
     assert runtime.executable == tmp_path / "mihomo"
@@ -444,30 +438,6 @@ def test_runtime_cleanup_failure_is_reported_and_retains_lock(tmp_path):
     runtime._leave_operation_lock()
 
 
-def test_runtime_recovery_can_select_an_alternate_node(tmp_path):
-    record = _record(nodes=2, source_url="https://provider.invalid/source")
-    policy = RecoveryPolicy(
-        health_interval=1.0,
-        startup_retry_delays=(0.0,),
-        recovery_deadline=10.0,
-        same_node_delay=0.0,
-        alternate_delays=(0.0, 0.0),
-        refresh_on_failure=False,
-    )
-
-    runtime = _session(
-        tmp_path,
-        record,
-        FakeProbe([True, False, True]),
-        policy=policy,
-    )
-    initial_node_id = record.nodes[0].node_id
-    runtime.start("main", node_id=initial_node_id, install_missing=False)
-    runtime._recover()
-    assert runtime.preference_node_id == initial_node_id
-    assert runtime.node.node_id != initial_node_id
-    assert runtime.node.node_id in {node.node_id for node in record.nodes}
-    runtime.stop()
 
 
 def test_runtime_rejects_unknown_subscription_and_releases_lock(tmp_path):
@@ -515,11 +485,11 @@ def test_runtime_start_failure_removes_private_lease_and_stops_process(tmp_path)
     runtime = _session(
         tmp_path,
         record,
-        FakeProbe([False]),
-        policy=RecoveryPolicy(startup_retry_delays=(0.0,), recovery_deadline=10.0),
+        FakeProbe([False, False]),
+        policy=RecoveryPolicy(retry_policy="none", recovery_deadline=10.0),
         log_sink=lambda *event: events.append(event),
     )
-    with pytest.raises(RuntimeSessionError, match="connectivity quorum failed"):
+    with pytest.raises(RuntimeSessionError, match="retry policy is none"):
         runtime.start("main", node_id=record.nodes[0].node_id, install_missing=False)
     assert runtime.process is None
     assert not runtime.session_root.exists()
@@ -655,7 +625,7 @@ def test_runtime_accepts_a_driver_without_changing_session_ownership(tmp_path):
         health_probe=FakeProbe([True]),
         driver=FakeDriver(),
         recovery_policy=RecoveryPolicy(
-            startup_retry_delays=(0.0,),
+
             recovery_deadline=10.0,
         ),
         sleeper=lambda delay: None,
@@ -669,70 +639,12 @@ def test_runtime_accepts_a_driver_without_changing_session_ownership(tmp_path):
     runtime.stop()
 
 
-def test_recovery_restarts_current_then_uses_alternate_without_changing_preference(tmp_path):
-    record = _record(nodes=2)
-    first, second = record.nodes
-    runtime = _session(tmp_path, record, FakeProbe([True, False, True]))
-    runtime.start("main", node_id=first.node_id, install_missing=False)
-
-    runtime._recover()
-
-    assert runtime.preference_node_id == first.node_id
-    assert runtime.node.node_id == second.node_id
-    runtime.stop()
 
 
-def test_recovery_refreshes_source_once_after_candidate_exhaustion(tmp_path):
-    original = _record(nodes=1, source_url="https://example.invalid/sub")
-    refreshed = _record(nodes=2, source_url="https://example.invalid/sub")
-    manager = FakeSubscriptionManager(original, refreshed=refreshed)
-    runtime = _session(tmp_path, original, FakeProbe([True, False, True]), manager=manager)
-    runtime.start("main", node_id=original.nodes[0].node_id, install_missing=False)
-
-    runtime._recover()
-
-    assert manager.refresh_calls == 1
-    assert runtime.subscription.revision == refreshed.revision
-    assert runtime.preference_node_id == original.nodes[0].node_id
-    assert runtime.node.node_id != original.nodes[0].node_id
-    runtime.stop()
 
 
-def test_recovery_skips_disabled_or_stale_alternates(tmp_path):
-    record = _record(nodes=3)
-    disabled = replace(record, enabled=False)
-    runtime = _session(tmp_path, disabled, FakeProbe([True]), policy=RecoveryPolicy(
-        startup_retry_delays=(0.0,),
-        same_node_delay=0.0,
-        alternate_delays=(0.0,),
-        recovery_deadline=10.0,
-    ))
-    runtime.subscription = disabled
-    runtime.node = disabled.nodes[0]
-    assert runtime._eligible_alternates(disabled, {runtime.node.node_id}) == ()
-
-    stale = replace(
-        record,
-        updated_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
-    )
-    runtime.subscription = stale
-    assert runtime._eligible_alternates(stale, {stale.nodes[0].node_id}) == ()
 
 
-def test_failed_recovery_candidate_does_not_replace_effective_node(tmp_path):
-    record = _record(nodes=2)
-    first, second = record.nodes
-    runtime = _session(tmp_path, record, FakeProbe([True, False]), policy=RecoveryPolicy(
-        startup_retry_delays=(0.0,),
-        same_node_delay=0.0,
-        alternate_delays=(0.0,),
-        recovery_deadline=10.0,
-    ))
-    runtime.start("main", node_id=first.node_id, install_missing=False)
-    deadline = RecoveryDeadline(10.0)
-    assert not runtime._try_candidate(second, deadline)
-    assert runtime.node.node_id == first.node_id
-    runtime.stop()
 
 
 def _drifted(record):
@@ -926,10 +838,9 @@ def test_health_recovery_refreshes_through_the_session_home_lock(tmp_path, monke
     clock = Clock()
     policy = RecoveryPolicy(
         health_interval=1.0,
-        startup_retry_delays=(0.0,),
+        retry_policy="fallback",
         recovery_deadline=5.0,
-        same_node_delay=0.0,
-        alternate_delays=(0.0, 0.0),
+
     )
     runtime = _session(
         tmp_path,
@@ -1110,51 +1021,3 @@ def test_the_control_secret_never_reaches_the_log_or_access_file(tmp_path):
         assert "127.0.0.1:%d" % runtime.control_port in access
     finally:
         runtime.stop()
-
-
-def test_a_recovery_candidate_that_the_backend_bypasses_is_not_accepted(tmp_path):
-    """A bypassing alternate must be refused even though it probes healthy.
-
-    This is the dangerous shape, not a candidate that simply fails: routing
-    directly makes egress succeed, so the probe would pass and the sweep would
-    otherwise settle on a node the backend never used. The probe is therefore
-    set to report the alternate healthy; the load check rejects it first, inside
-    the launch, so the probe is never reached for that candidate at all.
-    """
-
-    record = _record(nodes=2)
-    inspections = []
-
-    def inspector(port, secret, path, timeout):
-        del port, secret, timeout
-        if path.startswith("/providers/proxies/"):
-            inspections.append(path)
-            # The first launch is accepted. Every later launch reports what a
-            # backend says about a node whose protocol or dialect it refused.
-            if len(inspections) == 1:
-                return {"proxies": [{"name": "first", "id": "12345678-1234-4234-8234-123456789abc",
-                                     "provider-name": "jerryproxy"}]}
-            return {"proxies": []}
-        if len(inspections) <= 1:
-            return {"now": "first", "all": ["first"], "emptyFallback": "COMPATIBLE"}
-        return {"now": "COMPATIBLE", "all": ["COMPATIBLE"], "emptyFallback": "COMPATIBLE"}
-
-    runtime = _session(
-        tmp_path,
-        record,
-        # Healthy at start, unhealthy once so recovery begins, then healthy
-        # again -- exactly what a bypassed alternate looks like from a probe.
-        FakeProbe([True, False, True, True, True, True]),
-        inspector=inspector,
-    )
-    runtime.start("main", node_id=record.nodes[0].node_id)
-    try:
-        with pytest.raises(RuntimeSessionError, match="recovery exhausted"):
-            runtime._recover()
-    finally:
-        runtime.stop()
-
-    assert len(inspections) > 1, "the sweep must have attempted at least one alternate"
-    # A candidate the backend is not using never becomes the effective node,
-    # even though it answered the probe.
-    assert runtime.node is None or runtime.node.node_id == record.nodes[0].node_id

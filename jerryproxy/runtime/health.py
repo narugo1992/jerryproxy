@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import requests
 
 from ..errors import RuntimeSessionError
+from .recovery import RETRY_POLICIES, parse_retry_chain
 
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
@@ -234,57 +235,36 @@ class ConnectivityProbe(object):
 
 @dataclass(frozen=True)
 class RecoveryPolicy(object):
-    """Deterministic foreground health recovery policy."""
+    """Persistent recovery with a bounded budget per round, not per session."""
 
-    health_interval: float = 300.0
+    retry_policy: str = "fallback"
+    retry_chain: str = None
+    confirmation_delay: float = 3.0
+    refresh_interval: float = 300.0
+    health_interval: float = 30.0
     recovery_deadline: float = 120.0
-    startup_retry_delays: tuple = (0.0, 1.0, 2.0)
-    same_node_delay: float = 1.0
-    alternate_delays: tuple = (4.0, 8.0)
     refresh_on_failure: bool = True
     refresh_stale_seconds: float = 43200.0
-    failure_cooldown: float = 300.0
 
     def __post_init__(self):
+        if self.retry_policy not in RETRY_POLICIES:
+            raise ValueError("unknown retry policy")
+        if self.retry_chain is not None:
+            if self.retry_policy != "fallback":
+                raise ValueError("retry chain requires fallback policy")
+            parse_retry_chain(self.retry_chain)
         durations = (
-            self.health_interval,
-            self.recovery_deadline,
-            self.refresh_stale_seconds,
-            self.failure_cooldown,
+            self.confirmation_delay, self.refresh_interval, self.health_interval,
+            self.recovery_deadline, self.refresh_stale_seconds,
         )
         if any(
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not math.isfinite(float(value))
-            or value <= 0
+            not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(float(value)) or value <= 0
             for value in durations
         ):
-            raise ValueError("health and recovery durations must be positive")
-        if (
-            not isinstance(self.same_node_delay, (int, float))
-            or isinstance(self.same_node_delay, bool)
-            or not math.isfinite(float(self.same_node_delay))
-            or self.same_node_delay < 0
-        ):
-            raise ValueError("same-node delay must be finite and non-negative")
+            raise ValueError("health and recovery durations must be finite and positive")
         if not isinstance(self.refresh_on_failure, bool):
             raise ValueError("refresh_on_failure must be boolean")
-        if not self.startup_retry_delays or any(
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not math.isfinite(float(value))
-            or value < 0
-            for value in self.startup_retry_delays
-        ):
-            raise ValueError("startup retry delays must be finite and non-negative")
-        if not self.alternate_delays or any(
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not math.isfinite(float(value))
-            or value < 0
-            for value in self.alternate_delays
-        ):
-            raise ValueError("alternate delays must be finite and non-negative")
 
 
 class RecoveryDeadline(object):

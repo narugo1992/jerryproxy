@@ -82,9 +82,9 @@ launches the exact Mihomo backend through BackendManager. It never changes the
 backend active link, starts a daemon, or exposes a controller. Press Ctrl+C to
 stop and remove the session projection. After readiness it probes a quorum of
 stable global HTTPS targets through the selected local listener. Two consecutive
-failed quorums trigger the fixed recovery policy: restart the current node once,
-try eligible alternate nodes in public-ID order, then refresh the stored source
-once when policy permits. Automatic failover never rewrites the saved node
+failed quorums trigger persistent recovery: keep the current backend running,
+try alternate nodes within the selected subscription, and refresh the source
+when policy permits. Healthy sessions never switch for exploration. Automatic failover never rewrites the saved node
 preference. The bearer URL, UUIDs, Reality keys, and backend raw output are
 never printed as one unredacted blob.
 
@@ -102,8 +102,9 @@ Forms:
 
 `--relay auto` is the default when the exact Mihomo release is missing. Relay
 options affect only backend bootstrap and never subscription fetching. Health
-and recovery waits use the bounded built-in policy and a failed recovery exits
-after cleanup.
+and recovery operations are bounded individually; temporary connectivity
+outages do not impose a session lifetime limit. Control and safety failures
+still stop the session after cleanup.
 
 Backend bootstrap is enabled by default, so a missing qualified Mihomo release
 is installed automatically after the confirmation below. Use
@@ -217,8 +218,8 @@ that guide only when `--auth` is enabled.
 )
 @click.option(
     "--health-interval",
-    type=click.IntRange(60, 3600),
-    default=300,
+    type=click.IntRange(5, 3600),
+    default=30,
     show_default=True,
     help="Seconds between global health quorums through the selected local listener.",
 )
@@ -227,13 +228,13 @@ that guide only when `--auth` is enabled.
     type=click.IntRange(10, 600),
     default=120,
     show_default=True,
-    help="One wall-clock budget for restart, alternate nodes, refresh, and cleanup.",
+    help="Budget per retry round; exhaustion starts another round after backoff.",
 )
 @click.option(
     "--refresh-on-recovery/--no-refresh-on-recovery",
     default=True,
     show_default=True,
-    help="Allow one source refresh after the configured node sweep is exhausted.",
+    help="Allow rate-limited source refreshes during recovery.",
 )
 @click.option("-y", "--yes", is_flag=True, help="Approve exact backend bootstrap without prompting.")
 @click.pass_context

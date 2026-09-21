@@ -320,6 +320,7 @@ def test_server_guided_selection_passes_explicit_targets_to_runtime(tmp_path, mo
 
     assert result.exit_code == 0, result.output
     assert captured["start"] == ("main", "a" * 32, False)
+    assert captured["init"]["recovery_policy"].health_interval == 30
     assert captured["init"]["listener_protocol"] == "http"
     assert captured["init"]["authenticate"] is False
     assert captured["init"]["bind_address"] == "127.0.0.1"

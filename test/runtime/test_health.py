@@ -225,11 +225,11 @@ def test_recovery_deadline_sleep_and_public_health_requirement(monkeypatch):
         require_health(HealthSnapshot((TargetHealth("bad", False),), 0, 1, 0.0))
 
 
-def test_recovery_policy_defaults_match_closed_foreground_strategy():
+def test_recovery_policy_defaults_match_persistent_strategy():
     policy = RecoveryPolicy()
-    assert policy.startup_retry_delays == (0.0, 1.0, 2.0)
-    assert policy.same_node_delay == 1.0
-    assert policy.alternate_delays == (4.0, 8.0)
+    assert policy.retry_policy == "fallback"
+    assert policy.health_interval == 30
+    assert policy.confirmation_delay == 3
     assert policy.refresh_on_failure is True
     with pytest.raises(ValueError):
         RecoveryPolicy(health_interval=0)
@@ -238,16 +238,21 @@ def test_recovery_policy_defaults_match_closed_foreground_strategy():
 @pytest.mark.parametrize(
     "changes",
     [
-        {"same_node_delay": -1},
+        {"confirmation_delay": -1},
         {"refresh_stale_seconds": float("inf")},
-        {"failure_cooldown": "300"},
-        {"startup_retry_delays": ()},
-        {"startup_retry_delays": (0.0, -1.0)},
-        {"alternate_delays": ()},
-        {"alternate_delays": (float("nan"),)},
+        {"refresh_interval": "300"},
+        {"retry_policy": "unknown"},
+        {"retry_policy": "fixed", "retry_chain": "random:all"},
+        {"retry_chain": "random:0"},
+        {"health_interval": float("nan")},
         {"refresh_on_failure": 1},
     ],
 )
 def test_recovery_policy_rejects_invalid_strategy_values(changes):
     with pytest.raises(ValueError):
         RecoveryPolicy(**changes)
+
+
+def test_custom_closed_fallback_chain_is_accepted():
+    policy = RecoveryPolicy(retry_chain="current:1,random:all")
+    assert policy.retry_chain == "current:1,random:all"

@@ -175,7 +175,7 @@ def _check_runtime_driver_contract():
                 driver=driver,
                 health_probe=_ProbeHealth(),
                 recovery_policy=RecoveryPolicy(
-                    startup_retry_delays=(0.0,),
+
                     recovery_deadline=5.0,
                 ),
                 sleeper=lambda delay: None,
@@ -221,7 +221,7 @@ def _check_runtime_driver_contract():
                 driver=bypassing,
                 health_probe=_ProbeHealth(),
                 recovery_policy=RecoveryPolicy(
-                    startup_retry_delays=(0.0,),
+
                     recovery_deadline=5.0,
                 ),
                 sleeper=lambda delay: None,
@@ -330,6 +330,6 @@ def _check_runtime_projection():
         # Temporary projection and encoding failures are diagnostic errors.
         return _error_result(error)
     policy = RecoveryPolicy()
-    if len(DEFAULT_HEALTH_TARGETS) != 3 or policy.alternate_delays != (4.0, 8.0):
+    if len(DEFAULT_HEALTH_TARGETS) != 3 or policy.retry_policy != "fallback":
         return CheckResult.fail("runtime health/recovery policy is incomplete")
-    return CheckResult.ok("Mihomo projection and bounded health recovery policy are usable")
+    return CheckResult.ok("Mihomo projection and persistent health recovery policy are usable")

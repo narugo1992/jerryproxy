@@ -499,10 +499,14 @@ SOCKS5 listener uses a `socks5h` URL. Backend stdout/stderr are merged into one
 bounded live stream, redacted, and labeled only with the backend name
 (`[mihomo]`), never separate stdout/stderr labels; `--backend-log-level`
 defaults to `INFO`. Two consecutive
-failed global health quorums trigger one same-node restart, deterministic
-alternate-node attempts, and one optional subscription refresh within the
-configured recovery deadline. Automatic recovery never rewrites the saved node
-preference.
+failed global health quorums trigger persistent recovery within the selected
+subscription. Health checks default to 30 seconds, with a confirmation check
+3 seconds after a failure. The backend stays running while nodes are retried
+and hot-reloaded; each recovery round has its own budget and capped backoff.
+Healthy sessions keep their node, listener and credentials, and automatic
+recovery never rewrites the saved preference. Control, safety and currently
+unclassified subscription-fetch failures remain terminal while the persistent
+recovery implementation is being completed.
 
 Nodes are listed with the label their provider put in the URI fragment, so
 several endpoints of one protocol stay distinguishable. That fragment is
@@ -586,7 +590,7 @@ tampering and is never repaired automatically.
 - [x] Implement managed `V2RAY_SUBSCRIPTION` fetch, private state, and URI
   inventory for every encrypted protocol the qualified backend accepts.
 - [x] Implement the Mihomo foreground driver, loopback listener, merged named
-  backend stream, and bounded health recovery.
+  backend stream, and persistent health recovery with bounded rounds.
 - [ ] Implement durable controller operations, measurements, and service
   integration.
 - [ ] Preserve documented `v2raycli` inputs through deprecated aliases.

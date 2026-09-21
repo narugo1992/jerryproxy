@@ -265,7 +265,7 @@ def test_no_secret_reaches_the_runtime_log_access_file_or_envelope(tmp_path, lab
         health_probe=_Probe(),
         authenticate=True,
         driver=MihomoDriver(process_factory=_Process, inspector=_inspector),
-        recovery_policy=RecoveryPolicy(startup_retry_delays=(0.0,), recovery_deadline=10.0),
+        recovery_policy=RecoveryPolicy(recovery_deadline=10.0),
         sleeper=lambda delay: None,
         log_sink=lambda owner, level, message: lines.append("%s %s %s" % (owner, level, message)),
     )
@@ -327,7 +327,7 @@ def test_no_secret_reaches_a_runtime_refusal_message(tmp_path):
         subscription_manager=manager,
         health_probe=_Probe(),
         driver=_Bypassing(process_factory=_Process),
-        recovery_policy=RecoveryPolicy(startup_retry_delays=(0.0,), recovery_deadline=5.0),
+        recovery_policy=RecoveryPolicy(recovery_deadline=5.0),
         sleeper=lambda delay: None,
     )
 
