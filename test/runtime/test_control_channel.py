@@ -21,6 +21,17 @@ class _Controller(BaseHTTPRequestHandler):
     secret = "expected-secret"
     documents = {}
     oversize = False
+    reload_status = 204
+    reloads = 0
+
+    def do_PUT(self):  # noqa: N802 - BaseHTTPRequestHandler's required name
+        if self.headers.get("Authorization") != "Bearer %s" % self.secret:
+            self.send_response(401)
+        else:
+            assert self.path == "/providers/proxies/jerryproxy"
+            type(self).reloads += 1
+            self.send_response(self.reload_status)
+        self.end_headers()
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's required name
         if self.headers.get("Authorization") != "Bearer %s" % self.secret:
@@ -62,7 +73,10 @@ def controller():
 
 def _documents(proxies, now, empty_fallback="COMPATIBLE"):
     return {
-        "/providers/proxies/jerryproxy": {"proxies": [{"name": name} for name in proxies]},
+        "/providers/proxies/jerryproxy": {"proxies": [
+            {"name": name, "id": "12345678-1234-4234-8234-123456789abc", "provider-name": "jerryproxy"}
+            for name in proxies
+        ]},
         "/proxies/jerryproxy": {
             "now": now,
             "all": list(proxies) or ["COMPATIBLE"],
@@ -80,6 +94,7 @@ def test_a_real_control_query_reports_an_accepted_node(controller):
     assert loaded.accepted == ("tokyo",)
     assert loaded.selected == "tokyo"
     assert loaded.bypassing is False
+    assert loaded.identities == ("12345678-1234-4234-8234-123456789abc",)
 
 
 def test_a_real_control_query_reports_a_bypassed_group(controller):
@@ -143,3 +158,173 @@ def test_a_missing_inventory_field_is_a_startup_fault(controller):
 
     with pytest.raises(RuntimeSessionError, match="provider inventory"):
         MihomoDriver().loaded_nodes(controller, _Controller.secret, 5.0)
+
+
+def test_reload_uses_authenticated_native_provider_endpoint(controller, monkeypatch):
+    monkeypatch.setattr(_Controller, "reloads", 0)
+    monkeypatch.setattr(_Controller, "reload_status", 204)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
+    assert MihomoDriver().reload_provider(controller, _Controller.secret, 1.0) is None
+    assert _Controller.reloads == 1
+
+
+@pytest.mark.parametrize("status", [200, 401, 403, 404, 503])
+def test_reload_never_treats_rejected_or_ambiguous_status_as_success(controller, monkeypatch, status):
+    monkeypatch.setattr(_Controller, "reload_status", status)
+    with pytest.raises(RuntimeSessionError, match="answered %d" % status):
+        MihomoDriver().reload_provider(controller, _Controller.secret, 1.0)
+
+
+def test_reload_does_not_log_controller_credentials(controller):
+    with pytest.raises(RuntimeSessionError, match="answered 401") as error:
+        MihomoDriver().reload_provider(controller, "private-wrong-credential", 1.0)
+    assert "private-wrong-credential" not in str(error.value)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, True, "5", float("inf"), float("nan")])
+def test_reload_rejects_invalid_budgets_without_network(timeout):
+    with pytest.raises(ValueError, match="control timeout"):
+        MihomoDriver().reload_provider(1, "private-secret", timeout)
+
+
+@pytest.mark.parametrize("payload, message", [
+    (b"[]", "not a JSON object"),
+    (b"\xff", "not valid JSON"),
+    pytest.param(b'{"nested":' + b"[" * 10000 + b"0", "not valid JSON", id="deeply-incomplete"),
+])
+def test_inventory_rejects_nonobject_and_invalid_utf8(controller, monkeypatch, payload, message):
+    monkeypatch.setattr(_Controller, "documents", {"/providers/proxies/jerryproxy": payload})
+    monkeypatch.setattr(_Controller, "oversize", False)
+    with pytest.raises(RuntimeSessionError, match=message):
+        MihomoDriver().loaded_nodes(controller, _Controller.secret, 1.0)
+
+
+@pytest.mark.parametrize("entry", [
+    None, "proxy", {}, {"name": 1}, {"name": "n"},
+    {"name": "n", "id": "not-an-id"},
+    {"name": "n", "id": 1},
+    {"name": "n", "id": "12345678-1234-4234-8234-123456789abc"},
+    {"name": "n", "id": "12345678-1234-4234-8234-123456789abc", "provider-name": "other"},
+])
+def test_inventory_rejects_unbound_or_malformed_entries(controller, monkeypatch, entry):
+    docs = _documents(("n",), "n")
+    docs["/providers/proxies/jerryproxy"]["proxies"] = [entry]
+    monkeypatch.setattr(_Controller, "documents", docs)
+    monkeypatch.setattr(_Controller, "oversize", False)
+    with pytest.raises(RuntimeSessionError, match="provider identity"):
+        MihomoDriver().loaded_nodes(controller, _Controller.secret, 1.0)
+
+
+@pytest.mark.parametrize("now, all_nodes, fallback", [
+    ("unrelated", ["n"], "COMPATIBLE"),
+    ("n", ["n", "DIRECT"], "COMPATIBLE"),
+    ("n", [], "COMPATIBLE"),
+    ("n", "n", "COMPATIBLE"),
+    ("n", ["n"], "n"),
+])
+def test_inventory_marks_selection_outside_single_provider_as_bypass(
+    controller, monkeypatch, now, all_nodes, fallback,
+):
+    docs = _documents(("n",), now, fallback)
+    docs["/proxies/jerryproxy"]["all"] = all_nodes
+    monkeypatch.setattr(_Controller, "documents", docs)
+    monkeypatch.setattr(_Controller, "oversize", False)
+    assert MihomoDriver().loaded_nodes(controller, _Controller.secret, 1.0).bypassing
+
+
+def test_inventory_requires_a_selected_name(controller, monkeypatch):
+    monkeypatch.setattr(_Controller, "documents", _documents(("n",), None))
+    monkeypatch.setattr(_Controller, "oversize", False)
+    with pytest.raises(RuntimeSessionError, match="selected proxy"):
+        MihomoDriver().loaded_nodes(controller, _Controller.secret, 1.0)
+
+
+@pytest.mark.parametrize("name", ["DIRECT", "COMPATIBLE", "REJECT", "PASS", "REJECT-DROP"])
+def test_provider_cannot_disguise_a_bypass_with_a_reserved_name(controller, monkeypatch, name):
+    monkeypatch.setattr(_Controller, "documents", _documents((name,), name, empty_fallback=""))
+    monkeypatch.setattr(_Controller, "oversize", False)
+    loaded = MihomoDriver().loaded_nodes(controller, _Controller.secret, 1.0)
+    assert loaded.accepted == (name,)
+    assert loaded.bypassing
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_slow_trickle_cannot_extend_control_wall_budget(phase):
+    import time
+
+    class Trickle(_Controller):
+        def do_GET(self):  # noqa: N802 - required handler name
+            body = b" " * 100 + b"{}"
+            headers = b"HTTP/1.0 200 OK\r\nContent-Length: 102\r\n\r\n"
+            try:
+                if phase == "body":
+                    self.connection.sendall(headers)
+                for byte in (headers if phase == "headers" else body):
+                    self.connection.sendall(bytes([byte]))
+                    time.sleep(0.03)
+            except OSError:
+                # The client must close the socket when its wall budget expires.
+                pass
+
+    server = HTTPServer(("127.0.0.1", 0), Trickle)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(RuntimeSessionError):
+            MihomoDriver().loaded_nodes(server.server_port, "secret", 0.15)
+        assert time.monotonic() - started < 1.0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("boundary", ["connect", "read", "complete"])
+def test_control_deadline_checks_elapsed_time_at_each_io_boundary(controller, monkeypatch, boundary):
+    from types import SimpleNamespace
+
+    from jerryproxy.runtime import mihomo
+
+    now = [0.0]
+    monkeypatch.setattr(mihomo, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    if boundary == "connect":
+        original = mihomo.HTTPConnection.connect
+
+        def connect(connection):
+            original(connection)
+            now[0] = 2.0
+
+        monkeypatch.setattr(mihomo.HTTPConnection, "connect", connect)
+    else:
+        original = mihomo.HTTPResponse.begin
+
+        def begin(response):
+            if boundary == "read":
+                now[0] = 2.0
+            original(response)
+            now[0] = 2.0
+
+        monkeypatch.setattr(mihomo.HTTPResponse, "begin", begin)
+    monkeypatch.setattr(_Controller, "reload_status", 204)
+    message = "deadline exhausted" if boundary == "complete" else "unreachable"
+    with pytest.raises(RuntimeSessionError, match=message):
+        MihomoDriver().reload_provider(controller, _Controller.secret, 1.0)
+
+
+def test_decoder_recursion_failure_is_a_sanitized_control_error(controller, monkeypatch):
+    import types
+
+    from jerryproxy.runtime import mihomo
+
+    monkeypatch.setattr(_Controller, "documents", _documents(("n",), "n"))
+    monkeypatch.setattr(_Controller, "oversize", False)
+
+    def exhausted(payload):
+        raise RecursionError("private-control-data")
+
+    monkeypatch.setattr(mihomo, "json", types.SimpleNamespace(loads=exhausted))
+    with pytest.raises(RuntimeSessionError, match="not valid JSON") as failure:
+        MihomoDriver().loaded_nodes(controller, _Controller.secret, 1.0)
+    assert "private-control-data" not in str(failure.value)

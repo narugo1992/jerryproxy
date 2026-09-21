@@ -8,6 +8,8 @@ import ipaddress
 import re
 import socket
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import requests
@@ -19,7 +21,7 @@ from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 from urllib3.poolmanager import PoolManager
 from urllib3.util.connection import create_connection
 
-from ..errors import SubscriptionFetchError, SubscriptionParseError
+from ..errors import SubscriptionFetchError, SubscriptionParseError, SubscriptionTransportError
 from .audit import (
     _FIELD_DISPOSITION_MANIFEST,
     MIHOMO_PARSER_IDENTITY,
@@ -200,7 +202,7 @@ def _resolve_public_hostname(hostname, port, resolver=None):
         answers = resolver(hostname, port, type=socket.SOCK_STREAM)
     except socket.gaierror as error:
         # DNS failures are source transport failures, not parser failures.
-        raise SubscriptionFetchError("subscription source hostname cannot be resolved") from error
+        raise SubscriptionTransportError("subscription source hostname cannot be resolved") from error
     addresses = []
     for answer in answers:
         try:
@@ -212,6 +214,24 @@ def _resolve_public_hostname(hostname, port, resolver=None):
     if not addresses or len(set(addresses)) > 16 or any(not address.is_global for address in addresses):
         raise SubscriptionFetchError("subscription source target is not public")
     return tuple(dict.fromkeys(addresses))
+
+
+def _retry_after(value):
+    """Interpret a bounded Retry-After header without retaining remote text."""
+
+    if not isinstance(value, str) or not 1 <= len(value) <= 128:
+        return 0.0
+    value = value.strip()
+    if re.fullmatch(r"[0-9]+", value):
+        return min(86400.0, int(value))
+    try:
+        when = parsedate_to_datetime(value)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return min(86400.0, max(0.0, (when - datetime.now(timezone.utc)).total_seconds()))
+    except (ValueError, TypeError, OverflowError):
+        # The server may send an invalid date; discard it, never log its text.
+        return 0.0
 
 
 def fetch_subscription(
@@ -265,7 +285,7 @@ def fetch_subscription(
         client.mount("https://", pinned_adapter)
     visited = set()
     try:
-        for _redirect in range(MAXIMUM_REDIRECTS + 1):
+        while True:
             if current in visited:
                 raise SubscriptionFetchError("subscription redirect loop detected")
             visited.add(current)
@@ -290,9 +310,15 @@ def fetch_subscription(
                 )
             except requests.exceptions.Timeout as error:
                 # Requests timeout is a bounded source transport failure.
-                raise SubscriptionFetchError("subscription source timed out") from error
+                raise SubscriptionTransportError("subscription source timed out") from error
+            except requests.exceptions.SSLError as error:
+                # SSLError inherits ConnectionError but TLS refusal is terminal.
+                raise SubscriptionFetchError("subscription source TLS verification failed") from error
+            except requests.exceptions.ConnectionError as error:
+                # Refused or interrupted connections may recover with the network.
+                raise SubscriptionTransportError("subscription source connection failed") from error
             except requests.exceptions.RequestException as error:
-                # Other Requests failures are bounded transport failures.
+                # Unclassified Requests failures are not safe automatic retries.
                 raise SubscriptionFetchError("subscription source request failed") from error
             try:
                 if response.status_code in (301, 302, 303, 307, 308):
@@ -301,6 +327,11 @@ def fetch_subscription(
                     current = _resolve_redirect(current, response.headers.get("Location"), allow_http=allow_http)
                     continue
                 if response.status_code < 200 or response.status_code >= 300:
+                    if response.status_code in (408, 429, 500, 502, 503, 504):
+                        raise SubscriptionTransportError(
+                            "subscription source returned HTTP %d" % response.status_code,
+                            retry_after=_retry_after(response.headers.get("Retry-After")),
+                        )
                     raise SubscriptionFetchError("subscription source returned HTTP %d" % response.status_code)
                 content_length = response.headers.get("Content-Length")
                 if content_length is not None:
@@ -321,15 +352,21 @@ def fetch_subscription(
                         if total > maximum_bytes:
                             raise SubscriptionFetchError("subscription source exceeds the size bound")
                         chunks.append(chunk)
+                except requests.exceptions.SSLError as error:
+                    # TLS failures remain terminal even after response headers.
+                    raise SubscriptionFetchError("subscription source TLS verification failed") from error
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError,
+                        requests.exceptions.ChunkedEncodingError) as error:
+                    # An interrupted stream never publishes a partial revision.
+                    raise SubscriptionTransportError("subscription source stream interrupted") from error
                 except requests.exceptions.RequestException as error:
-                    # Streaming failures are source transport failures.
+                    # Unclassified streaming failures remain terminal.
                     raise SubscriptionFetchError("subscription source stream failed") from error
                 if content_length is not None and total != declared:
                     raise SubscriptionFetchError("subscription source length did not match its declaration")
                 return FetchedSubscription(b"".join(chunks), current)
             finally:
                 response.close()
-        raise SubscriptionFetchError("subscription redirect limit exceeded")
     finally:
         if original_adapters is not None:
             client.mount("http://", original_adapters[0])

@@ -34,6 +34,7 @@ from .result import (
     _paint,
 )
 from .runtime import (
+    _check_health_process,
     _check_loopback_listener,
     _check_runtime_driver_contract,
     _check_runtime_projection,
@@ -63,6 +64,7 @@ def build_checks(paths, relay_session_factory=None):
         ("node source boundary", _check_node_source_boundary),
         ("runtime projection", _check_runtime_projection),
         ("runtime driver contract", _check_runtime_driver_contract),
+        ("health worker process", _check_health_process),
         ("loopback listener", _check_loopback_listener),
         ("console rendering", _check_console_rendering),
         ("filelock compatibility", _check_filelock),

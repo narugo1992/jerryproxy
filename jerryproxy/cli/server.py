@@ -2,6 +2,8 @@
 
 import json
 import logging
+import signal
+from contextlib import contextmanager
 from urllib.parse import quote
 
 import click
@@ -15,12 +17,35 @@ from ..backend.relay import ALLOWED_PATTERNS, iter_builtin_relays
 from ..errors import BackendNotInstalledError, RuntimeSessionError
 from ..runtime import QUALIFIED_VERSION, RecoveryPolicy, RuntimeSession
 from ..runtime.mihomo import LISTENER_PROTOCOLS, reserve_loopback_port
+from ..runtime.recovery import DEFAULT_RETRY_CHAIN, RETRY_POLICIES
 from ..subscription.redaction import redact_text, terminal_safe_text
 from . import _common
 
 _BACKENDS = ("mihomo", "sing-box", "xray", "v2ray")
 _LOG_PRIORITIES = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 _DEFAULT_PORT = 17777
+
+
+@contextmanager
+def _interrupt_signals():
+    """Unwind once on termination, then let mandatory cleanup finish."""
+
+    interrupted = []
+    previous = [(number, signal.getsignal(number)) for number in (signal.SIGINT, signal.SIGTERM)]
+
+    def interrupt(number, frame):
+        del frame
+        if not interrupted:
+            interrupted.append(number)
+            raise KeyboardInterrupt
+
+    try:
+        for number, _ in previous:
+            signal.signal(number, interrupt)
+        yield interrupted
+    finally:
+        for number, handler in previous:
+            signal.signal(number, handler)
 
 
 def _proxy_url(protocol, address, port, username=None, password=None):
@@ -82,11 +107,27 @@ launches the exact Mihomo backend through BackendManager. It never changes the
 backend active link, starts a daemon, or exposes a controller. Press Ctrl+C to
 stop and remove the session projection. After readiness it probes a quorum of
 stable global HTTPS targets through the selected local listener. Two consecutive
-failed quorums trigger the fixed recovery policy: restart the current node once,
-try eligible alternate nodes in public-ID order, then refresh the stored source
-once when policy permits. Automatic failover never rewrites the saved node
+failed quorums trigger persistent recovery: keep the current backend running,
+try alternate nodes within the selected subscription, and refresh the source
+when policy permits. Healthy sessions never switch for exploration. Automatic failover never rewrites the saved node
 preference. The bearer URL, UUIDs, Reality keys, and backend raw output are
 never printed as one unredacted blob.
+
+`--retry-policy fallback` tries the current node, then adaptive and random
+alternates. `none` exits after confirmed failure; `fixed` waits for the initial
+identity; `random` samples without replacement; `adaptive` explores and uses
+recent success estimates only during outages. All candidates stay within the
+selected subscription. Healthy sessions never automatically fail back.
+`--retry-chain` applies only to fallback: unique current, adaptive and random
+stages with positive counts or all; current permits only current:1.
+The default chain is current:1,adaptive:3,random:all.
+
+Defaults target up to 20 nodes: first-sweep probes allow 3 seconds, and
+after 6 seconds on cached nodes a between-attempt check gives refresh its
+own 10-second budget. Later sweeps allow normal probe timeouts. Refreshes
+are at least 60 seconds apart; failures and Retry-After can defer them further.
+Advanced timing options apply equally to complete and guided commands, without
+extra guided questions. These budgets do not guarantee a working upstream.
 
 When the stored nodes no longer match their source bytes, startup refreshes
 that subscription's saved URL exactly once and then continues; a projection
@@ -102,8 +143,9 @@ Forms:
 
 `--relay auto` is the default when the exact Mihomo release is missing. Relay
 options affect only backend bootstrap and never subscription fetching. Health
-and recovery waits use the bounded built-in policy and a failed recovery exits
-after cleanup.
+and recovery operations are bounded individually; temporary connectivity
+outages do not impose a session lifetime limit. Control and safety failures
+still stop the session after cleanup.
 
 Backend bootstrap is enabled by default, so a missing qualified Mihomo release
 is installed automatically after the confirmation below. Use
@@ -132,6 +174,12 @@ messages have no owner prefix. Backend stdout and stderr are merged before one
 bounded line stream is redacted, persisted, and forwarded live; only the
 backend name is shown (`[mihomo]`, `[v2ray]`, and so on), never the original
 stream name.
+
+JSONL writes lifecycle events to stdout and ordinary logs to stderr. Lifecycle
+events remain visible at every log level and report starting, degraded,
+retrying, ready and stopped states with counters and retry delays. During the
+foreground session, SIGINT and SIGTERM request cleanup and exit with status
+130 and 143 respectively. Repeated signals do not interrupt cleanup.
 
 Human startup output is emitted through the JerryProxy log stream as one
 readable readiness summary, one copyable proxy URL, and a short
@@ -216,9 +264,17 @@ that guide only when `--auth` is enabled.
     help="URL path pattern used with --relay-url.",
 )
 @click.option(
+    "--retry-policy", type=click.Choice(RETRY_POLICIES), default="fallback", show_default=True,
+    help="Outage strategy; healthy sessions keep their node.",
+)
+@click.option(
+    "--retry-chain", metavar="STAGES",
+    help="Fallback stages, e.g. current:1,adaptive:3,random:all.",
+)
+@click.option(
     "--health-interval",
-    type=click.IntRange(60, 3600),
-    default=300,
+    type=click.IntRange(5, 3600),
+    default=30,
     show_default=True,
     help="Seconds between global health quorums through the selected local listener.",
 )
@@ -227,13 +283,29 @@ that guide only when `--auth` is enabled.
     type=click.IntRange(10, 600),
     default=120,
     show_default=True,
-    help="One wall-clock budget for restart, alternate nodes, refresh, and cleanup.",
+    help="Budget per retry round; exhaustion starts another round after backoff.",
+)
+@click.option(
+    "--fast-probe-timeout", type=click.IntRange(1, 10), default=3, show_default=True,
+    help="Seconds per first-sweep health probe; later sweeps allow normal timeouts.",
+)
+@click.option(
+    "--cache-retry-budget", type=click.IntRange(1, 120), default=6, show_default=True,
+    help="Seconds before checking for a subscription refresh between candidates.",
+)
+@click.option(
+    "--refresh-timeout", type=click.IntRange(1, 30), default=10, show_default=True,
+    help="Independent seconds per recovery subscription fetch.",
+)
+@click.option(
+    "--refresh-interval", type=click.IntRange(10, 3600), default=60, show_default=True,
+    help="Minimum seconds between subscription fetches; failures back off further.",
 )
 @click.option(
     "--refresh-on-recovery/--no-refresh-on-recovery",
     default=True,
     show_default=True,
-    help="Allow one source refresh after the configured node sweep is exhausted.",
+    help="Allow rate-limited source refreshes during recovery.",
 )
 @click.option("-y", "--yes", is_flag=True, help="Approve exact backend bootstrap without prompting.")
 @click.pass_context
@@ -254,12 +326,17 @@ def server_command(
     relay,
     relay_url,
     relay_pattern,
+    retry_policy,
+    retry_chain,
     health_interval,
     recovery_deadline,
+    fast_probe_timeout,
+    cache_retry_budget,
+    refresh_timeout,
+    refresh_interval,
     refresh_on_recovery,
     yes,
 ):
-    # type: (click.Context, tuple, str, str, Optional[int], str, Optional[str], bool, bool, bool, str, str, str, str, Optional[str], Optional[str], int, int, bool, bool) -> None
     """Run one synchronous foreground session."""
 
     if len(subscriptions) > 1:
@@ -272,10 +349,20 @@ def server_command(
         raise click.UsageError("--relay and --relay-url are mutually exclusive")
     if relay_pattern is not None and relay_url is None:
         raise click.UsageError("--relay-pattern requires --relay-url")
+    try:
+        policy = RecoveryPolicy(
+            retry_policy=retry_policy, retry_chain=retry_chain, health_interval=health_interval,
+            recovery_deadline=recovery_deadline, refresh_on_failure=refresh_on_recovery,
+            fast_probe_timeout=fast_probe_timeout, cache_retry_budget=cache_retry_budget,
+            refresh_timeout=refresh_timeout, refresh_interval=refresh_interval,
+        )
+    except ValueError as error:
+        # User-supplied closed policy syntax must fail before selection or I/O.
+        raise click.UsageError(str(error)) from error
     guided_targets = not subscriptions or node_id is None
     subscription_name = subscriptions[0] if subscriptions else None
     if subscription_name is None:
-        if yes or not _common.interactive_available():
+        if yes or log_format == "jsonl" or not _common.interactive_available():
             raise click.UsageError(
                 "--subscription NAME is required in non-interactive mode; "
                 "-y/--yes cannot infer a subscription"
@@ -286,7 +373,7 @@ def server_command(
             enabled_only=True,
         )
     if node_id is None:
-        if yes or not _common.interactive_available():
+        if yes or log_format == "jsonl" or not _common.interactive_available():
             raise click.UsageError(
                 "--node NODE_ID is required in non-interactive mode; "
                 "-y/--yes cannot infer a node"
@@ -306,6 +393,23 @@ def server_command(
                     Choice("socks5", name="socks5 - SOCKS5 clients"),
                 ],
             )
+        )
+    if (
+        guided_targets and context.get_parameter_source("retry_policy") == ParameterSource.DEFAULT
+        and retry_chain is None
+    ):
+        retry_policy = str(_common.select("Select an outage recovery policy:", [
+            Choice("fallback", name="fallback - current, adaptive, then random (recommended)"),
+            Choice("fixed", name="fixed - wait for the initial node"),
+            Choice("random", name="random - visit subscription nodes without replacement"),
+            Choice("adaptive", name="adaptive - explore and use recent successes during outages"),
+            Choice("none", name="none - stop after confirmed failure"),
+        ]))
+        policy = RecoveryPolicy(
+            retry_policy=retry_policy, health_interval=health_interval,
+            recovery_deadline=recovery_deadline, refresh_on_failure=refresh_on_recovery,
+            fast_probe_timeout=fast_probe_timeout, cache_retry_budget=cache_retry_budget,
+            refresh_timeout=refresh_timeout, refresh_interval=refresh_interval,
         )
     strict_port = port is not None
     bind_address = "0.0.0.0" if bind_all else "127.0.0.1"
@@ -339,9 +443,10 @@ def server_command(
         emphasize=False,
         preserve_local_auth=False,
         multiline=False,
+        lifecycle=False,
         **event_fields
     ):
-        if source == "jerryproxy" and _LOG_PRIORITIES[level] < _LOG_PRIORITIES[log_level]:
+        if not lifecycle and source == "jerryproxy" and _LOG_PRIORITIES[level] < _LOG_PRIORITIES[log_level]:
             return
         if log_format == "jsonl":
             payload = {
@@ -383,6 +488,16 @@ def server_command(
         )
         rich_handler.emit(record)
 
+    def event_sink(event):
+        if log_format == "jsonl":
+            click.echo(json.dumps(event, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        else:
+            data = event["data"]
+            log_sink("jerryproxy", "INFO",
+                     "%s: %s; node=%s; attempt=%d; candidates=%d; next=%.3fs"
+                     % (event["event"], data["reason"], data["node"], data["attempts"],
+                        data["candidates"], data["delay"]), lifecycle=True)
+
     def startup_log(message, emphasize=False, preserve_local_auth=False, multiline=False):
         log_sink(
             "jerryproxy",
@@ -411,77 +526,78 @@ def server_command(
         log_level=log_level,
         backend_log_level=backend_log_level,
         log_sink=log_sink,
-        recovery_policy=RecoveryPolicy(
-            health_interval=health_interval,
-            recovery_deadline=recovery_deadline,
-            refresh_on_failure=refresh_on_recovery,
-        ),
+        event_sink=event_sink,
+        recovery_policy=policy,
     )
-    try:
-        runtime.start(subscription_name, node_id=node_id, install_missing=install_missing)
-        info = runtime.public_info()
-        if not isinstance(info, dict):
-            raise RuntimeSessionError("runtime returned an invalid public session envelope")
-        # Access and runtime-log paths are private implementation details even
-        # when a future driver accidentally includes them in its envelope.
-        info = dict(info)
-        info.pop("access_file", None)
-        info.pop("log_file", None)
-        if bind_all:
-            startup_warning("Listener is exposed on all interfaces; use --auth on untrusted networks.")
-        if log_format == "jsonl":
-            click.echo(json.dumps({"event": "session.ready", "data": info}, sort_keys=True, separators=(",", ":")))
-        else:
-            listener = info["listener"]
-            address = listener["address"]
-            port = listener["port"]
-            listener_protocol = listener.get("protocol", "mixed")
-            proxy_url = _proxy_url(
-                listener_protocol,
-                address,
-                port,
-                runtime.username if authenticate else None,
-                runtime.password if authenticate else None,
-            )
-            startup_log(
-                "JerryProxy is ready: %s %s, %s proxy at %s:%d; authentication is %s."
-                % (
-                    info.get("backend", "mihomo"),
-                    info.get("backend_version", backend_version),
+    with _interrupt_signals() as interrupted:
+        try:
+            runtime.start(subscription_name, node_id=node_id, install_missing=install_missing)
+            info = runtime.public_info()
+            if not isinstance(info, dict):
+                raise RuntimeSessionError("runtime returned an invalid public session envelope")
+            # Access and runtime-log paths are private implementation details even
+            # when a future driver accidentally includes them in its envelope.
+            info = dict(info)
+            info.pop("access_file", None)
+            info.pop("log_file", None)
+            if bind_all:
+                startup_warning("Listener is exposed on all interfaces; use --auth on untrusted networks.")
+            if log_format == "human":
+                listener = info["listener"]
+                address = listener["address"]
+                port = listener["port"]
+                listener_protocol = listener.get("protocol", "mixed")
+                proxy_url = _proxy_url(
                     listener_protocol,
                     address,
                     port,
-                    "enabled" if authenticate else "disabled",
+                    runtime.username if authenticate else None,
+                    runtime.password if authenticate else None,
                 )
-            )
-            startup_log("Proxy URL: %s" % proxy_url, emphasize=True, preserve_local_auth=True)
-            guide = [
-                "Shell guide: copy these commands into the shell where you want to use the proxy.",
-            ]
-            if authenticate:
-                guide.append(
-                    "Authentication is enabled; use username '%s' and password '%s' when prompted."
-                    % (runtime.username, runtime.password)
+                startup_log(
+                    "JerryProxy is ready: %s %s, %s proxy at %s:%d; authentication is %s."
+                    % (
+                        info.get("backend", "mihomo"),
+                        info.get("backend_version", backend_version),
+                        listener_protocol,
+                        address,
+                        port,
+                        "enabled" if authenticate else "disabled",
+                    )
                 )
-            guide.extend(
-                (
-                    "  export HTTP_PROXY='%s'" % proxy_url,
-                    "  export HTTPS_PROXY='%s'" % proxy_url,
-                    "  export ALL_PROXY='%s'" % proxy_url,
+                startup_log("Proxy URL: %s" % proxy_url, emphasize=True, preserve_local_auth=True)
+                startup_log("Recovery policy: %s" % policy.retry_policy)
+                if policy.retry_policy == "fallback":
+                    startup_log("Recovery chain: %s" % (policy.retry_chain or DEFAULT_RETRY_CHAIN))
+                guide = [
+                    "Shell guide: copy these commands into the shell where you want to use the proxy.",
+                ]
+                if authenticate:
+                    guide.append(
+                        "Authentication is enabled; use username '%s' and password '%s' when prompted."
+                        % (runtime.username, runtime.password)
+                    )
+                guide.extend(
+                    (
+                        "  export HTTP_PROXY='%s'" % proxy_url,
+                        "  export HTTPS_PROXY='%s'" % proxy_url,
+                        "  export ALL_PROXY='%s'" % proxy_url,
+                    )
                 )
-            )
-            if listener_protocol == "socks5":
-                guide.append("SOCKS5 uses the `socks5h` URL so DNS lookups also go through the proxy.")
-            guide.append("When finished, run: unset HTTP_PROXY HTTPS_PROXY ALL_PROXY")
-            startup_log("\n".join(guide), preserve_local_auth=authenticate, multiline=True)
-        exit_code = runtime.wait()
-        if exit_code and exit_code != 130:
-            raise click.ClickException("Mihomo exited with status %d" % exit_code)
-    except KeyboardInterrupt:
-        runtime.stop()
-    except (RuntimeSessionError, BackendNotInstalledError):
-        runtime.stop()
-        raise
-    finally:
-        if runtime.process is not None:
+                if listener_protocol == "socks5":
+                    guide.append("SOCKS5 uses the `socks5h` URL so DNS lookups also go through the proxy.")
+                guide.append("When finished, run: unset HTTP_PROXY HTTPS_PROXY ALL_PROXY")
+                startup_log("\n".join(guide), preserve_local_auth=authenticate, multiline=True)
+            exit_code = runtime.wait()
+            if exit_code and exit_code != 130:
+                raise click.ClickException("Mihomo exited with status %d" % exit_code)
+        except KeyboardInterrupt:
             runtime.stop()
+        except (RuntimeSessionError, BackendNotInstalledError):
+            runtime.stop()
+            raise
+        finally:
+            if runtime.process is not None:
+                runtime.stop()
+    if interrupted:
+        raise click.exceptions.Exit(128 + interrupted[0])

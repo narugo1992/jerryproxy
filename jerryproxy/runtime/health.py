@@ -7,10 +7,26 @@ import time
 from dataclasses import dataclass
 
 import requests
+from urllib3.exceptions import MaxRetryError, ProxyError
 
 from ..errors import RuntimeSessionError
+from ._probe import ProbeProcess
+from .recovery import RETRY_POLICIES, parse_retry_chain
 
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def _connect_authentication_failed(error):
+    """Recognize only the pinned Requests/urllib3/stdlib CONNECT error chain."""
+
+    wrapped = error.args[0] if len(error.args) == 1 else None
+    proxy = wrapped.reason if isinstance(wrapped, MaxRetryError) else None
+    cause = proxy.original_error if isinstance(proxy, ProxyError) else None
+    # http.client discards the numeric status when raising OSError. Inspect its
+    # exact locally generated prefix only after verifying the exception chain;
+    # never search arbitrary messages or retain the remote reason phrase.
+    return (type(cause) is OSError and len(cause.args) == 1 and isinstance(cause.args[0], str)
+            and cause.args[0].startswith("Tunnel connection failed: 407 "))
 
 
 @dataclass(frozen=True)
@@ -80,17 +96,22 @@ class ConnectivityProbe(object):
         self.targets = tuple(DEFAULT_HEALTH_TARGETS if targets is None else targets)
         if not self.targets:
             raise ValueError("at least one health target is required")
-        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+                or not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("health timeout must be positive")
         if not isinstance(quorum, int) or isinstance(quorum, bool) or not 1 <= quorum <= len(self.targets):
             raise ValueError("health quorum is outside the target set")
         self.timeout = float(timeout)
         self.quorum = quorum
+        self._network_process = ProbeProcess() if session_factory is None else None
         self.session_factory = session_factory or requests.Session
         self.clock = clock or time.monotonic
         if protocol not in ("http", "mixed", "socks5"):
             raise ValueError("unsupported local proxy protocol")
         self.protocol = protocol
+        self._workers = []
+        self._worker_done = []
+        self._cancel = threading.Event()
 
     @staticmethod
     def _proxy_url(port, username, password, protocol="http"):
@@ -110,10 +131,8 @@ class ConnectivityProbe(object):
             port,
         )
 
-    def _one(self, target, port, username, password, timeout=None):
-        request_budget = self.timeout if timeout is None else min(self.timeout, float(timeout))
-        if request_budget <= 0:
-            return TargetHealth(target.name, False, detail="probe_deadline")
+    def _one(self, target, port, username, password, timeout):
+        request_budget = min(self.timeout, timeout)
         started = self.clock()
         session = self.session_factory()
         try:
@@ -130,6 +149,8 @@ class ConnectivityProbe(object):
             )
             try:
                 header_latency = max(0.0, self.clock() - started)
+                if response.status_code == 407:
+                    return TargetHealth(target.name, False, header_latency, detail="proxy_authentication_failed")
                 if response.status_code != target.status:
                     return TargetHealth(target.name, False, header_latency, detail="unexpected_status")
                 if getattr(response, "is_redirect", False) or response.headers.get("Location"):
@@ -179,6 +200,9 @@ class ConnectivityProbe(object):
                 return TargetHealth(target.name, True, header_latency, first_chunk or 0.0, speed)
             finally:
                 response.close()
+        except requests.exceptions.SSLError:
+            # Certificate validation failures are terminal, never outage retries.
+            return TargetHealth(target.name, False, detail="tls_failed")
         except requests.exceptions.Timeout:
             # Timeout is a normal degraded target result; it is not an
             # exception shown to the user or recorded with the target URL.
@@ -188,6 +212,11 @@ class ConnectivityProbe(object):
             # dependency is absent; keep the action-oriented diagnosis without
             # exposing the target URL or the raw exception text.
             detail = "socks_dependency_missing" if self.protocol == "socks5" else "invalid_proxy_schema"
+            return TargetHealth(target.name, False, detail=detail)
+        except requests.exceptions.ProxyError as error:
+            # CONNECT refusal loses its response in Requests; only a verified
+            # 407 wrapper is authentication failure, other proxy errors retry.
+            detail = "proxy_authentication_failed" if _connect_authentication_failed(error) else "transport_failed"
             return TargetHealth(target.name, False, detail=detail)
         except requests.exceptions.RequestException:
             # Transport failures are classified as a failed target only.
@@ -200,91 +229,122 @@ class ConnectivityProbe(object):
     def check(self, port, username, password, timeout=None):  # type: (int, str, str, object) -> HealthSnapshot
         """Run all quorum targets concurrently within one bounded timeout."""
 
+        if self._network_process is not None:
+            budget = self.timeout if timeout is None else min(self.timeout, float(timeout))
+            return self._network_process.check(self.targets, self.quorum, budget, self.protocol,
+                                               port, username, password)
         started = self.clock()
         effective_timeout = self.timeout if timeout is None else min(self.timeout, float(timeout))
+        if any(not done.is_set() or worker.is_alive()
+               for worker, done in zip(self._workers, self._worker_done)):
+            # A timed-out request must finish before another check can allocate
+            # workers. Never reuse its late result as evidence of current health.
+            return HealthSnapshot(
+                tuple(TargetHealth(target.name, False, detail="probe_worker_alive") for target in self.targets),
+                0, self.quorum, started,
+            )
         results = [None] * len(self.targets)
         threads = []
-
-        def run(index, target):
-            results[index] = self._one(target, port, username, password, timeout=effective_timeout)
-
-        for index, target in enumerate(self.targets):
-            thread = threading.Thread(target=run, args=(index, target), name="jerryproxy-health-%s" % target.name)
-            thread.daemon = True
-            thread.start()
-            threads.append(thread)
+        self._workers = threads
+        self._worker_done = []
+        self._cancel.clear()
+        worker_count = min(3, len(self.targets))
         deadline = started + max(0.0, effective_timeout)
-        for thread in threads:
-            remaining = deadline - self.clock()
-            if remaining > 0:
-                thread.join(remaining)
-        for thread in threads:
-            if thread.is_alive():
-                # Requests read timeouts are bounded, but a custom injected
-                # session may ignore them; retain an explicit failed result
-                # rather than allowing an unjoined worker to count as healthy.
-                thread.join(0.05)
+
+        def run(worker_index, done):
+            try:
+                for index in range(worker_index, len(self.targets), worker_count):
+                    remaining = deadline - self.clock()
+                    if remaining <= 0 or self._cancel.is_set():
+                        break
+                    results[index] = self._one(self.targets[index], port, username, password, timeout=remaining)
+            finally:
+                done.set()
+
+        try:
+            for index in range(worker_count):
+                done = threading.Event()
+                thread = threading.Thread(target=run, args=(index, done), name="jerryproxy-health-%d" % index)
+                thread.daemon = True
+                threads.append(thread)
+                self._worker_done.append(done)
+                try:
+                    thread.start()
+                except RuntimeError as error:
+                    # Thread allocation failed before its target could run.
+                    threads.pop()
+                    self._worker_done.pop()
+                    self._cancel.set()
+                    raise RuntimeSessionError("health worker could not start") from error
+            for done in self._worker_done:
+                remaining = deadline - self.clock()
+                if remaining > 0:
+                    done.wait(remaining)
+        except KeyboardInterrupt:
+            # Wait on completion events, not Thread.join: interrupted joins can
+            # mark a still-running worker stopped on older CPython versions.
+            self._cancel.set()
+            raise
         for index, result in enumerate(results):
             if result is None:
-                detail = "probe_worker_alive" if threads[index].is_alive() else "probe_deadline"
+                done = self._worker_done[index % worker_count]
+                detail = "probe_deadline" if done.is_set() else "probe_worker_alive"
                 results[index] = TargetHealth(self.targets[index].name, False, detail=detail)
         passed = sum(1 for result in results if result.ok)
         return HealthSnapshot(tuple(results), passed, self.quorum, started)
 
+    def close(self, timeout=2.0):
+        """Cancel pending targets and confirm worker cleanup before unlocking."""
+
+        if self._network_process is not None:
+            self._network_process.close(timeout)
+        self._cancel.set()
+        deadline = time.monotonic() + timeout
+        for done in self._worker_done:
+            if not done.wait(max(0.0, deadline - time.monotonic())):
+                raise RuntimeSessionError("health worker cleanup remains unconfirmed")
+        for worker in self._workers:
+            worker.join(max(0.0, deadline - time.monotonic()))
+            if worker.is_alive():
+                raise RuntimeSessionError("health worker cleanup remains unconfirmed")
+
 
 @dataclass(frozen=True)
 class RecoveryPolicy(object):
-    """Deterministic foreground health recovery policy."""
+    """Persistent recovery with a bounded budget per round, not per session."""
 
-    health_interval: float = 300.0
+    retry_policy: str = "fallback"
+    retry_chain: str = None
+    confirmation_delay: float = 3.0
+    refresh_interval: float = 60.0
+    fast_probe_timeout: float = 3.0
+    cache_retry_budget: float = 6.0
+    refresh_timeout: float = 10.0
+    health_interval: float = 30.0
     recovery_deadline: float = 120.0
-    startup_retry_delays: tuple = (0.0, 1.0, 2.0)
-    same_node_delay: float = 1.0
-    alternate_delays: tuple = (4.0, 8.0)
     refresh_on_failure: bool = True
     refresh_stale_seconds: float = 43200.0
-    failure_cooldown: float = 300.0
 
     def __post_init__(self):
+        if self.retry_policy not in RETRY_POLICIES:
+            raise ValueError("unknown retry policy")
+        if self.retry_chain is not None:
+            if self.retry_policy != "fallback":
+                raise ValueError("retry chain requires fallback policy")
+            parse_retry_chain(self.retry_chain)
         durations = (
-            self.health_interval,
-            self.recovery_deadline,
-            self.refresh_stale_seconds,
-            self.failure_cooldown,
+            self.confirmation_delay, self.refresh_interval, self.health_interval,
+            self.recovery_deadline, self.refresh_stale_seconds,
+            self.fast_probe_timeout, self.cache_retry_budget, self.refresh_timeout,
         )
         if any(
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not math.isfinite(float(value))
-            or value <= 0
+            not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(float(value)) or value <= 0
             for value in durations
         ):
-            raise ValueError("health and recovery durations must be positive")
-        if (
-            not isinstance(self.same_node_delay, (int, float))
-            or isinstance(self.same_node_delay, bool)
-            or not math.isfinite(float(self.same_node_delay))
-            or self.same_node_delay < 0
-        ):
-            raise ValueError("same-node delay must be finite and non-negative")
+            raise ValueError("health and recovery durations must be finite and positive")
         if not isinstance(self.refresh_on_failure, bool):
             raise ValueError("refresh_on_failure must be boolean")
-        if not self.startup_retry_delays or any(
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not math.isfinite(float(value))
-            or value < 0
-            for value in self.startup_retry_delays
-        ):
-            raise ValueError("startup retry delays must be finite and non-negative")
-        if not self.alternate_delays or any(
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not math.isfinite(float(value))
-            or value < 0
-            for value in self.alternate_delays
-        ):
-            raise ValueError("alternate delays must be finite and non-negative")
 
 
 class RecoveryDeadline(object):

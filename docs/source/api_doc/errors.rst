@@ -115,6 +115,13 @@ SubscriptionFetchError
 .. autoclass:: SubscriptionFetchError
 
 
+SubscriptionTransportError
+-----------------------------------------------------
+
+.. autoclass:: SubscriptionTransportError
+   :members: __init__
+
+
 SubscriptionParseError
 -----------------------------------------------------
 

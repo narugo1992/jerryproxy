@@ -78,6 +78,20 @@ class SubscriptionFetchError(SubscriptionError):
     """Raised when a subscription source cannot be fetched safely."""
 
 
+class SubscriptionTransportError(SubscriptionFetchError):
+    """A transient source failure that permits retaining verified cached nodes.
+
+    ``retry_after`` is a sanitized delay in seconds, bounded to one day. It
+    never carries a response header, URL or remote diagnostic string.
+    """
+
+    def __init__(self, message, retry_after=0):
+        if not isinstance(retry_after, (int, float)) or isinstance(retry_after, bool) or not 0 <= retry_after <= 86400:
+            raise ValueError("retry_after must be a finite delay between zero and one day")
+        super(SubscriptionTransportError, self).__init__(message)
+        self.retry_after = float(retry_after)
+
+
 class SubscriptionParseError(SubscriptionError):
     """Raised when a subscription body is malformed or unsupported."""
 

@@ -1,8 +1,11 @@
 """Mihomo 1.19.29 foreground projection for an opaque NodeSet."""
 
 import base64
+import io
 import json
+import math
 import os
+import re
 import signal
 import socket
 import stat
@@ -11,13 +14,14 @@ import sys
 import tempfile
 import threading
 import time
-from http.client import HTTPConnection, HTTPException
+from http.client import HTTPConnection, HTTPException, HTTPResponse
 from pathlib import Path
 
 from ..backend.durable import flush_directory
 from ..errors import RuntimeSessionError
 from ..home import is_path_alias
 from ..subscription.redaction import redact_bytes, redact_text, terminal_safe_text
+from ._logs import append_recent
 from .interfaces import LoadedNodes, RuntimeDriver, RuntimeProjection
 
 QUALIFIED_VERSION = "1.19.29"
@@ -144,8 +148,9 @@ def _splice_before(lines, marker, addition):  # type: (list, str, list) -> None
     lines[index:index] = addition
 
 
-def _control_request(port, secret, path, timeout):  # type: (int, str, str, float) -> dict
-    """Read one small JSON document from the private loopback control endpoint.
+def _control_request(port, secret, path, timeout, method="GET"):
+    # type: (int, str, str, float, str) -> dict
+    """Query inventory or acknowledge a reload on the private control endpoint.
 
     Deliberately not `requests`: this must never inherit ambient proxy
     environment variables, which on a machine running JerryProxy may point at
@@ -157,25 +162,67 @@ def _control_request(port, secret, path, timeout):  # type: (int, str, str, floa
     continuous same-UID interference is outside the supported threat boundary.
     """
 
+    if (
+        not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+        or not math.isfinite(timeout) or timeout <= 0
+    ):
+        raise ValueError("control timeout must be finite and positive")
+    deadline = time.monotonic() + timeout
     connection = HTTPConnection("127.0.0.1", port, timeout=timeout)
+    def response_factory(transport, **options):
+        response = HTTPResponse(transport, **options)
+        raw = response.fp.detach()
+
+        class DeadlineReader(io.RawIOBase):
+            def readable(self):
+                return True
+
+            def readinto(self, buffer):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("control response deadline exhausted")
+                transport.settimeout(remaining)
+                return raw.readinto(buffer)
+
+            def close(self):
+                try:
+                    raw.close()
+                finally:
+                    super(DeadlineReader, self).close()
+
+        response.fp = io.BufferedReader(DeadlineReader())
+        return response
+
+    connection.response_class = response_factory
+    response = None
     try:
-        connection.request("GET", path, headers={"Authorization": "Bearer %s" % secret})
+        connection.connect()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("control connection deadline exhausted")
+        connection.sock.settimeout(remaining)
+        connection.request(method, path, headers={"Authorization": "Bearer %s" % secret})
         response = connection.getresponse()
-        if response.status != 200:
+        expected = 204 if method == "PUT" else 200
+        if response.status != expected:
             raise RuntimeSessionError(
-                "mihomo control endpoint answered %d for its own inventory" % response.status
+                "mihomo control endpoint answered %d for %s" % (response.status, method)
             )
-        payload = response.read(_MAXIMUM_CONTROL_BYTES + 1)
+        payload = b"{}" if method == "PUT" else response.read(_MAXIMUM_CONTROL_BYTES + 1)
     except (OSError, HTTPException) as error:
         # A private loopback endpoint that cannot be reached is a startup fault.
         raise RuntimeSessionError("mihomo control endpoint is unreachable") from error
     finally:
+        if response is not None:
+            response.close()
         connection.close()
+    if time.monotonic() >= deadline:
+        raise RuntimeSessionError("mihomo control request deadline exhausted")
     if len(payload) > _MAXIMUM_CONTROL_BYTES:
         raise RuntimeSessionError("mihomo control response exceeded its bound")
     try:
         document = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         # Malformed control output is a fault, never a silent pass.
         raise RuntimeSessionError("mihomo control response was not valid JSON") from error
     if not isinstance(document, dict):
@@ -384,21 +431,40 @@ class MihomoDriver(RuntimeDriver):
         entries = provider.get("proxies")
         if not isinstance(entries, list):
             raise RuntimeSessionError("mihomo did not report its provider inventory")
-        accepted = tuple(
-            entry.get("name")
-            for entry in entries
-            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
-        )
+        for entry in entries:
+            if (
+                not isinstance(entry, dict) or not isinstance(entry.get("name"), str)
+                or not isinstance(entry.get("id"), str)
+                or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", entry["id"]) is None
+                or entry.get("provider-name") != PROVIDER_NAME
+            ):
+                raise RuntimeSessionError("mihomo did not report a valid provider identity")
+        accepted = tuple(entry["name"] for entry in entries)
+        identities = tuple(entry["id"] for entry in entries)
         selected = group.get("now")
         if not isinstance(selected, str):
             raise RuntimeSessionError("mihomo did not report its selected proxy")
         # Mihomo names its own placeholder in `emptyFallback`, so the check does
         # not depend only on a hard-coded list of placeholder names.
         fallback = group.get("emptyFallback")
-        bypassing = selected in _BYPASS_SELECTIONS or (
+        members = group.get("all")
+        bypassing = selected not in accepted or selected in _BYPASS_SELECTIONS or (
             isinstance(fallback, str) and fallback != "" and selected == fallback
+        ) or not isinstance(members, list) or tuple(members) != accepted
+        return LoadedNodes(accepted=accepted, selected=selected, bypassing=bypassing, identities=identities)
+
+    def reload_provider(self, control_port, control_secret, timeout):
+        """Request native file-provider reload; acceptance still needs inspection.
+
+        A non-204 answer is terminal: Mihomo uses 503 for both invalid provider
+        content and local read failures, so it cannot safely be classified as
+        transient connectivity. The session must never retry this blindly.
+        """
+
+        _control_request(
+            control_port, control_secret, "/providers/proxies/%s" % PROVIDER_NAME,
+            timeout, method="PUT",
         )
-        return LoadedNodes(accepted=accepted, selected=selected, bypassing=bypassing)
 
     def create_process(self, executable, config_path, session_root, log_path, backend_log_level, log_sink=None):
         # type: (Path, Path, Path, Path, str, object) -> object
@@ -1256,16 +1322,15 @@ class MihomoProcess(object):
                 _private_directory(self.log_path.parent, boundary=self.log_path.parent)
                 if is_path_alias(self.log_path):
                     raise RuntimeSessionError("runtime log path is aliased")
-                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                flags = (os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_BINARY", 0))
                 descriptor = os.open(str(self.log_path), flags, 0o600)
                 status = os.fstat(descriptor)
                 if not stat.S_ISREG(status.st_mode):
                     raise RuntimeSessionError("runtime log path is not a regular file")
                 if os.name == "posix" and stat.S_IMODE(status.st_mode) != 0o600:
                     raise RuntimeSessionError("runtime log path has unsafe permissions")
-                if status.st_size >= MAXIMUM_LOG_BYTES:
-                    raise RuntimeSessionError("runtime log exceeds its size bound")
-                os.write(descriptor, line[: MAXIMUM_LOG_BYTES - status.st_size])
+                append_recent(descriptor, line, status.st_size, MAXIMUM_LOG_BYTES)
         except (OSError, RuntimeSessionError, ValueError) as error:
             # Log publication can fail after launch; draining must continue.
             self._record_drain_error(error)

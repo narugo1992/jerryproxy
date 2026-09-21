@@ -109,7 +109,7 @@ class _Process(object):
 def _inspector(port, secret, path, timeout):
     del port, secret, timeout
     if path.startswith("/providers/proxies/"):
-        return {"proxies": [{"name": "n"}]}
+        return {"proxies": [{"name": "n", "id": "12345678-1234-4234-8234-123456789abc", "provider-name": "jerryproxy"}]}
     return {"now": "n", "all": ["n"], "emptyFallback": "COMPATIBLE"}
 
 
@@ -257,22 +257,35 @@ def test_no_secret_reaches_the_runtime_log_access_file_or_envelope(tmp_path, lab
             installed.executable = executable
             return installed
 
+    class _RecoveringProbe(_Probe):
+        calls = 0
+
+        def check(self, port, username, password):
+            self.calls += 1
+            return HealthSnapshot(targets=(), passed=int(self.calls >= 3), required=1, started_at=0.0)
+
     lines = []
+    events = []
     session = RuntimeSession(
         paths,
         manager=_Backend(),
         subscription_manager=manager,
-        health_probe=_Probe(),
+        health_probe=_RecoveringProbe(),
         authenticate=True,
         driver=MihomoDriver(process_factory=_Process, inspector=_inspector),
-        recovery_policy=RecoveryPolicy(startup_retry_delays=(0.0,), recovery_deadline=10.0),
+        recovery_policy=RecoveryPolicy(recovery_deadline=10.0),
         sleeper=lambda delay: None,
         log_sink=lambda owner, level, message: lines.append("%s %s %s" % (owner, level, message)),
+        event_sink=events.append,
     )
     session.start("main", node_id=record.nodes[0].node_id, install_missing=False)
     try:
+        assert {event["event"] for event in events} == {
+            "session.starting", "session.degraded", "session.retrying", "session.ready",
+        }
         channels = {
             "log sink": "\n".join(lines),
+            "lifecycle events": json.dumps(events, sort_keys=True),
             "public envelope": json.dumps(session.public_info(), sort_keys=True),
             "access file": session.access_path.read_text(encoding="utf-8")
             if session.access_path.exists()
@@ -327,7 +340,7 @@ def test_no_secret_reaches_a_runtime_refusal_message(tmp_path):
         subscription_manager=manager,
         health_probe=_Probe(),
         driver=_Bypassing(process_factory=_Process),
-        recovery_policy=RecoveryPolicy(startup_retry_delays=(0.0,), recovery_deadline=5.0),
+        recovery_policy=RecoveryPolicy(recovery_deadline=5.0),
         sleeper=lambda delay: None,
     )
 
@@ -391,6 +404,7 @@ def test_the_matrix_covers_every_secret_and_every_channel():
         "access file": "test_no_secret_reaches_the_runtime_log_access_file_or_envelope",
         "public envelope": "test_no_secret_reaches_the_runtime_log_access_file_or_envelope",
         "log sink": "test_no_secret_reaches_the_runtime_log_access_file_or_envelope",
+        "lifecycle events": "test_no_secret_reaches_the_runtime_log_access_file_or_envelope",
         "runtime refusal message": "test_no_secret_reaches_a_runtime_refusal_message",
         "stored state projection": "test_no_secret_reaches_the_private_state_public_projection",
     }

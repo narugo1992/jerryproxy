@@ -21,4 +21,5 @@ JerryProxy is a Python 3.7+ multi-backend proxy CLI and backend manager.
    architecture
    security
    roadmap
+   runtime_recovery
    api_doc

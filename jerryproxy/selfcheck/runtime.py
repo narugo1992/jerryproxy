@@ -3,6 +3,8 @@
 import os
 import socket
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from ..errors import (
@@ -13,7 +15,7 @@ from ..errors import (
 )
 from ..home import JerryProxyPaths
 from ..lock import JerryProxyOperationLock
-from ..runtime.health import DEFAULT_HEALTH_TARGETS, HealthSnapshot, RecoveryPolicy
+from ..runtime.health import DEFAULT_HEALTH_TARGETS, ConnectivityProbe, HealthSnapshot, HealthTarget, RecoveryPolicy
 from ..runtime.interfaces import LoadedNodes, RuntimeDriver, RuntimeProjection
 from ..runtime.mihomo import build_provider_config
 from ..runtime.session import RuntimeSession
@@ -35,6 +37,42 @@ class _ProbeHealth(object):
     def check(self, port, username, password):  # type: (int, str, str) -> HealthSnapshot
         del port, username, password
         return HealthSnapshot(targets=(), passed=1, required=1, started_at=0.0)
+
+
+def _check_health_process():
+    """Verify the installed health worker can spawn, report and terminate."""
+
+    observed = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - standard library callback
+            observed.append(True)
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    probe = ConnectivityProbe(targets=(HealthTarget("local-response", "http://self-check.invalid/", 204),),
+                              quorum=1, timeout=10)
+    try:
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                try:
+                    result = probe.check(server.server_port, None, None)
+                finally:
+                    probe.close()
+            finally:
+                server.shutdown()
+                thread.join(2)
+            if not result.ok or not observed:
+                return CheckResult.fail("health worker did not complete the local HTTP round trip")
+    except (OSError, RuntimeError, RuntimeSessionError) as error:
+        # Host process/socket allocation and worker cleanup failures are diagnostics.
+        return _error_result(error)
+    return CheckResult.ok("health worker completed a local HTTP round trip and terminated")
 
 
 class _ProbeChild(object):
@@ -129,6 +167,9 @@ class _ProbeDriver(RuntimeDriver):
         self.stopped += 1
         process.stop()
 
+    def reload_provider(self, control_port, control_secret, timeout):
+        del control_port, control_secret, timeout
+
 
 def _check_runtime_driver_contract():
     """Run a foreground session against a substitute driver.
@@ -172,7 +213,7 @@ def _check_runtime_driver_contract():
                 driver=driver,
                 health_probe=_ProbeHealth(),
                 recovery_policy=RecoveryPolicy(
-                    startup_retry_delays=(0.0,),
+
                     recovery_deadline=5.0,
                 ),
                 sleeper=lambda delay: None,
@@ -218,7 +259,7 @@ def _check_runtime_driver_contract():
                 driver=bypassing,
                 health_probe=_ProbeHealth(),
                 recovery_policy=RecoveryPolicy(
-                    startup_retry_delays=(0.0,),
+
                     recovery_deadline=5.0,
                 ),
                 sleeper=lambda delay: None,
@@ -327,6 +368,6 @@ def _check_runtime_projection():
         # Temporary projection and encoding failures are diagnostic errors.
         return _error_result(error)
     policy = RecoveryPolicy()
-    if len(DEFAULT_HEALTH_TARGETS) != 3 or policy.alternate_delays != (4.0, 8.0):
+    if len(DEFAULT_HEALTH_TARGETS) != 3 or policy.retry_policy != "fallback":
         return CheckResult.fail("runtime health/recovery policy is incomplete")
-    return CheckResult.ok("Mihomo projection and bounded health recovery policy are usable")
+    return CheckResult.ok("Mihomo projection and persistent health recovery policy are usable")

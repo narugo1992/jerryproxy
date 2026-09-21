@@ -30,8 +30,16 @@ Mihomo `1.19.29` foreground session now exist. The public server listener is
 open on `127.0.0.1` by default, with optional generated local credentials via
 `--auth`; `--bind-all` explicitly selects `0.0.0.0`. The session keeps
 subscription state below `JERRYPROXY_HOME`, probes the global health quorum,
-restarts the current node once, sweeps deterministic alternates, and may
-refresh the retained source once without rewriting the saved preference.
+keeps the backend running across connectivity failures, retries within the
+selected subscription, and hot-reloads alternate single-node providers without
+rewriting the saved preference. Recovery uses repeated bounded rounds; healthy
+sessions do not explore. Refresh retains verified cache on explicitly transient
+transport failures, propagates network budgets and observes independent backoff
+and Retry-After. Explicit and guided CLI support none, fixed, random, adaptive
+and fallback strategies with a closed optional fallback chain. Scoped SIGINT
+and SIGTERM handlers unwind foreground sessions. Default health probes run in
+a disposable process with parent-owned wall deadlines and confirmed cleanup;
+native cancellation and long-run resource validation remain active work. Structured lifecycle events and bounded recent logs exist.
 Nodes are labelled from their URI fragment or provider name, depending on the
 container format. A stored node projection that no longer matches its source
 bytes is recoverable drift rather than tampering, and one bounded refresh of the
@@ -409,7 +417,7 @@ authentication, extraction, process, or permission errors to warnings.
   runtime selection path.
 - `jerryproxy.runtime` owns the current Mihomo projection, loopback listener,
   one merged named backend output stream, connectivity quorum, and the bounded
-  foreground recovery policy. Backend stdout/stderr are drained, decoded into
+  foreground recovery policy with persistent bounded rounds. Backend stdout/stderr are drained, decoded into
   bounded redacted lines, and forwarded/persisted according to the configured
   backend log level. Future runtime drivers own other cores, native profiles,
   and backend control APIs.

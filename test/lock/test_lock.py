@@ -272,3 +272,32 @@ def test_filelock_status_reports_a_supported_modern_line(monkeypatch):
 
     assert status.level == "OK"
     assert status.detail == "filelock 3.30.0 uses the supported native lock line"
+
+
+def test_explicit_exit_releases_strong_operation_ownership(tmp_path):
+    import gc
+    import weakref
+
+    lock = JerryProxyOperationLock(JerryProxyPaths(tmp_path))
+    lock.__enter__()
+    retained = weakref.ref(lock)
+    del lock
+    gc.collect()
+    assert retained() is not None
+    with pytest.raises(JerryProxyBusyError):
+        with JerryProxyOperationLock(JerryProxyPaths(tmp_path)):
+            pass
+    retained().__exit__(None, None, None)
+    gc.collect()
+    assert retained() is None
+    with JerryProxyOperationLock(JerryProxyPaths(tmp_path)):
+        pass
+
+
+def test_explicit_exit_is_idempotent_after_release(tmp_path):
+    lock = JerryProxyOperationLock(JerryProxyPaths(tmp_path))
+    lock.__enter__()
+    assert lock.__exit__(None, None, None) is False
+    assert lock.__exit__(None, None, None) is False
+    with JerryProxyOperationLock(JerryProxyPaths(tmp_path)):
+        pass

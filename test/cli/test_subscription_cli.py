@@ -293,6 +293,7 @@ def test_server_guided_selection_passes_explicit_targets_to_runtime(tmp_path, mo
             captured["stopped"] = True
 
     selections = iter(["main", "a" * 32])
+    monkeypatch.setattr(cli_common, "select", lambda message, choices: "fallback")
     monkeypatch.setattr(server_module, "RuntimeSession", FakeRuntime)
     monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
     monkeypatch.setattr(
@@ -320,6 +321,7 @@ def test_server_guided_selection_passes_explicit_targets_to_runtime(tmp_path, mo
 
     assert result.exit_code == 0, result.output
     assert captured["start"] == ("main", "a" * 32, False)
+    assert captured["init"]["recovery_policy"].health_interval == 30
     assert captured["init"]["listener_protocol"] == "http"
     assert captured["init"]["authenticate"] is False
     assert captured["init"]["bind_address"] == "127.0.0.1"
@@ -480,12 +482,17 @@ def test_server_jsonl_uses_core_source_and_omits_owner_for_jerryproxy(tmp_path, 
             del paths
             self.process = None
             self._sink = kwargs["log_sink"]
+            self._events = kwargs["event_sink"]
 
         def start(self, subscription_name, node_id, install_missing):
             del subscription_name, node_id, install_missing
             self._sink("jerryproxy", "INFO", "proxy listener ready")
             self._sink("mihomo", "INFO", "connected")
             self._sink("mihomo", "INFO", "HTTP request complete")
+            info = self.public_info()
+            info.pop("access_file", None)
+            info.pop("log_file", None)
+            self._events({"event": "session.ready", "data": info})
 
         def public_info(self):
             return {

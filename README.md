@@ -338,7 +338,9 @@ backend registry, packaged catalog access and selection, `filelock`
 compatibility, and one lock-consistent installed/active backend inventory. It
 also exercises a complete synthetic backend lifecycle plus install, activation,
 and removal hard-exit recovery in isolated temporary JerryProxy homes without
-changing the configured home. It then streams one fixed 1 MiB Range from
+changing the configured home. A separate health-worker check spawns the actual
+network worker against a temporary loopback HTTP server, verifies the
+response and confirms cleanup without external traffic. It then streams one fixed 1 MiB Range from
 a pinned public Xray release through each built-in relay. The probe separates
 response-header latency, first-chunk latency, and the speed of the remaining
 chunks, uses a five-second connect/read timeout, and has a parent-enforced
@@ -499,10 +501,57 @@ SOCKS5 listener uses a `socks5h` URL. Backend stdout/stderr are merged into one
 bounded live stream, redacted, and labeled only with the backend name
 (`[mihomo]`), never separate stdout/stderr labels; `--backend-log-level`
 defaults to `INFO`. Two consecutive
-failed global health quorums trigger one same-node restart, deterministic
-alternate-node attempts, and one optional subscription refresh within the
-configured recovery deadline. Automatic recovery never rewrites the saved node
-preference.
+failed global health quorums trigger persistent recovery within the selected
+subscription. Health checks default to 30 seconds, with a confirmation check
+3 seconds after a failure. The backend stays running while nodes are retried
+and hot-reloaded; each recovery round has its own budget and capped backoff.
+Healthy sessions keep their node, listener and credentials, and automatic
+recovery never rewrites the saved preference. Temporary subscription transport
+failures retain verified cache, with separate refresh backoff and Retry-After
+handling. Cache older than 12 hours requests refresh without disqualifying its
+nodes. Control, TLS, authentication, integrity and unclassified failures remain
+terminal. Lifecycle events report starting, degradation, retry attempts,
+refresh outcomes, readiness and completed cleanup. JSONL sends events to stdout
+and ordinary logs to stderr; event visibility is independent of log level.
+Both log producers retain recent redacted diagnostics within a 4 MiB file.
+SIGINT and SIGTERM unwind the foreground session and exit with status 130
+and 143 after cleanup; repeated signals do not interrupt that cleanup. Default
+health requests run in a disposable process that is stopped at the wall deadline,
+so stalled network requests cannot occupy future probe batches. Unconfirmed
+worker cleanup is terminal and retains the home lock; recovery never hides an
+unsafe process state. Existing client connections are not guaranteed to survive
+a node change.
+
+Choose `--retry-policy none|fixed|random|adaptive|fallback` in a complete command
+or select the same policy in the guided TTY flow. The default `fallback` uses
+`current:1,adaptive:3,random:all`; `--retry-chain current:1,random:all` selects a
+custom fallback chain. Stages must be unique, counts must be positive integers
+(up to 10,000) or `all`, and `current` permits only `current:1`. Custom chains
+require `fallback`. `none` stops on confirmed failure and disables refresh;
+`fixed` never substitutes a different initial identity; `random` visits nodes
+without replacement; `adaptive` uses aging session-local successes with
+recovery-only exploration. Human and JSONL startup report the chosen policy.
+
+Defaults target subscriptions with up to 20 nodes. Recovery first uses short
+3-second health probes, then normal budgets after the fast sweep is exhausted
+so slow usable nodes remain eligible. After 6 seconds spent trying cached
+nodes, the next between-attempt check gives subscription refresh its own
+10-second budget; a large old pool cannot consume that fetch budget. Refresh
+starts at most once per 60 seconds by default, with additional transport
+backoff and Retry-After handling. Changed content is tried without an extra
+round backoff. An in-flight bounded attempt finishes before the refresh check;
+these timings are not a guarantee that an available route exists.
+
+Advanced overrides are `--fast-probe-timeout 3`, `--cache-retry-budget 6`,
+`--refresh-timeout 10` and `--refresh-interval 60` (all seconds). Complete
+commands and guided selection share these defaults and overrides. The guided
+flow adds no timing questions; choosing the recommended policy is sufficient.
+
+```shell
+jerryproxy server --subscription main --node NODE_ID --retry-policy fixed
+jerryproxy server --subscription main --node NODE_ID --retry-policy fallback \
+  --retry-chain current:1,adaptive:3,random:all
+```
 
 Nodes are listed with the label their provider put in the URI fragment, so
 several endpoints of one protocol stay distinguishable. That fragment is
@@ -586,7 +635,7 @@ tampering and is never repaired automatically.
 - [x] Implement managed `V2RAY_SUBSCRIPTION` fetch, private state, and URI
   inventory for every encrypted protocol the qualified backend accepts.
 - [x] Implement the Mihomo foreground driver, loopback listener, merged named
-  backend stream, and bounded health recovery.
+  backend stream, and persistent health recovery with bounded rounds.
 - [ ] Implement durable controller operations, measurements, and service
   integration.
 - [ ] Preserve documented `v2raycli` inputs through deprecated aliases.

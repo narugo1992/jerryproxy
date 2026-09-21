@@ -1,5 +1,6 @@
 """Synchronous foreground runtime ownership, health checks, and recovery."""
 
+import hashlib
 import json
 import os
 import re
@@ -18,9 +19,10 @@ from ..errors import (
     BackendNotInstalledError,
     JerryProxyError,
     RuntimeSessionError,
-    SubscriptionError,
+    SubscriptionFetchError,
     SubscriptionNodesMismatchError,
     SubscriptionStateError,
+    SubscriptionTransportError,
 )
 from ..home import is_path_alias
 from ..lock import JerryProxyOperationLock
@@ -29,6 +31,7 @@ from ..subscription.interfaces import NodeSource
 from ..subscription.redaction import redact_text, terminal_safe_text
 from ..subscription.storage import _ensure_extension_directory, _require_node_projection
 from ..subscription.transport import MIHOMO_SUBSCRIPTION_PARSER
+from ._logs import append_recent
 from .health import ConnectivityProbe, RecoveryDeadline, RecoveryPolicy
 from .interfaces import RuntimeDriver
 from .mihomo import (
@@ -40,6 +43,7 @@ from .mihomo import (
     _private_bytes,
     reserve_loopback_port,
 )
+from .recovery import DEFAULT_RETRY_CHAIN, RetryBackoff, RetrySchedule
 
 _LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 _SESSION_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -68,7 +72,7 @@ def _parse_timestamp(value):  # type: (str) -> datetime
 
 
 class RuntimeSession(object):
-    """One foreground Mihomo session with bounded recovery.
+    """One foreground Mihomo session with persistent, bounded recovery rounds.
 
     Automatic recovery is intentionally in-memory.  The user's selected node
     remains the saved preference; a successful failover changes only this
@@ -99,6 +103,7 @@ class RuntimeSession(object):
         preferred_port=None,
         strict_port=False,
         bind_address="127.0.0.1",
+        event_sink=None,
     ):
         self.paths = paths
         self.manager = manager or BackendManager(paths)
@@ -139,6 +144,11 @@ class RuntimeSession(object):
         if self.backend_log_level not in ("OFF", "DEBUG", "INFO", "WARN", "ERROR"):
             raise ValueError("unsupported backend log level")
         self.log_sink = log_sink
+        self.event_sink = event_sink
+        self._state = "stopped"
+        self._ever_ready = False
+        self._attempts = 0
+        self._rounds = 0
         self.session_id = session_id or secrets.token_hex(16)
         if not isinstance(self.session_id, str) or not _SESSION_ID.fullmatch(self.session_id):
             raise ValueError("session_id must be 32 lowercase hexadecimal characters")
@@ -170,36 +180,37 @@ class RuntimeSession(object):
         self.sleeper = sleeper or time.sleep
         self._health_failures = 0
         self._next_health_at = None
-        self._cooldowns = {}
         self._operation_lock = None
         self._log_file_lock = threading.Lock()
         self._log_errors = []
         self.last_health = None
-        self._startup_health_failure_logged = False
+        self._schedule = None
+        self._backoff = RetryBackoff()
+        self._loaded_node = None
+        self._loaded_identity = ()
+        self._next_refresh_at = 0.0
+        self._refresh_failures = 0
 
-    def _append_log_line(self, source, level, message):
+    def _append_log_line(self, level, message):
         safe = terminal_safe_text(redact_text(" ".join(str(message).split())))[:4096]
         if not safe:
             return
-        if source == "jerryproxy":
-            line = ("[%s] %s\n" % (level, safe)).encode("utf-8", "replace")
-        else:
-            line = ("[%s] %s\n" % (source, safe)).encode("utf-8", "replace")
+        line = ("[%s] %s\n" % (level, safe)).encode("utf-8", "replace")
         descriptor = -1
         try:
             with self._log_file_lock:
                 _ensure_extension_directory(self.log_path.parent)
                 if is_path_alias(self.log_path):
                     raise RuntimeSessionError("runtime log path is aliased")
-                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                flags = (os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_BINARY", 0))
                 descriptor = os.open(str(self.log_path), flags, 0o600)
                 status = os.fstat(descriptor)
                 if not stat.S_ISREG(status.st_mode):
                     raise RuntimeSessionError("runtime log path is not a regular file")
                 if os.name == "posix" and stat.S_IMODE(status.st_mode) != 0o600:
                     raise RuntimeSessionError("runtime log path has unsafe permissions")
-                if status.st_size < MAXIMUM_LOG_BYTES:
-                    os.write(descriptor, line[: MAXIMUM_LOG_BYTES - status.st_size])
+                append_recent(descriptor, line, status.st_size, MAXIMUM_LOG_BYTES)
         except (OSError, RuntimeSessionError, ValueError) as error:
             # Logging must not interrupt proxy service; retain a bounded error.
             if len(self._log_errors) < 8:
@@ -212,12 +223,47 @@ class RuntimeSession(object):
         normalized = str(level).upper()
         if normalized not in _LOG_LEVELS or _LOG_LEVELS[normalized] < _LOG_LEVELS[self.log_level]:
             return
-        self._append_log_line("jerryproxy", normalized, message)
+        self._append_log_line(normalized, message)
         if self.log_sink is not None:
             try:
                 self.log_sink("jerryproxy", normalized, redact_text(message))
             except (OSError, ValueError):
                 # The caller's terminal may close while the foreground child runs.
+                pass
+
+    def _event(self, state, reason, delay=0.0, candidate=None):
+        """Publish one credential-free lifecycle snapshot, independent of log level."""
+
+        if state != "refresh":
+            self._state = state
+        if state == "ready":
+            self._ever_ready = True
+        data = self.public_info()
+        data.update({
+            "node": self.node.node_id if self.node and self._ever_ready else None,
+            "loaded_node": self._loaded_node.node_id if self._loaded_node else None,
+            "attempted_node": candidate,
+            "attempts": self._attempts,
+            "rounds": self._rounds,
+            "candidates": len(tuple(self.subscription.iter_nodes())) if self.subscription else 0,
+            "reason": reason,
+            "delay": delay,
+            "retry_policy": self.recovery_policy.retry_policy,
+            "retry_chain": ((self.recovery_policy.retry_chain or DEFAULT_RETRY_CHAIN)
+                            if self.recovery_policy.retry_policy == "fallback" else None),
+            "health": {
+                "ok": bool(self.last_health and self.last_health.ok and self._state == "ready"),
+                "passed": self.last_health.passed if self.last_health else 0,
+                "required": self.last_health.required if self.last_health else 0,
+            },
+        })
+        event = {"event": "session." + state, "data": data}
+        self._append_log_line("INFO", json.dumps(event, sort_keys=True, separators=(",", ":")))
+        if self.event_sink is not None:
+            try:
+                self.event_sink(event)
+            except (OSError, ValueError):
+                # A closed output stream must not interrupt recovery or cleanup.
                 pass
 
     def _enter_operation_lock(self):
@@ -250,11 +296,11 @@ class RuntimeSession(object):
         parser = getattr(self.subscription_manager, "parser", None) or MIHOMO_SUBSCRIPTION_PARSER
         _require_node_projection(record, parser)
 
-    def _locked_refresh(self, name):  # type: (str) -> object
+    def _locked_refresh(self, name, timeout=None):
         refresh_locked = getattr(self.subscription_manager, "_refresh_locked", None)
         if refresh_locked is None:
-            return self.subscription_manager.refresh(name)
-        return refresh_locked(name)
+            return self.subscription_manager.refresh(name, timeout=timeout)
+        return refresh_locked(name, timeout=timeout)
 
     def _locked_repair(self, name):  # type: (str) -> object
         """Repair one drifted projection through the already-held home lock."""
@@ -398,7 +444,9 @@ class RuntimeSession(object):
         )
         if projection.provider is not None:
             _private_bytes(self.provider_path, projection.provider, boundary=self.session_root)
+            self._provider_digest = hashlib.sha256(projection.provider).digest()
         _private_bytes(self.config_path, projection.config, boundary=self.session_root)
+        self._config_digest = hashlib.sha256(projection.config).digest()
 
     def _resolve_executable(self, install_missing):
         which_locked = getattr(self.manager, "_which_locked", None)
@@ -433,21 +481,29 @@ class RuntimeSession(object):
         self.executable = installed.executable
         return self.executable
 
-    def _stop_process(self, deadline=None):
-        process = self.process
-        if process is None:
-            return
-        try:
-            timeout = None
-            if deadline is not None:
-                timeout = max(0.01, min(2.0, deadline.remaining()))
-            self.driver.stop(process, timeout=timeout)
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-            # Process termination failures are terminal recovery failures.
-            raise RuntimeSessionError("mihomo backend cleanup failed") from error
-        self.process = None
+    def _require_fetch_cleanup(self):
+        check = getattr(self.subscription_manager, "_require_fetch_cleanup", None)
+        if check is not None:
+            try:
+                check()
+            except SubscriptionFetchError as error:
+                # A retained source worker still owns secret-bearing runtime state.
+                raise RuntimeSessionError("subscription worker cleanup remains unconfirmed") from error
 
-    def _launch_node(self, node, deadline=None):
+    def _stop_process(self):
+        process = self.process
+        if process is not None:
+            try:
+                self.driver.stop(process, timeout=None)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                # Process termination failures are terminal recovery failures.
+                raise RuntimeSessionError("mihomo backend cleanup failed") from error
+            self.process = None
+        if isinstance(self.health_probe, ConnectivityProbe):
+            self.health_probe.close()
+        self._require_fetch_cleanup()
+
+    def _launch_node(self, node, deadline):
         self.node = node
         self._write_projection()
         try:
@@ -475,25 +531,20 @@ class RuntimeSession(object):
                     self.bind_address,
                 )
             self.process.start()
-            if deadline is not None:
-                remaining = deadline.remaining()
-                if remaining <= 0:
-                    raise RuntimeSessionError("proxy recovery deadline exhausted")
-                self.driver.wait_ready(self.process, self.port, timeout=min(5.0, remaining))
-            else:
-                self.driver.wait_ready(self.process, self.port, timeout=5.0)
+            remaining = deadline.remaining()
+            if remaining <= 0:
+                raise RuntimeSessionError("proxy recovery deadline exhausted")
+            self.driver.wait_ready(self.process, self.port, timeout=min(5.0, remaining))
         except (OSError, RuntimeSessionError) as error:
             # The caller decides whether this candidate is recoverable; no raw
             # backend diagnostics cross this boundary.
-            self.process = None if self.process is None else self.process
             raise RuntimeSessionError("mihomo backend candidate failed to start") from error
         # Outside the launch failure boundary, because a backend that started
         # cleanly but is not using the node is a different verdict and keeps its
-        # own message. Inside `_launch_node` rather than beside one call of it,
-        # so a startup retry and the recovery sweep are both covered -- the sweep
-        # launches a *different* node, the case most likely to carry a protocol
-        # the backend refuses.
+        # own message. Recovery reloads verify acceptance in _try_candidate.
         self._require_node_in_use(deadline=deadline)
+        self._loaded_node = node
+        self._log("INFO", "backend accepted node %s and routes through it" % node.node_id)
 
     def _check_health(self, deadline=None):
         if self.port is None:
@@ -512,6 +563,12 @@ class RuntimeSession(object):
             result = checker(self.port, self.username, self.password)
         if not hasattr(result, "ok"):
             raise RuntimeSessionError("proxy health probe returned an invalid result")
+        self.last_health = result
+        for target in result.targets:
+            if target.detail in ("tls_failed", "proxy_authentication_failed"):
+                raise RuntimeSessionError("proxy health check refused: %s" % target.detail)
+        if any(getattr(target, "detail", "") == "socks_dependency_missing" for target in result.targets):
+            raise RuntimeSessionError("install PySocks>=1.7.1 and retry the SOCKS5 server")
         return result
 
     def _log_health(self, level, phase, snapshot, action=None):
@@ -520,10 +577,11 @@ class RuntimeSession(object):
         passed = int(getattr(snapshot, "passed", 0))
         required = int(getattr(snapshot, "required", 0))
         status = "passed" if bool(snapshot.ok) else "failed"
-        message = "%s health check %s (%d/%d targets passed)" % (
+        message = "%s health check %s (%d/%d targets passed; requires %d)" % (
             phase,
             status,
             passed,
+            len(tuple(getattr(snapshot, "targets", ()))),
             required,
         )
         failed = []
@@ -539,7 +597,7 @@ class RuntimeSession(object):
             message += "; next=%s" % redact_text(action)
         self._log(level, message)
 
-    def _require_node_in_use(self, deadline=None):  # type: (object) -> None
+    def _require_node_in_use(self, deadline, node=None):
         """Refuse to report readiness unless the backend is using the node.
 
         A backend can start, listen, and answer a connectivity probe while
@@ -552,14 +610,13 @@ class RuntimeSession(object):
 
         # Two sequential requests happen inside, so an unclamped timeout could
         # overrun the recovery deadline once per swept candidate.
-        timeout = 5.0
-        if deadline is not None:
-            remaining = deadline.remaining()
-            if remaining <= 0:
-                raise RuntimeSessionError("proxy recovery deadline exhausted")
-            timeout = max(0.5, min(5.0, remaining / 2.0))
+        remaining = deadline.remaining()
+        if remaining <= 0:
+            raise RuntimeSessionError("proxy recovery deadline exhausted")
+        timeout = min(5.0, remaining / 2.0)
         loaded = self.driver.loaded_nodes(self.control_port, self.control_secret, timeout)
-        if loaded.bypassing or len(loaded.accepted) != 1:
+        node = node or self.node
+        if loaded.bypassing or len(loaded.accepted) != 1 or loaded.selected != loaded.accepted[0]:
             # Name the scheme, never the URI: the scheme is already public in
             # `node list` output while the rest of the URI is a credential.
             raise RuntimeSessionError(
@@ -569,64 +626,47 @@ class RuntimeSession(object):
                 "node with `jerryproxy node list`."
                 % (
                     self.driver.name,
-                    self.node.node_id,
+                    node.node_id,
                     len(loaded.accepted),
-                    self.node.scheme,
+                    node.scheme,
                     self.driver.name,
                     self.backend_version,
                 )
             )
-        self._log(
-            "INFO",
-            "backend accepted node %s and routes through it" % self.node.node_id,
-        )
+        self._loaded_identity = loaded.identities
+        return loaded
 
     def _startup_health(self, deadline=None):
-        deadline = deadline or RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
-        delays = tuple(self.recovery_policy.startup_retry_delays)
-        for index, delay in enumerate(delays):
-            if not self._sleep_with_deadline(deadline, delay):
-                raise RuntimeSessionError("proxy startup deadline exhausted")
-            if self.process is None or self.process.process.poll() is not None:
-                raise RuntimeSessionError("mihomo backend exited before health readiness")
-            snapshot = self._check_health(deadline=deadline)
-            if snapshot.ok:
-                self.last_health = snapshot
-                self._log_health("INFO", "startup", snapshot)
-                return snapshot
-            retrying = index + 1 < len(delays)
-            missing_socks = any(
-                getattr(target, "detail", "") == "socks_dependency_missing"
-                for target in tuple(getattr(snapshot, "targets", ()))
-            )
-            if missing_socks:
-                action = "install PySocks>=1.7.1 and retry the SOCKS5 server"
-            else:
-                action = "retrying current node" if retrying else "no startup retry remains; stopping session"
-            self._log_health(
-                "WARN" if retrying else "ERROR",
-                "startup",
-                snapshot,
-                action,
-            )
-            if not retrying:
-                self._startup_health_failure_logged = True
-            if index + 1 < len(delays):
-                self._stop_process(deadline=deadline)
-                if deadline.remaining() <= 0:
-                    raise RuntimeSessionError("proxy startup deadline exhausted")
-                self._launch_node(self.node, deadline=deadline)
-        raise RuntimeSessionError("proxy connectivity quorum failed during startup")
+        snapshot = self._check_health(deadline=deadline)
+        self._log_health("INFO" if snapshot.ok else "WARN", "startup", snapshot)
+        if not snapshot.ok:
+            self.sleeper(self.recovery_policy.confirmation_delay)
+            snapshot = self._check_health()
+            if not snapshot.ok:
+                self._recover()
+        self._backoff.healthy(self.clock())
+        return self.last_health
 
     def start(self, subscription_name=None, node_id=None, install_missing=True):
         """Prepare, launch, authenticate, and health-check one selected node."""
 
+        self._require_fetch_cleanup()
         self._enter_operation_lock()
         try:
             self.subscription = self._select_subscription(subscription_name)
             self.node = self._select_node(self.subscription, node_id)
             self.preference_node_id = self.node.node_id
+            self._schedule = RetrySchedule(
+                self.recovery_policy.retry_policy, self.preference_node_id, self.recovery_policy.retry_chain,
+            )
+            self._schedule.update(node.node_id for node in self.subscription.iter_nodes())
             self._prepare_paths()
+            self._ever_ready = False
+            self._loaded_node = None
+            self._attempts = 0
+            self._rounds = 0
+            self.last_health = None
+            self._event("starting", "startup")
             self._log(
                 "INFO",
                 "starting backend %s %s with %s listener for node %s"
@@ -644,8 +684,10 @@ class RuntimeSession(object):
             self._write_access()
             self._resolve_executable(install_missing)
             startup_deadline = RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
+            self._attempts = 1
             self._launch_node(self.node, deadline=startup_deadline)
             self._startup_health(startup_deadline)
+            self._refresh_subscription(startup_deadline)
             self._publish_access()
             self._next_health_at = self.clock() + self.recovery_policy.health_interval
             self._health_failures = 0
@@ -654,27 +696,28 @@ class RuntimeSession(object):
                 "proxy listener ready at %s:%d using %s"
                 % (self.bind_address, self.port, self.listener_protocol),
             )
-        except (JerryProxyError, OSError) as error:
+            self._event("ready", "startup_healthy")
+        except (JerryProxyError, OSError, KeyboardInterrupt) as error:
             # Startup failures must not leave a live child or secret-bearing
             # lease behind.  The original domain error remains user-visible.
-            if not self._startup_health_failure_logged:
-                self._log(
-                    "ERROR",
-                    "startup failed before a healthy listener was published; stopping session: %s"
-                    % redact_text(error),
-                )
+            self._log(
+                "ERROR",
+                "startup failed before a healthy listener was published; stopping session: %s"
+                % redact_text(error),
+            )
             try:
                 self._stop_process()
                 _remove_private_tree(self.session_root)
             except (OSError, RuntimeSessionError) as cleanup_error:
                 raise RuntimeSessionError("runtime startup cleanup failed") from cleanup_error
             else:
+                self._event("stopped", "startup_failed")
                 self._leave_operation_lock()
             raise error
         return self
 
     def _is_stale(self, record=None):
-        """Return whether a stored record is too old for automatic failover."""
+        """Return whether cache age requests refresh, never node exclusion."""
 
         record = record or self.subscription
         if record is None:
@@ -683,114 +726,158 @@ class RuntimeSession(object):
         age = max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
         return age >= self.recovery_policy.refresh_stale_seconds
 
-    def _mark_cooldown(self, node):
-        self._cooldowns[node.node_id] = self.clock() + self.recovery_policy.failure_cooldown
+    def _refresh_subscription(self, deadline, force=False):
+        """Retain verified cache on transient fetch failure under the session lock."""
 
-    def _cooldown_active(self, node):
-        return self._cooldowns.get(node.node_id, 0.0) > self.clock()
+        if (
+            not self.recovery_policy.refresh_on_failure or self.recovery_policy.retry_policy == "none"
+            or not self.subscription.source_url or self.clock() < self._next_refresh_at
+            or deadline.remaining() <= 0
+        ):
+            return
+        if not force and not self._is_stale():
+            return
+        interval = self.recovery_policy.refresh_interval
+        self._event("refresh", "outage_refresh" if force else "cache_stale")
+        previous_body = self.subscription.body
+        try:
+            refreshed = self._locked_refresh(self.subscription.name, timeout=min(30.0, deadline.remaining()))
+        except SubscriptionTransportError as error:
+            # Only the transport's closed transient verdict permits using cache.
+            self._refresh_failures = min(5, self._refresh_failures + 1)
+            delay = max(interval, min(3600.0, interval * 2 ** (self._refresh_failures - 1)), error.retry_after)
+            self._next_refresh_at = self.clock() + delay
+            self._event("refresh", "refresh_transport_failed", delay=delay)
+            self._log("WARN", "subscription refresh temporarily unavailable; keeping cache; retry after %.3fs" % delay)
+            return
+        if (
+            getattr(refreshed, "name", None) != self.subscription.name
+            or getattr(refreshed, "subscription_id", None) != self.subscription.subscription_id
+            or not getattr(refreshed, "enabled", False)
+        ):
+            raise SubscriptionStateError("refreshed subscription does not match the enabled selected source")
+        self._check_node_projection(refreshed)
+        node_ids = tuple(node.node_id for node in refreshed.iter_nodes())
+        if self.recovery_policy.retry_policy == "fixed" and self.preference_node_id not in node_ids:
+            raise RuntimeSessionError(
+                "fixed node was removed; run `jerryproxy node list %s` and select a current identity"
+                % self.subscription.name
+            )
+        self._schedule.update(node_ids)
+        self.subscription = refreshed
+        self._refresh_failures = 0
+        self._next_refresh_at = self.clock() + interval
+        self._event("refresh", "refresh_unchanged" if refreshed.body == previous_body else "refresh_updated")
 
-    def _eligible_alternates(self, record, attempted):
-        if not record.enabled or self._is_stale(record):
-            return ()
-        # The ranking subsystem is not part of this URI slice.  Public node
-        # identity is therefore the deterministic tie-breaker and current
-        # fallback ordering; a later rank provider can be inserted before it.
-        if not isinstance(record, NodeSource):
-            raise SubscriptionStateError("subscription does not expose a node collection")
-        return tuple(
-            node
-            for node in sorted(record.iter_nodes(), key=lambda item: item.node_id)
-            if node.node_id not in attempted and not self._cooldown_active(node)
-        )
+    def _try_candidate(self, node, deadline, probe_timeout=None):
+        """Retain the child on outages; reload only a different opaque node."""
 
-    def _try_candidate(self, node, deadline):
+        if self.process is None or self.process.process.poll() is not None:
+            raise RuntimeSessionError("backend exited during connectivity recovery")
         if deadline.remaining() <= 0:
             return False
-        previous_node = self.node
-        try:
-            self._stop_process(deadline=deadline)
-            self._launch_node(node, deadline=deadline)
-            if deadline.remaining() <= 0:
-                raise RuntimeSessionError("proxy recovery deadline exhausted")
-            snapshot = self._check_health(deadline=deadline)
-            if deadline.remaining() <= 0:
-                raise RuntimeSessionError("proxy recovery deadline exhausted")
-            if snapshot.ok:
-                return True
-        except RuntimeSessionError as error:
-            # Candidate failures are classified and the next candidate is
-            # attempted after bounded cleanup. The reason is logged rather than
-            # dropped: when the backend refused this candidate's protocol, that
-            # message is the only thing telling the user why.
-            self._log("WARN", "recovery candidate rejected: %s" % redact_text(str(error)))
-        self._mark_cooldown(node)
-        try:
-            self._stop_process(deadline=deadline)
-        except RuntimeSessionError:
-            raise
-        # A failed candidate never becomes the effective node.  Keep the
-        # last known effective identity for diagnostics and refresh selection.
-        self.node = previous_node
+        if self._loaded_node.node_id != node.node_id:
+            previous_identity = self._loaded_identity
+            if len(previous_identity) != 1:
+                raise RuntimeSessionError("backend did not establish a provider identity")
+            projection = self.driver.projection(
+                self.provider_path, node, self.port, self.username, self.password,
+                listener_protocol=self.listener_protocol, backend_log_level=self.backend_log_level,
+                bind_address=self.bind_address, control_port=self.control_port, control_secret=self.control_secret,
+            )
+            if projection.provider is None:
+                raise RuntimeSessionError("backend did not project a reloadable provider")
+            if hashlib.sha256(projection.config).digest() != self._config_digest:
+                raise RuntimeSessionError("provider reload would change the session configuration")
+            digest = hashlib.sha256(projection.provider).digest()
+            changed = digest != self._provider_digest
+            if changed:
+                _private_bytes(self.provider_path, projection.provider, boundary=self.session_root)
+                self.driver.reload_provider(self.control_port, self.control_secret, min(5.0, deadline.remaining()))
+            loaded = self._require_node_in_use(deadline=deadline, node=node)
+            if len(loaded.identities) != 1 or (changed and loaded.identities == previous_identity):
+                raise RuntimeSessionError("backend retained the previous provider identity after reload")
+            if not changed and loaded.identities != previous_identity:
+                raise RuntimeSessionError("backend changed an unchanged provider identity")
+            self._provider_digest = digest
+            self._loaded_node = node
+            self._log("INFO", "backend accepted node %s and routes through it" % node.node_id)
+        if probe_timeout is not None:
+            deadline = RecoveryDeadline(min(probe_timeout, deadline.remaining()), clock=self.clock)
+        snapshot = self._check_health(deadline=deadline)
+        self._schedule.record(node.node_id, snapshot.ok, self.clock())
+        if snapshot.ok:
+            self.node = node
+            self._backoff.healthy(self.clock())
+            return True
         return False
 
+    def _refresh_for_recovery(self):
+        """Give discovery its own budget and report an actual source change."""
+
+        previous_body = self.subscription.body
+        self._refresh_subscription(
+            RecoveryDeadline(self.recovery_policy.refresh_timeout, clock=self.clock), force=True,
+        )
+        return self.subscription.body != previous_body
+
     def _recover(self):
-        """Apply restart -> alternate sweep -> optional source refresh once."""
+        """Repeat bounded rounds until connectivity returns or a fatal error occurs."""
 
-        deadline = RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
-        attempted = {self.node.node_id}
-        self._log("INFO", "health recovery action: restarting the current node")
-
-        if not self._sleep_with_deadline(deadline, self.recovery_policy.same_node_delay):
-            raise RuntimeSessionError("proxy recovery deadline exhausted")
-        if self._try_candidate(self.node, deadline):
-            return
-
-        alternates = self._eligible_alternates(self.subscription, attempted)
-        for index, candidate in enumerate(alternates):
-            attempted.add(candidate.node_id)
-            self._log("INFO", "health recovery action: trying an alternate node")
-            delay = self.recovery_policy.alternate_delays[0]
-            if index != 0:
-                delay = self.recovery_policy.alternate_delays[-1]
-            if not self._sleep_with_deadline(deadline, delay):
-                raise RuntimeSessionError("proxy recovery deadline exhausted")
-            if self._try_candidate(candidate, deadline):
-                return
-
-        if self.recovery_policy.refresh_on_failure and self.subscription.source_url:
-            if deadline.remaining() <= 0:
-                raise RuntimeSessionError("proxy recovery deadline exhausted")
-            self._log("INFO", "health recovery action: refreshing the subscription source")
-            try:
-                refreshed = self._locked_refresh(self.subscription.name)
-            except SubscriptionError:
-                # Refresh is best effort; the last-known-good record remains
-                # effective and the original source URL is never rendered.
-                refreshed = None
-            if refreshed is not None:
-                self.subscription = refreshed
-                for index, candidate in enumerate(self._eligible_alternates(refreshed, attempted)):
-                    attempted.add(candidate.node_id)
-                    delay = self.recovery_policy.alternate_delays[-1] if index else 0.0
-                    if not self._sleep_with_deadline(deadline, delay):
-                        raise RuntimeSessionError("proxy recovery deadline exhausted")
-                    if self._try_candidate(candidate, deadline):
-                        return
-
-        raise RuntimeSessionError("proxy connectivity recovery exhausted")
-
-    def _sleep_with_deadline(self, deadline, delay):
-        if delay > deadline.remaining():
-            return False
-        if delay > 0:
+        self._event("degraded", "connectivity_failed")
+        if self.recovery_policy.retry_policy == "none":
+            raise RuntimeSessionError("proxy connectivity failed; retry policy is none")
+        self._schedule.begin_sweep()
+        fast = True
+        refresh_at = self.clock() + self.recovery_policy.cache_retry_budget
+        while True:
+            self._rounds = min(self._rounds + 1, 2 ** 63 - 1)
+            deadline = RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
+            nodes = {node.node_id: node for node in self.subscription.iter_nodes()}
+            self._schedule.update(nodes)
+            exhausted = False
+            updated = False
+            while deadline.remaining() > 0:
+                if self.clock() >= refresh_at:
+                    if self._refresh_for_recovery():
+                        fast = True
+                        updated = True
+                    refresh_at = self.clock() + self.recovery_policy.refresh_interval
+                    nodes = {node.node_id: node for node in self.subscription.iter_nodes()}
+                    self._schedule.update(nodes)
+                    if deadline.remaining() <= 0:
+                        break
+                candidate = self._schedule.next(self.node.node_id, self.clock())
+                if candidate is None:
+                    exhausted = True
+                    break
+                self._attempts = min(self._attempts + 1, 2 ** 63 - 1)
+                self._event("retrying", "candidate", candidate=candidate)
+                probe_timeout = self.recovery_policy.fast_probe_timeout if fast else None
+                if self._try_candidate(nodes[candidate], deadline, probe_timeout=probe_timeout):
+                    return
+            if self._refresh_for_recovery() or updated:
+                self._schedule.begin_sweep()
+                fast = True
+                refresh_at = self.clock() + self.recovery_policy.refresh_interval
+                continue
+            delay = self._backoff.failed(self.clock())
+            pending_wait = self._schedule.wait_seconds(self.clock())
+            reason = ("candidates_cooling" if pending_wait > 0 else
+                      "no_alternates" if len(nodes) <= 1 else
+                      "sweep_exhausted" if exhausted else "round_deadline")
+            self._event("retrying", reason, delay=delay)
             self.sleeper(delay)
-        return True
+            if exhausted and pending_wait <= 0:
+                self._schedule.begin_sweep()
+                fast = False
 
     def public_info(self):  # type: () -> dict
         """Return the noncredential session envelope for human/JSON output."""
 
         return {
             "session": self.session_id,
+            "state": self._state,
             "backend": self.driver.name,
             "backend_version": self.backend_version,
             "listener": {
@@ -828,6 +915,8 @@ class RuntimeSession(object):
                             "continuing the current node" if self._health_failures else None,
                         )
                         self._health_failures = 0
+                        self._backoff.healthy(self.clock())
+                        self._refresh_subscription(RecoveryDeadline(30.0, clock=self.clock))
                     else:
                         self._health_failures += 1
                         if self._health_failures >= 2:
@@ -835,7 +924,7 @@ class RuntimeSession(object):
                                 "ERROR",
                                 "periodic",
                                 snapshot,
-                                "starting recovery: restart current node, try alternates, then refresh if permitted",
+                                "starting persistent recovery within the selected subscription",
                             )
                             try:
                                 self._recover()
@@ -845,6 +934,7 @@ class RuntimeSession(object):
                                     "health recovery action failed; stopping session: %s" % redact_text(error),
                                 )
                                 raise
+                            self._event("ready", "connectivity_restored")
                             self._log("INFO", "health recovery action completed; continuing the foreground session")
                             self._health_failures = 0
                         else:
@@ -854,7 +944,9 @@ class RuntimeSession(object):
                                 snapshot,
                                 "one more failed check will start recovery",
                             )
-                    next_health = self.clock() + self.recovery_policy.health_interval
+                    interval = (self.recovery_policy.confirmation_delay if self._health_failures
+                                else self.recovery_policy.health_interval)
+                    next_health = self.clock() + interval
                     self._next_health_at = next_health
                 self.sleeper(min(0.2, max(0.01, next_health - self.clock())))
         except KeyboardInterrupt:
@@ -875,6 +967,7 @@ class RuntimeSession(object):
             except OSError as error:
                 raise RuntimeSessionError("runtime session cleanup failed") from error
             self.process = None
+            self._event("stopped", "cleanup_complete")
             self._leave_operation_lock()
         except (OSError, RuntimeSessionError):
             # Keep ownership if termination or purge did not prove that no

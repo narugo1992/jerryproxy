@@ -9,6 +9,7 @@ Every value here is bearer-like test input, so failures report variable names
 and sanitized classifications rather than values.
 """
 
+import json
 import os
 import re
 from urllib.parse import urlsplit
@@ -21,6 +22,7 @@ MARKER = "JERRYPROXY_E2E_MARKER"
 BACKEND = "JERRYPROXY_E2E_BACKEND"
 BACKEND_VERSION = "JERRYPROXY_E2E_BACKEND_VERSION"
 PUBLIC_PROBES = "JERRYPROXY_E2E_PUBLIC_PROBES"
+PROVIDER_NODES = "JERRYPROXY_E2E_PROVIDER_NODES"
 # One entry per URI scheme the build claims to support, so a scheme added to the
 # product allowlist without a fixture makes this lane fail rather than pass by
 # omission. `hy2` reaches the same server as `hysteria2`: it is a second URI
@@ -43,6 +45,7 @@ REQUIRED = (
     MARKER,
     BACKEND,
     BACKEND_VERSION,
+    PROVIDER_NODES,
 ) + tuple(sorted(NODE_VARIABLES.values()))
 
 SENTINEL_PATH = "/jerryproxy-e2e-marker"
@@ -161,6 +164,7 @@ class Contract(object):
             scheme: _node_uri(name, scheme) for scheme, name in sorted(NODE_VARIABLES.items())
         }
         self.public_probes = _public_probes()
+        self.providers = json.loads(_present(PROVIDER_NODES))
 
     @property
     def sentinel_url(self):  # type: () -> str
