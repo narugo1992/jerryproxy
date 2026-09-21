@@ -67,6 +67,10 @@ retained lock on its next operation only after the supervisor confirms both work
 artifact removal. A runtime session similarly refuses to announce stopped
 or release its own lock while subscription cleanup is pending. No cleanup
 thread releases a thread-owned FileLock or acquires a second home lock.
+Acquired operation locks remain strongly referenced until explicit exit, so
+discarding a failed owner cannot release an unconfirmed operation through
+garbage collection. Discarding such an owner forfeits in-process cleanup
+recovery; the home stays locked until the process exits.
 
 Sanitized events expose starting, degraded, retrying, ready and stopped states,
 actual retry delays, skip reasons and current health. No event falsely reports

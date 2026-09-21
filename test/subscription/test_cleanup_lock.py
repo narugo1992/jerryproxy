@@ -217,3 +217,32 @@ def test_interrupt_during_worker_join_stops_child_before_unlocking(tmp_path, mon
     assert not tuple(manager.paths.runtimes.glob(".subscription-fetch-*"))
     with JerryProxyOperationLock(manager.paths):
         pass
+
+
+def test_discarding_failed_manager_does_not_release_unconfirmed_home(tmp_path, late_worker):
+    import gc
+    import weakref
+
+    paths = JerryProxyPaths(tmp_path / "home")
+    manager = SubscriptionManager(paths)
+    try:
+        manager.add("main", "https://provider.invalid/sub")
+    except SubscriptionFetchError:
+        # The caller may drop both the failed manager and its exception.
+        pass
+    retained = weakref.ref(manager._retained_operation_lock)
+    del manager
+    gc.collect()
+    try:
+        with pytest.raises(JerryProxyBusyError):
+            with JerryProxyOperationLock(paths):
+                pass
+        assert retained() is not None
+    finally:
+        late_worker.set()
+        deadline = time.monotonic() + 2
+        while tuple(paths.runtimes.glob(".subscription-fetch-*")) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # Test teardown explicitly ends ownership only after real cleanup.
+        if retained() is not None:
+            retained().__exit__(None, None, None)

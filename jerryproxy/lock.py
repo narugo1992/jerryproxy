@@ -13,6 +13,10 @@ from filelock import FileLock, Timeout
 
 from .errors import JerryProxyBusyError
 
+# Explicit operation ownership must outlive a caller that drops its owner
+# after unsafe cleanup. Only __exit__, never garbage collection, releases it.
+_ACTIVE_OPERATIONS = set()
+
 _VERSION_PATTERN = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.post\d+)?$")
 
 
@@ -183,6 +187,7 @@ class JerryProxyOperationLock(object):
                 # Legacy Windows filelock removes its marker when the local
                 # stack releases after an exception from __enter__.
                 self._restore_marker_after_release()
+        _ACTIVE_OPERATIONS.add(self)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -192,4 +197,5 @@ class JerryProxyOperationLock(object):
             finally:
                 self._restore_marker_after_release()
             self._exit_stack = None
+        _ACTIVE_OPERATIONS.discard(self)
         return False
