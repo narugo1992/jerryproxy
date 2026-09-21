@@ -4,7 +4,12 @@ import hashlib
 
 import pytest
 
-from jerryproxy.errors import RuntimeSessionError
+from jerryproxy.errors import (
+    RuntimeSessionError,
+    SubscriptionFetchError,
+    SubscriptionStateError,
+    SubscriptionTransportError,
+)
 from jerryproxy.runtime import HealthSnapshot, LoadedNodes, MihomoDriver, RecoveryPolicy
 from jerryproxy.subscription.storage import build_record
 from jerryproxy.subscription.transport import parse_subscription_body
@@ -402,4 +407,111 @@ def test_unchanged_refreshed_content_cannot_change_backend_identity(tmp_path):
     session.driver = UnstableDriver()
     with pytest.raises(RuntimeSessionError, match="unchanged provider identity"):
         session.start("main", original.nodes[0].node_id, install_missing=False)
+    assert not session.session_root.exists()
+
+
+def test_transient_refresh_failure_keeps_cache_and_retries_nodes(tmp_path):
+    clock = Clock()
+    record = _record(nodes=1, source_url="https://example.invalid/sub")
+
+    class Unavailable(FakeSubscriptionManager):
+        def refresh(self, name, timeout=None):
+            self.refresh_calls += 1
+            assert timeout is not None and 0 < timeout <= 10
+            raise SubscriptionTransportError("temporarily unavailable", retry_after=600)
+
+    manager = Unavailable(record)
+    session = _session(tmp_path, record, Probe(lambda: clock.now >= 400), manager=manager,
+                       clock=clock, sleeper=clock.sleep,
+                       policy=RecoveryPolicy(retry_policy="fixed", recovery_deadline=10))
+    session.driver = ReloadingDriver()
+    try:
+        session.start("main", record.nodes[0].node_id, install_missing=False)
+        assert session.last_health.ok
+        assert session.subscription.revision == record.revision
+        assert manager.refresh_calls == 1
+    finally:
+        session.stop()
+
+
+def test_unclassified_refresh_error_stays_terminal(tmp_path):
+    clock = Clock()
+    record = _record(nodes=1, source_url="https://example.invalid/sub")
+
+    class Refused(FakeSubscriptionManager):
+        def refresh(self, name, timeout=None):
+            raise SubscriptionFetchError("TLS verification failed")
+
+    session = _session(tmp_path, record, Probe(lambda: False), manager=Refused(record),
+                       clock=clock, sleeper=clock.sleep, policy=RecoveryPolicy())
+    session.driver = ReloadingDriver()
+    with pytest.raises(SubscriptionFetchError, match="TLS"):
+        session.start("main", record.nodes[0].node_id, install_missing=False)
+    assert not session.session_root.exists()
+
+
+def test_healthy_stale_cache_refresh_failure_does_not_switch_or_stop(tmp_path):
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+
+    clock = Clock()
+    record = replace(_record(nodes=2, source_url="https://example.invalid/sub"),
+                     updated_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat())
+
+    class Unavailable(FakeSubscriptionManager):
+        def refresh(self, name, timeout=None):
+            self.refresh_calls += 1
+            raise SubscriptionTransportError("temporary")
+
+    manager = Unavailable(record)
+    session = _session(tmp_path, record, Probe(lambda: True), manager=manager,
+                       clock=clock, sleeper=clock.sleep, policy=RecoveryPolicy())
+    driver = ReloadingDriver()
+    session.driver = driver
+    try:
+        session.start("main", record.nodes[0].node_id, install_missing=False)
+        assert manager.refresh_calls == 1
+        assert session.node.node_id == record.nodes[0].node_id
+        assert driver.reloads == 0
+    finally:
+        session.stop()
+
+
+def test_refresh_backoff_is_independent_and_resets_after_success(tmp_path):
+    clock = Clock()
+    record = _record(nodes=1, source_url="https://example.invalid/sub")
+    times = []
+
+    class Refreshing(FakeSubscriptionManager):
+        def refresh(self, name, timeout=None):
+            times.append(clock.now)
+            if len(times) <= 2:
+                raise SubscriptionTransportError("temporary")
+            return self.record
+
+    session = _session(tmp_path, record, Probe(lambda: len(times) >= 4), manager=Refreshing(record),
+                       clock=clock, sleeper=clock.sleep, policy=RecoveryPolicy(retry_policy="fixed"))
+    session.driver = ReloadingDriver()
+    try:
+        session.start("main", record.nodes[0].node_id, install_missing=False)
+        assert len(times) == 4
+        assert 300 <= times[1] - times[0] <= 420
+        assert 600 <= times[2] - times[1] <= 720
+        assert 300 <= times[3] - times[2] <= 420
+    finally:
+        session.stop()
+
+
+@pytest.mark.parametrize("changes", [{"name": "other"}, {"subscription_id": "b" * 32}, {"enabled": False}])
+def test_refresh_cannot_replace_the_selected_subscription_scope(tmp_path, changes):
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+
+    record = replace(_record(nodes=1, source_url="https://example.invalid/sub"),
+                     updated_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat())
+    session = _session(tmp_path, record, Probe(lambda: True),
+                       manager=FakeSubscriptionManager(record, replace(record, **changes)))
+    session.driver = ReloadingDriver()
+    with pytest.raises(SubscriptionStateError, match="selected source"):
+        session.start("main", record.nodes[0].node_id, install_missing=False)
     assert not session.session_root.exists()

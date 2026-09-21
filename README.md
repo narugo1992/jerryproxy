@@ -504,9 +504,12 @@ subscription. Health checks default to 30 seconds, with a confirmation check
 3 seconds after a failure. The backend stays running while nodes are retried
 and hot-reloaded; each recovery round has its own budget and capped backoff.
 Healthy sessions keep their node, listener and credentials, and automatic
-recovery never rewrites the saved preference. Control, safety and currently
-unclassified subscription-fetch failures remain terminal while the persistent
-recovery implementation is being completed.
+recovery never rewrites the saved preference. Temporary subscription transport
+failures retain verified cache, with separate refresh backoff and Retry-After
+handling. Cache older than 12 hours requests refresh without disqualifying its
+nodes. Control, TLS, authentication, integrity and unclassified failures remain
+terminal. Cancellation, long-running resource bounds and CLI strategy controls
+are still being completed in this draft.
 
 Nodes are listed with the label their provider put in the URI fragment, so
 several endpoints of one protocol stay distinguishable. That fragment is

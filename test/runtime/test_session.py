@@ -92,7 +92,7 @@ class FakeSubscriptionManager(object):
     def list(self):
         return (self.record,)
 
-    def refresh(self, name):
+    def refresh(self, name, timeout=None):
         assert name == self.record.name
         self.refresh_calls += 1
         return self.refreshed or self.record

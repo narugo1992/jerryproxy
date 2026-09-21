@@ -52,7 +52,12 @@ Cache age requests a refresh but does not disqualify verified cached nodes.
 Temporary refresh failure preserves the last good revision. Successful refresh
 prunes removed identities and statistics; removing the fixed identity produces
 an actionable error. Refresh receives the remaining budget and respects its
-own minimum interval, backoff and server Retry-After.
+own minimum interval, backoff and server Retry-After. Retry-After is bounded
+to one day; malformed values are discarded. Refresh starts no more often than
+once per 300 seconds by default, doubles its delay after consecutive transport
+failures up to one hour, and resets after success. Mandatory worker cleanup has
+separate bounded stop intervals and must complete even after the network
+budget expires; inability to prove cleanup is terminal.
 
 Sanitized events expose starting, degraded, retrying, ready and stopped states,
 actual retry delays, skip reasons and current health. No event falsely reports

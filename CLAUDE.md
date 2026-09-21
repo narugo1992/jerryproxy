@@ -33,7 +33,9 @@ subscription state below `JERRYPROXY_HOME`, probes the global health quorum,
 keeps the backend running across connectivity failures, retries within the
 selected subscription, and hot-reloads alternate single-node providers without
 rewriting the saved preference. Recovery uses repeated bounded rounds; healthy
-sessions do not explore. Refresh transport classification, cancellation and
+sessions do not explore. Refresh retains verified cache on explicitly transient
+transport failures, propagates network budgets and observes independent backoff
+and Retry-After. Cancellation, lifecycle events, CLI strategy selection and
 long-run resource bounds remain active implementation work.
 Nodes are labelled from their URI fragment or provider name, depending on the
 container format. A stored node projection that no longer matches its source

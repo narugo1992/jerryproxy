@@ -21,6 +21,7 @@ from ..errors import (
     RuntimeSessionError,
     SubscriptionNodesMismatchError,
     SubscriptionStateError,
+    SubscriptionTransportError,
 )
 from ..home import is_path_alias
 from ..lock import JerryProxyOperationLock
@@ -180,6 +181,7 @@ class RuntimeSession(object):
         self._loaded_node = None
         self._loaded_identity = ()
         self._next_refresh_at = 0.0
+        self._refresh_failures = 0
 
     def _append_log_line(self, source, level, message):
         safe = terminal_safe_text(redact_text(" ".join(str(message).split())))[:4096]
@@ -254,11 +256,11 @@ class RuntimeSession(object):
         parser = getattr(self.subscription_manager, "parser", None) or MIHOMO_SUBSCRIPTION_PARSER
         _require_node_projection(record, parser)
 
-    def _locked_refresh(self, name):  # type: (str) -> object
+    def _locked_refresh(self, name, timeout=None):
         refresh_locked = getattr(self.subscription_manager, "_refresh_locked", None)
         if refresh_locked is None:
-            return self.subscription_manager.refresh(name)
-        return refresh_locked(name)
+            return self.subscription_manager.refresh(name, timeout=timeout)
+        return refresh_locked(name, timeout=timeout)
 
     def _locked_repair(self, name):  # type: (str) -> object
         """Repair one drifted projection through the already-held home lock."""
@@ -635,6 +637,7 @@ class RuntimeSession(object):
             startup_deadline = RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
             self._launch_node(self.node, deadline=startup_deadline)
             self._startup_health(startup_deadline)
+            self._refresh_subscription(startup_deadline)
             self._publish_access()
             self._next_health_at = self.clock() + self.recovery_policy.health_interval
             self._health_failures = 0
@@ -662,7 +665,7 @@ class RuntimeSession(object):
         return self
 
     def _is_stale(self, record=None):
-        """Return whether a stored record is too old for automatic failover."""
+        """Return whether cache age requests refresh, never node exclusion."""
 
         record = record or self.subscription
         if record is None:
@@ -670,6 +673,45 @@ class RuntimeSession(object):
         updated = _parse_timestamp(record.updated_at)
         age = max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
         return age >= self.recovery_policy.refresh_stale_seconds
+
+    def _refresh_subscription(self, deadline, force=False):
+        """Retain verified cache on transient fetch failure under the session lock."""
+
+        if (
+            not self.recovery_policy.refresh_on_failure or self.recovery_policy.retry_policy == "none"
+            or not self.subscription.source_url or self.clock() < self._next_refresh_at
+            or deadline.remaining() <= 0
+        ):
+            return
+        if not force and not self._is_stale():
+            return
+        interval = self.recovery_policy.refresh_interval
+        try:
+            refreshed = self._locked_refresh(self.subscription.name, timeout=min(30.0, deadline.remaining()))
+        except SubscriptionTransportError as error:
+            # Only the transport's closed transient verdict permits using cache.
+            self._refresh_failures = min(5, self._refresh_failures + 1)
+            delay = max(interval, min(3600.0, interval * 2 ** (self._refresh_failures - 1)), error.retry_after)
+            self._next_refresh_at = self.clock() + delay
+            self._log("WARN", "subscription refresh temporarily unavailable; keeping cache; retry after %.3fs" % delay)
+            return
+        if (
+            getattr(refreshed, "name", None) != self.subscription.name
+            or getattr(refreshed, "subscription_id", None) != self.subscription.subscription_id
+            or not getattr(refreshed, "enabled", False)
+        ):
+            raise SubscriptionStateError("refreshed subscription does not match the enabled selected source")
+        self._check_node_projection(refreshed)
+        node_ids = tuple(node.node_id for node in refreshed.iter_nodes())
+        if self.recovery_policy.retry_policy == "fixed" and self.preference_node_id not in node_ids:
+            raise RuntimeSessionError(
+                "fixed node was removed; run `jerryproxy node list %s` and select a current identity"
+                % self.subscription.name
+            )
+        self._schedule.update(node_ids)
+        self.subscription = refreshed
+        self._refresh_failures = 0
+        self._next_refresh_at = self.clock() + interval
 
     def _try_candidate(self, node, deadline):
         """Retain the child on outages; reload only a different opaque node."""
@@ -736,16 +778,7 @@ class RuntimeSession(object):
                 self._log("INFO", "retrying node %s" % candidate)
                 if self._try_candidate(nodes[candidate], deadline):
                     return
-            if (
-                self.recovery_policy.refresh_on_failure and self.subscription.source_url
-                and self.clock() >= self._next_refresh_at and deadline.remaining() > 0
-            ):
-                self._next_refresh_at = self.clock() + self.recovery_policy.refresh_interval
-                # Fetch errors remain terminal until transport explicitly classifies
-                # retryable failures; authentication and integrity are never swallowed.
-                refreshed = self._locked_refresh(self.subscription.name)
-                self._check_node_projection(refreshed)
-                self.subscription = refreshed
+            self._refresh_subscription(deadline, force=True)
             delay = self._backoff.failed(self.clock())
             pending_wait = self._schedule.wait_seconds(self.clock())
             self._log("WARN", "proxy remains unavailable; next retry in %.3f seconds" % delay)
@@ -796,6 +829,7 @@ class RuntimeSession(object):
                         )
                         self._health_failures = 0
                         self._backoff.healthy(self.clock())
+                        self._refresh_subscription(RecoveryDeadline(30.0, clock=self.clock))
                     else:
                         self._health_failures += 1
                         if self._health_failures >= 2:

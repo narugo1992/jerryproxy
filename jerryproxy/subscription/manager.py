@@ -2,6 +2,7 @@
 
 import base64
 import json
+import math
 import multiprocessing
 import os
 import secrets
@@ -18,6 +19,7 @@ from ..errors import (
     SubscriptionNodesMismatchError,
     SubscriptionParseError,
     SubscriptionStateError,
+    SubscriptionTransportError,
 )
 from ..lock import JerryProxyOperationLock
 from .interfaces import SubscriptionParser
@@ -165,6 +167,10 @@ def _fetch_worker(url, result_path, allow_http, format_hint, start_gate, cancel_
     try:
         fetched = fetch_subscription(url, allow_http=allow_http)
         MIHOMO_SUBSCRIPTION_PARSER.parse(fetched.body, format_hint=format_hint)
+    except SubscriptionTransportError as error:
+        # Preserve only the closed retry verdict, never remote exception text.
+        _write_fetch_result(result_path, {"error": "transport", "ok": False, "retry_after": error.retry_after})
+        return
     except (SubscriptionFetchError, SubscriptionParseError, SubscriptionStateError, ValueError):
         # Transport failures are represented without carrying remote details.
         _write_fetch_result(result_path, {"error": "subscription source fetch failed", "ok": False})
@@ -211,6 +217,16 @@ def _read_fetch_result(path):  # type: (str) -> object
         # A malformed worker envelope is an integrity failure at the boundary.
         raise SubscriptionFetchError("subscription worker result is invalid") from error
     if not isinstance(value, dict) or value.get("ok") is not True or set(value) != {"body", "final_url", "ok"}:
+        if (
+            isinstance(value, dict) and set(value) == {"ok", "error", "retry_after"}
+            and value["ok"] is False and value["error"] == "transport"
+        ):
+            try:
+                failure = SubscriptionTransportError("subscription source transport failed", value["retry_after"])
+            except ValueError as error:
+                # Retry metadata is private IPC input and must satisfy its bound.
+                raise SubscriptionFetchError("subscription worker retry result is invalid") from error
+            raise failure
         if isinstance(value, dict) and value == {"error": "subscription source fetch failed", "ok": False}:
             raise SubscriptionFetchError("subscription source fetch failed")
         raise SubscriptionFetchError("subscription worker result is invalid")
@@ -251,7 +267,13 @@ class SubscriptionManager(object):
     def get(self, name):  # type: (str) -> SubscriptionRecord
         return self.store.get(name)
 
-    def _fetch_remote(self, source_url, allow_http, format_hint):  # type: (str, bool, str) -> object
+    def _fetch_remote(self, source_url, allow_http, format_hint, timeout=None):
+        if timeout is not None and (
+            not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+            or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise ValueError("subscription fetch timeout must be finite and positive")
+        budget = _FETCH_WALL_SECONDS if timeout is None else min(_FETCH_WALL_SECONDS, timeout)
         # Injected sessions and monkeypatched transports are deterministic test
         # boundaries; production's default transport runs in a spawned worker.
         if (
@@ -259,7 +281,8 @@ class SubscriptionManager(object):
             or fetch_subscription is not _DEFAULT_FETCH_SUBSCRIPTION
             or self.parser is not MIHOMO_SUBSCRIPTION_PARSER
         ):
-            return fetch_subscription(source_url, session=self.session, allow_http=allow_http)
+            return fetch_subscription(source_url, session=self.session, allow_http=allow_http,
+                                      timeout=(min(5.0, budget), min(10.0, budget)))
         runtime_root = self.paths.runtimes
         # Worker artifacts are managed state; reject symlink/reparse aliases
         # before creating or traversing the runtime namespace.
@@ -270,7 +293,7 @@ class SubscriptionManager(object):
         operation_error = None
         startup_thread = None
         startup_done = None
-        deadline = time.monotonic() + _FETCH_WALL_SECONDS
+        deadline = time.monotonic() + budget
         cancel_gate = None
         preserve_worker_tree = False
         try:
@@ -315,10 +338,13 @@ class SubscriptionManager(object):
             start_gate.set()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise SubscriptionFetchError("subscription source worker deadline exhausted")
+                raise SubscriptionTransportError("subscription source worker deadline exhausted")
             process.join(remaining)
+            timed_out = _fetch_process_alive(process)
             if not _stop_fetch_process(process):
                 raise SubscriptionFetchError("subscription source worker could not be stopped")
+            if timed_out:
+                raise SubscriptionTransportError("subscription source worker deadline exhausted")
             if process.exitcode != 0:
                 raise SubscriptionFetchError("subscription source worker failed")
             body, final_url = _read_fetch_result(result_path)
@@ -386,7 +412,7 @@ class SubscriptionManager(object):
                     % cleanup_error
                 ) from operation_error
 
-    def _source_body(self, source_url, body, format_hint, allow_http):
+    def _source_body(self, source_url, body, format_hint, allow_http, fetch_timeout=None):
         if source_url is not None and body is not None:
             raise SubscriptionStateError("subscription source URL and body are mutually exclusive")
         if allow_http:
@@ -395,7 +421,7 @@ class SubscriptionManager(object):
             if not source_url:
                 raise SubscriptionStateError("subscription source is required")
             source_url = validate_source_url(source_url, allow_http=allow_http)
-            fetched = self._fetch_remote(source_url, allow_http, format_hint)
+            fetched = self._fetch_remote(source_url, allow_http, format_hint, timeout=fetch_timeout)
             return fetched.body, fetched.final_url, format_hint
         if not isinstance(body, bytes):
             raise TypeError("subscription body must be bytes")
@@ -440,7 +466,9 @@ class SubscriptionManager(object):
         with JerryProxyOperationLock(self.paths):
             return self._replace_locked(name, source_url, body, format_hint, allow_http)
 
-    def _replace_locked(self, name, source_url=None, body=None, format_hint="auto", allow_http=False):
+    def _replace_locked(
+        self, name, source_url=None, body=None, format_hint="auto", allow_http=False, fetch_timeout=None,
+    ):
         validate_subscription_name(name)
         # Replacement discards the stored projection entirely and rebuilds it
         # from freshly parsed bytes, so it is the repair path for a drifted
@@ -448,7 +476,7 @@ class SubscriptionManager(object):
         previous = self.store._get_locked(name, allow_node_mismatch=True)
         body_source = body is not None
         body, source_url, format_hint = self._source_body(
-            source_url, body, format_hint, allow_http
+            source_url, body, format_hint, allow_http, fetch_timeout=fetch_timeout
         )
         parsed = self.parser.parse(body, format_hint)
         current_ids = {
@@ -469,19 +497,21 @@ class SubscriptionManager(object):
         )
         return self.store._publish_locked(record, replace=True, expected_revision=previous.revision)
 
-    def refresh(self, name):  # type: (str) -> SubscriptionRecord
+    def refresh(self, name, timeout=None):
         """Refresh the exact persisted URL and preserve the last good record on failure.
 
         Refreshing is also the repair for a record whose stored node projection
         no longer matches its source bytes: the saved URL is fetched again and
         the projection is rebuilt, so the drifted generation is replaced rather
         than trusted.  A failed refresh leaves the previous generation intact.
+        ``timeout`` limits the network worker's wall budget; supervised cleanup
+        remains mandatory and has its own bounded stop intervals.
         """
 
         with JerryProxyOperationLock(self.paths):
-            return self._refresh_locked(name)
+            return self._refresh_locked(name, timeout=timeout)
 
-    def _refresh_locked(self, name):  # type: (str) -> SubscriptionRecord
+    def _refresh_locked(self, name, timeout=None):
         # Only the saved source URL is carried forward; the drifted projection
         # is discarded and rebuilt by the replacement below.
         previous = self.store._get_locked(name, allow_node_mismatch=True)
@@ -490,7 +520,7 @@ class SubscriptionManager(object):
                 "subscription has no remote source URL: %s; "
                 "run `jerryproxy subscription replace %s` to supply the source again" % (name, name)
             )
-        return self._replace_locked(name, source_url=previous.source_url, format_hint="auto")
+        return self._replace_locked(name, source_url=previous.source_url, format_hint="auto", fetch_timeout=timeout)
 
     def repair_node_projection(self, name):  # type: (str) -> SubscriptionRecord
         """Return one record, rebuilding a drifted node projection once.
