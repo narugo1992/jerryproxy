@@ -228,3 +228,54 @@ def test_lifecycle_output_reports_recovery_at_error_log_level(tmp_path, monkeypa
         assert "session.degraded" in result.output
         assert "session.ready" in result.output
         assert "session.stopped" in result.output
+
+
+@pytest.mark.parametrize("guided", [False, True])
+@pytest.mark.parametrize("override", [False, True])
+def test_fast_recovery_defaults_and_overrides_match_both_entry_modes(tmp_path, monkeypatch, runtime, guided, override):
+    monkeypatch.setattr(common, "interactive_available", lambda: True)
+    monkeypatch.setattr(common, "select_subscription", lambda *args, **kwargs: "main")
+    monkeypatch.setattr(common, "select_subscription_node", lambda *args: "a" * 32)
+    questions = []
+
+    def select(message, choices):
+        questions.append(message)
+        return "fallback"
+
+    monkeypatch.setattr(common, "select", select)
+    options = ["--home", str(tmp_path), "server", "--no-install-missing", "--protocol", "http", "--port", "17777"]
+    if not guided:
+        options += ["--subscription", "main", "--node", "a" * 32]
+    if override:
+        options += ["--fast-probe-timeout", "4", "--cache-retry-budget", "8",
+                    "--refresh-timeout", "15", "--refresh-interval", "90"]
+    result = CliRunner().invoke(cli, options)
+    assert result.exit_code == 0, result.output
+    policy = runtime["recovery_policy"]
+    assert (policy.fast_probe_timeout, policy.cache_retry_budget, policy.refresh_timeout,
+            policy.refresh_interval) == ((4, 8, 15, 90) if override else (3, 6, 10, 60))
+    assert questions == (["Select an outage recovery policy:"] if guided else [])
+
+
+@pytest.mark.parametrize("option,invalid", [
+    ("--fast-probe-timeout", "0"), ("--fast-probe-timeout", "11"),
+    ("--cache-retry-budget", "0"), ("--cache-retry-budget", "121"),
+    ("--refresh-timeout", "0"), ("--refresh-timeout", "31"),
+    ("--refresh-interval", "9"), ("--refresh-interval", "3601"),
+])
+def test_invalid_timing_option_never_starts_selection(tmp_path, runtime, option, invalid):
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "server", option, invalid])
+    assert result.exit_code == 2
+    assert option in result.output and "range" in result.output
+    assert not runtime
+
+
+@pytest.mark.parametrize("width", [72, 80, 100, 120])
+def test_rendered_help_exposes_fast_defaults_without_extra_mode(width):
+    result = CliRunner().invoke(cli, ["server", "--help"], terminal_width=width)
+    assert result.exit_code == 0
+    for name, default in [("fast-probe-timeout", 3), ("cache-retry-budget", 6),
+                          ("refresh-timeout", 10), ("refresh-interval", 60)]:
+        section = result.output.split("--" + name, 1)[1].split("\n  --", 1)[0]
+        assert "default: %d" % default in " ".join(section.split())
+    assert max(map(len, result.output.splitlines())) <= width

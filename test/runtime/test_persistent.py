@@ -495,9 +495,9 @@ def test_refresh_backoff_is_independent_and_resets_after_success(tmp_path):
     try:
         session.start("main", record.nodes[0].node_id, install_missing=False)
         assert len(times) == 4
-        assert 300 <= times[1] - times[0] <= 420
-        assert 600 <= times[2] - times[1] <= 720
-        assert 300 <= times[3] - times[2] <= 420
+        assert 60 <= times[1] - times[0] <= 180
+        assert 120 <= times[2] - times[1] <= 240
+        assert 60 <= times[3] - times[2] <= 180
     finally:
         session.stop()
 

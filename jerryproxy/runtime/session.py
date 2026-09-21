@@ -769,7 +769,7 @@ class RuntimeSession(object):
         self._next_refresh_at = self.clock() + interval
         self._event("refresh", "refresh_unchanged" if refreshed.body == previous_body else "refresh_updated")
 
-    def _try_candidate(self, node, deadline):
+    def _try_candidate(self, node, deadline, probe_timeout=None):
         """Retain the child on outages; reload only a different opaque node."""
 
         if self.process is None or self.process.process.poll() is not None:
@@ -802,6 +802,8 @@ class RuntimeSession(object):
             self._provider_digest = digest
             self._loaded_node = node
             self._log("INFO", "backend accepted node %s and routes through it" % node.node_id)
+        if probe_timeout is not None:
+            deadline = RecoveryDeadline(min(probe_timeout, deadline.remaining()), clock=self.clock)
         snapshot = self._check_health(deadline=deadline)
         self._schedule.record(node.node_id, snapshot.ok, self.clock())
         if snapshot.ok:
@@ -810,6 +812,15 @@ class RuntimeSession(object):
             return True
         return False
 
+    def _refresh_for_recovery(self):
+        """Give discovery its own budget and report an actual source change."""
+
+        previous_body = self.subscription.body
+        self._refresh_subscription(
+            RecoveryDeadline(self.recovery_policy.refresh_timeout, clock=self.clock), force=True,
+        )
+        return self.subscription.body != previous_body
+
     def _recover(self):
         """Repeat bounded rounds until connectivity returns or a fatal error occurs."""
 
@@ -817,22 +828,39 @@ class RuntimeSession(object):
         if self.recovery_policy.retry_policy == "none":
             raise RuntimeSessionError("proxy connectivity failed; retry policy is none")
         self._schedule.begin_sweep()
+        fast = True
+        refresh_at = self.clock() + self.recovery_policy.cache_retry_budget
         while True:
             self._rounds = min(self._rounds + 1, 2 ** 63 - 1)
             deadline = RecoveryDeadline(self.recovery_policy.recovery_deadline, clock=self.clock)
             nodes = {node.node_id: node for node in self.subscription.iter_nodes()}
             self._schedule.update(nodes)
             exhausted = False
+            updated = False
             while deadline.remaining() > 0:
+                if self.clock() >= refresh_at:
+                    if self._refresh_for_recovery():
+                        fast = True
+                        updated = True
+                    refresh_at = self.clock() + self.recovery_policy.refresh_interval
+                    nodes = {node.node_id: node for node in self.subscription.iter_nodes()}
+                    self._schedule.update(nodes)
+                    if deadline.remaining() <= 0:
+                        break
                 candidate = self._schedule.next(self.node.node_id, self.clock())
                 if candidate is None:
                     exhausted = True
                     break
                 self._attempts = min(self._attempts + 1, 2 ** 63 - 1)
                 self._event("retrying", "candidate", candidate=candidate)
-                if self._try_candidate(nodes[candidate], deadline):
+                probe_timeout = self.recovery_policy.fast_probe_timeout if fast else None
+                if self._try_candidate(nodes[candidate], deadline, probe_timeout=probe_timeout):
                     return
-            self._refresh_subscription(deadline, force=True)
+            if self._refresh_for_recovery() or updated:
+                self._schedule.begin_sweep()
+                fast = True
+                refresh_at = self.clock() + self.recovery_policy.refresh_interval
+                continue
             delay = self._backoff.failed(self.clock())
             pending_wait = self._schedule.wait_seconds(self.clock())
             reason = ("candidates_cooling" if pending_wait > 0 else
@@ -842,6 +870,7 @@ class RuntimeSession(object):
             self.sleeper(delay)
             if exhausted and pending_wait <= 0:
                 self._schedule.begin_sweep()
+                fast = False
 
     def public_info(self):  # type: () -> dict
         """Return the noncredential session envelope for human/JSON output."""

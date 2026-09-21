@@ -122,6 +122,13 @@ selected subscription. Healthy sessions never automatically fail back.
 stages with positive counts or all; current permits only current:1.
 The default chain is current:1,adaptive:3,random:all.
 
+Defaults target up to 20 nodes: first-sweep probes allow 3 seconds, and
+after 6 seconds on cached nodes a between-attempt check gives refresh its
+own 10-second budget. Later sweeps allow normal probe timeouts. Refreshes
+are at least 60 seconds apart; failures and Retry-After can defer them further.
+Advanced timing options apply equally to complete and guided commands, without
+extra guided questions. These budgets do not guarantee a working upstream.
+
 When the stored nodes no longer match their source bytes, startup refreshes
 that subscription's saved URL exactly once and then continues; a projection
 that is still inconsistent, a subscription with no saved URL, or a failed
@@ -279,6 +286,22 @@ that guide only when `--auth` is enabled.
     help="Budget per retry round; exhaustion starts another round after backoff.",
 )
 @click.option(
+    "--fast-probe-timeout", type=click.IntRange(1, 10), default=3, show_default=True,
+    help="Seconds per first-sweep health probe; later sweeps allow normal timeouts.",
+)
+@click.option(
+    "--cache-retry-budget", type=click.IntRange(1, 120), default=6, show_default=True,
+    help="Seconds before checking for a subscription refresh between candidates.",
+)
+@click.option(
+    "--refresh-timeout", type=click.IntRange(1, 30), default=10, show_default=True,
+    help="Independent seconds per recovery subscription fetch.",
+)
+@click.option(
+    "--refresh-interval", type=click.IntRange(10, 3600), default=60, show_default=True,
+    help="Minimum seconds between subscription fetches; failures back off further.",
+)
+@click.option(
     "--refresh-on-recovery/--no-refresh-on-recovery",
     default=True,
     show_default=True,
@@ -307,6 +330,10 @@ def server_command(
     retry_chain,
     health_interval,
     recovery_deadline,
+    fast_probe_timeout,
+    cache_retry_budget,
+    refresh_timeout,
+    refresh_interval,
     refresh_on_recovery,
     yes,
 ):
@@ -326,6 +353,8 @@ def server_command(
         policy = RecoveryPolicy(
             retry_policy=retry_policy, retry_chain=retry_chain, health_interval=health_interval,
             recovery_deadline=recovery_deadline, refresh_on_failure=refresh_on_recovery,
+            fast_probe_timeout=fast_probe_timeout, cache_retry_budget=cache_retry_budget,
+            refresh_timeout=refresh_timeout, refresh_interval=refresh_interval,
         )
     except ValueError as error:
         # User-supplied closed policy syntax must fail before selection or I/O.
@@ -379,6 +408,8 @@ def server_command(
         policy = RecoveryPolicy(
             retry_policy=retry_policy, health_interval=health_interval,
             recovery_deadline=recovery_deadline, refresh_on_failure=refresh_on_recovery,
+            fast_probe_timeout=fast_probe_timeout, cache_retry_budget=cache_retry_budget,
+            refresh_timeout=refresh_timeout, refresh_interval=refresh_interval,
         )
     strict_port = port is not None
     bind_address = "0.0.0.0" if bind_all else "127.0.0.1"

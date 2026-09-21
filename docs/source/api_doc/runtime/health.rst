@@ -52,7 +52,7 @@ RecoveryPolicy
 -----------------------------------------------------
 
 .. autoclass:: RecoveryPolicy
-   :members: retry_policy,retry_chain,confirmation_delay,refresh_interval,health_interval,recovery_deadline,refresh_on_failure,refresh_stale_seconds,__post_init__
+   :members: retry_policy,retry_chain,confirmation_delay,refresh_interval,fast_probe_timeout,cache_retry_budget,refresh_timeout,health_interval,recovery_deadline,refresh_on_failure,refresh_stale_seconds,__post_init__
 
 
 RecoveryDeadline

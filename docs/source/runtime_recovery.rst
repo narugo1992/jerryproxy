@@ -19,6 +19,62 @@ have no session lifetime limit. Each probe, reload, refresh, cleanup and retry
 round remains bounded. A round deadline preserves pending candidates rather
 than repeatedly starving the tail of a large subscription.
 
+Fast recovery defaults
+----------------------
+
+For subscriptions with up to 20 nodes, the first recovery sweep uses a
+three-second health budget per candidate. After six seconds on cached
+candidates, the next between-attempt check gives a source refresh an
+independent ten-second budget. An in-flight bounded reload/probe completes
+before this check; six seconds is a scheduling threshold, not a hard wall.
+Refresh is checked between attempts and rounds, never only against the
+remaining round budget. Its default minimum interval is 60 seconds, with
+transport backoff and Retry-After still enforced. Changed source content is
+eligible immediately without an extra round backoff. An exhausted fast sweep
+falls back to normal probe budgets so slow usable nodes are not excluded.
+Healthy sessions retain the existing check interval and never explore.
+
+These defaults target fast restoration rather than an optimal-node search.
+Verification compares 1, 5, 10 and 20-node replacement and partial-outage
+scenarios, including slow usable nodes, unchanged/failed refresh, deadline
+exhaustion and CLI/guided default and override parity. Simulated timing is
+not a public-network latency guarantee. Safety and cleanup remain terminal
+boundaries. Advanced timing options must not add guided questions.
+
+``--fast-probe-timeout`` (3), ``--cache-retry-budget`` (6),
+``--refresh-timeout`` (10) and ``--refresh-interval`` (60) are advanced
+overrides in seconds. Both complete commands and guided selection use these
+defaults without extra prompts. An unchanged or temporarily unavailable
+subscription keeps the existing pool and bounded retry cadence. A recent
+refresh can defer the next fetch; server Retry-After can defer it further.
+These are not restoration-time guarantees.
+
+Default selection evidence
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A deterministic comparison used the real session scheduler/private provider
+publication with injected network time: 1/5/10/20 nodes, five ordering seeds,
+one working node, two-second fetches, and 1/3/5/8-second successful probes.
+The reference replayed the recovery loop at ``7f40af8`` with its 300-second
+refresh interval. Controller and process latency were not simulated; results
+start at confirmed recovery, excluding failure detection.
+
+For complete replacement with a one-second working node, the 3-second default
+reduced sample P95 from 405 to 42 simulated seconds (maximum 54). For partial
+failure with a three-second working node, sample P95 was 35 seconds, versus
+223 with a two-second fast budget and 55 with a five-second fast budget.
+Three seconds is the smallest compared budget that accepts this moderately
+slow route on the first sweep. It is a workload choice, not a universal optimum.
+For five-second working nodes the fast sweep adds work: sample P95 was 245
+seconds versus 105 in the reference. Normal-budget retries preserve recovery
+in this case; users of consistently slow routes can increase the fast budget.
+
+``test/runtime/test_fast_recovery.py`` pins the default first-sweep bound for
+1--20 nodes with 1/3-second successful probes over five seeds, prompt complete
+replacement, independent refresh even at round exhaustion, throttling and
+normal-budget fallback. These model checks supplement the real protocol
+data-plane suite; they do not replace it or imply public-network percentiles.
+
 Selection policies
 ------------------
 
@@ -60,10 +116,10 @@ boundary. Confirmed child exit must not be confused with inability to stop a chi
 Cache age requests a refresh but does not disqualify verified cached nodes.
 Temporary refresh failure preserves the last good revision. Successful refresh
 prunes removed identities and statistics; removing the fixed identity produces
-an actionable error. Refresh receives the remaining budget and respects its
+an actionable error. Recovery refresh receives an independent budget and respects its
 own minimum interval, backoff and server Retry-After. Retry-After is bounded
 to one day; malformed values are discarded. Refresh starts no more often than
-once per 300 seconds by default, doubles its delay after consecutive transport
+once per 60 seconds by default, doubles its delay after consecutive transport
 failures up to one hour, and resets after success. Mandatory worker cleanup has
 separate bounded stop intervals and must complete even after the network
 budget expires; inability to prove cleanup is terminal. A standalone

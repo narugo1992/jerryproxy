@@ -532,6 +532,21 @@ require `fallback`. `none` stops on confirmed failure and disables refresh;
 without replacement; `adaptive` uses aging session-local successes with
 recovery-only exploration. Human and JSONL startup report the chosen policy.
 
+Defaults target subscriptions with up to 20 nodes. Recovery first uses short
+3-second health probes, then normal budgets after the fast sweep is exhausted
+so slow usable nodes remain eligible. After 6 seconds spent trying cached
+nodes, the next between-attempt check gives subscription refresh its own
+10-second budget; a large old pool cannot consume that fetch budget. Refresh
+starts at most once per 60 seconds by default, with additional transport
+backoff and Retry-After handling. Changed content is tried without an extra
+round backoff. An in-flight bounded attempt finishes before the refresh check;
+these timings are not a guarantee that an available route exists.
+
+Advanced overrides are `--fast-probe-timeout 3`, `--cache-retry-budget 6`,
+`--refresh-timeout 10` and `--refresh-interval 60` (all seconds). Complete
+commands and guided selection share these defaults and overrides. The guided
+flow adds no timing questions; choosing the recommended policy is sufficient.
+
 ```shell
 jerryproxy server --subscription main --node NODE_ID --retry-policy fixed
 jerryproxy server --subscription main --node NODE_ID --retry-policy fallback \

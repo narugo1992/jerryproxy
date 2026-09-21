@@ -316,7 +316,10 @@ class RecoveryPolicy(object):
     retry_policy: str = "fallback"
     retry_chain: str = None
     confirmation_delay: float = 3.0
-    refresh_interval: float = 300.0
+    refresh_interval: float = 60.0
+    fast_probe_timeout: float = 3.0
+    cache_retry_budget: float = 6.0
+    refresh_timeout: float = 10.0
     health_interval: float = 30.0
     recovery_deadline: float = 120.0
     refresh_on_failure: bool = True
@@ -332,6 +335,7 @@ class RecoveryPolicy(object):
         durations = (
             self.confirmation_delay, self.refresh_interval, self.health_interval,
             self.recovery_deadline, self.refresh_stale_seconds,
+            self.fast_probe_timeout, self.cache_retry_budget, self.refresh_timeout,
         )
         if any(
             not isinstance(value, (int, float)) or isinstance(value, bool)
