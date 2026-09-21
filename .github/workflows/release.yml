@@ -186,9 +186,21 @@ jobs:
           set -euo pipefail
           # `--verify-tag` refuses to invent a tag, so a mistyped ref fails here
           # instead of creating a release that points at nothing.
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" \
-            --verify-tag \
-            --generate-notes \
-            assets/*
+          git rev-parse --verify "refs/tags/$TAG"
+          draft="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,isDraft | jq -r --arg tag "$TAG" \
+            '.[] | select(.tagName == $tag) | .isDraft')"
+          if [ "$draft" = "true" ]; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" assets/*
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          elif [ -n "$draft" ]; then
+            echo "::error::release is already published"
+            exit 1
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --verify-tag \
+              --generate-notes \
+              assets/*
+          fi
