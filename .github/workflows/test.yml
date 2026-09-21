@@ -46,6 +46,8 @@ jobs:
       - run: python -m pip install "pip<24.1"
       - run: python -m pip install -e . -r requirements-dev.txt -r requirements-test.txt
       - run: make lint
+      - name: Validate catalog maintenance and review matching
+        run: make catalog_check
       - name: Validate the data-plane fixture invariants
         # These guards are the only thing keeping the sentinel unreachable and
         # the fixture credentials redactable. Defining them without running

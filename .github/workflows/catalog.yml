@@ -15,7 +15,49 @@ permissions:
   pull-requests: write
 
 jobs:
+  pending:
+    name: Reuse an open catalog review
+    runs-on: ubuntu-22.04
+    outputs:
+      number: ${{ steps.find.outputs.number }}
+    steps:
+      # One pending review blocks new refresh branches. Recognize legacy bot
+      # reviews too; the newest one contains the accumulated catalog updates.
+      - name: Find an open catalog pull request
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          number="$(gh pr list --state open --base main --limit 1000 \
+            --json number,title,body,headRefName,author | jq -r '
+            [.[] | select(
+              (.title == "chore(catalog): refresh backend release catalogs" and
+               (.body | contains("<!-- jerryproxy:backend-catalog-refresh -->"))) or
+              (.title == "chore: refresh backend catalogs" and
+               (.headRefName | startswith("automation/backend-catalog-")) and
+               .author.login == "app/github-actions")
+            )] | sort_by(.number) | last | .number // empty')"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+      - name: Remind the existing review
+        if: steps.find.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.find.outputs.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/catalog-comment.md" <<EOF
+          Scheduled catalog maintenance found this review still open. No new branch or pull request was created, and this branch was not updated. After this review is merged or closed, the next scheduled or manual run will refresh catalogs from main.
+
+          Maintenance run: $RUN_URL
+          EOF
+          gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/catalog-comment.md"
   update:
+    needs: pending
+    if: needs.pending.outputs.number == ''
     name: Refresh stable backend catalogs
     runs-on: ubuntu-22.04
     timeout-minutes: 45
@@ -89,12 +131,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.publish.outputs.branch }}
         shell: bash
-        run: >-
-          gh pr create
-          --base main
-          --head "$BRANCH"
-          --title "chore: refresh backend catalogs"
-          --body "Automated stable-release catalog refresh. Merge only after the dispatched validation workflows pass and a narugo1992 maintainer reviews the upstream changes."
+        run: |
+          cat > "$RUNNER_TEMP/catalog-pr.md" <<'EOF'
+          <!-- jerryproxy:backend-catalog-refresh -->
+
+          Automated stable-release catalog refresh. Merge only after the dispatched validation workflows pass and a narugo1992 maintainer reviews the upstream changes.
+          EOF
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(catalog): refresh backend release catalogs" \
+            --body-file "$RUNNER_TEMP/catalog-pr.md"
       - name: Dispatch branch validation
         if: steps.changes.outputs.changed == 'true'
         env:
