@@ -191,6 +191,7 @@ def test_reload_rejects_invalid_budgets_without_network(timeout):
 @pytest.mark.parametrize("payload, message", [
     (b"[]", "not a JSON object"),
     (b"\xff", "not valid JSON"),
+    (b'{"nested":' + b"[" * 10000 + b"0" + b"]" * 10000 + b"}", "not valid JSON"),
 ])
 def test_inventory_rejects_nonobject_and_invalid_utf8(controller, monkeypatch, payload, message):
     monkeypatch.setattr(_Controller, "documents", {"/providers/proxies/jerryproxy": payload})
@@ -246,3 +247,67 @@ def test_provider_cannot_disguise_a_bypass_with_a_reserved_name(controller, monk
     loaded = MihomoDriver().loaded_nodes(controller, _Controller.secret, 1.0)
     assert loaded.accepted == (name,)
     assert loaded.bypassing
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_slow_trickle_cannot_extend_control_wall_budget(phase):
+    import time
+
+    class Trickle(_Controller):
+        def do_GET(self):  # noqa: N802 - required handler name
+            body = b" " * 100 + b"{}"
+            headers = b"HTTP/1.0 200 OK\r\nContent-Length: 102\r\n\r\n"
+            try:
+                if phase == "body":
+                    self.connection.sendall(headers)
+                for byte in (headers if phase == "headers" else body):
+                    self.connection.sendall(bytes([byte]))
+                    time.sleep(0.03)
+            except OSError:
+                # The client must close the socket when its wall budget expires.
+                pass
+
+    server = HTTPServer(("127.0.0.1", 0), Trickle)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(RuntimeSessionError):
+            MihomoDriver().loaded_nodes(server.server_port, "secret", 0.15)
+        assert time.monotonic() - started < 1.0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("boundary", ["connect", "read", "complete"])
+def test_control_deadline_checks_elapsed_time_at_each_io_boundary(controller, monkeypatch, boundary):
+    from types import SimpleNamespace
+
+    from jerryproxy.runtime import mihomo
+
+    now = [0.0]
+    monkeypatch.setattr(mihomo, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    if boundary == "connect":
+        original = mihomo.HTTPConnection.connect
+
+        def connect(connection):
+            original(connection)
+            now[0] = 2.0
+
+        monkeypatch.setattr(mihomo.HTTPConnection, "connect", connect)
+    else:
+        original = mihomo.HTTPResponse.begin
+
+        def begin(response):
+            if boundary == "read":
+                now[0] = 2.0
+            original(response)
+            now[0] = 2.0
+
+        monkeypatch.setattr(mihomo.HTTPResponse, "begin", begin)
+    monkeypatch.setattr(_Controller, "reload_status", 204)
+    message = "deadline exhausted" if boundary == "complete" else "unreachable"
+    with pytest.raises(RuntimeSessionError, match=message):
+        MihomoDriver().reload_provider(controller, _Controller.secret, 1.0)

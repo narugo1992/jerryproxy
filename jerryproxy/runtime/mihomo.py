@@ -1,6 +1,7 @@
 """Mihomo 1.19.29 foreground projection for an opaque NodeSet."""
 
 import base64
+import io
 import json
 import math
 import os
@@ -13,7 +14,7 @@ import sys
 import tempfile
 import threading
 import time
-from http.client import HTTPConnection, HTTPException
+from http.client import HTTPConnection, HTTPException, HTTPResponse
 from pathlib import Path
 
 from ..backend.durable import flush_directory
@@ -166,8 +167,40 @@ def _control_request(port, secret, path, timeout, method="GET"):
         or not math.isfinite(timeout) or timeout <= 0
     ):
         raise ValueError("control timeout must be finite and positive")
+    deadline = time.monotonic() + timeout
     connection = HTTPConnection("127.0.0.1", port, timeout=timeout)
+    def response_factory(transport, **options):
+        response = HTTPResponse(transport, **options)
+        raw = response.fp.detach()
+
+        class DeadlineReader(io.RawIOBase):
+            def readable(self):
+                return True
+
+            def readinto(self, buffer):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("control response deadline exhausted")
+                transport.settimeout(remaining)
+                return raw.readinto(buffer)
+
+            def close(self):
+                try:
+                    raw.close()
+                finally:
+                    super(DeadlineReader, self).close()
+
+        response.fp = io.BufferedReader(DeadlineReader())
+        return response
+
+    connection.response_class = response_factory
+    response = None
     try:
+        connection.connect()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("control connection deadline exhausted")
+        connection.sock.settimeout(remaining)
         connection.request(method, path, headers={"Authorization": "Bearer %s" % secret})
         response = connection.getresponse()
         expected = 204 if method == "PUT" else 200
@@ -175,19 +208,21 @@ def _control_request(port, secret, path, timeout, method="GET"):
             raise RuntimeSessionError(
                 "mihomo control endpoint answered %d for %s" % (response.status, method)
             )
-        if method == "PUT":
-            return {}
-        payload = response.read(_MAXIMUM_CONTROL_BYTES + 1)
+        payload = b"{}" if method == "PUT" else response.read(_MAXIMUM_CONTROL_BYTES + 1)
     except (OSError, HTTPException) as error:
         # A private loopback endpoint that cannot be reached is a startup fault.
         raise RuntimeSessionError("mihomo control endpoint is unreachable") from error
     finally:
+        if response is not None:
+            response.close()
         connection.close()
+    if time.monotonic() >= deadline:
+        raise RuntimeSessionError("mihomo control request deadline exhausted")
     if len(payload) > _MAXIMUM_CONTROL_BYTES:
         raise RuntimeSessionError("mihomo control response exceeded its bound")
     try:
         document = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         # Malformed control output is a fault, never a silent pass.
         raise RuntimeSessionError("mihomo control response was not valid JSON") from error
     if not isinstance(document, dict):
