@@ -17,11 +17,11 @@ LoadedNodes
 -----------------------------------------------------
 
 .. autoclass:: LoadedNodes
-   :members: accepted,selected,bypassing
+   :members: accepted,selected,bypassing,identities
 
 
 RuntimeDriver
 -----------------------------------------------------
 
 .. autoclass:: RuntimeDriver
-   :members: name,projection,loaded_nodes,create_process,wait_ready,stop
+   :members: name,projection,loaded_nodes,reload_provider,create_process,wait_ready,stop

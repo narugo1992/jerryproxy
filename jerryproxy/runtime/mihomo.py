@@ -2,7 +2,9 @@
 
 import base64
 import json
+import math
 import os
+import re
 import signal
 import socket
 import stat
@@ -144,8 +146,9 @@ def _splice_before(lines, marker, addition):  # type: (list, str, list) -> None
     lines[index:index] = addition
 
 
-def _control_request(port, secret, path, timeout):  # type: (int, str, str, float) -> dict
-    """Read one small JSON document from the private loopback control endpoint.
+def _control_request(port, secret, path, timeout, method="GET"):
+    # type: (int, str, str, float, str) -> dict
+    """Query inventory or acknowledge a reload on the private control endpoint.
 
     Deliberately not `requests`: this must never inherit ambient proxy
     environment variables, which on a machine running JerryProxy may point at
@@ -157,14 +160,22 @@ def _control_request(port, secret, path, timeout):  # type: (int, str, str, floa
     continuous same-UID interference is outside the supported threat boundary.
     """
 
+    if (
+        not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+        or not math.isfinite(timeout) or timeout <= 0
+    ):
+        raise ValueError("control timeout must be finite and positive")
     connection = HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        connection.request("GET", path, headers={"Authorization": "Bearer %s" % secret})
+        connection.request(method, path, headers={"Authorization": "Bearer %s" % secret})
         response = connection.getresponse()
-        if response.status != 200:
+        expected = 204 if method == "PUT" else 200
+        if response.status != expected:
             raise RuntimeSessionError(
-                "mihomo control endpoint answered %d for its own inventory" % response.status
+                "mihomo control endpoint answered %d for %s" % (response.status, method)
             )
+        if method == "PUT":
+            return {}
         payload = response.read(_MAXIMUM_CONTROL_BYTES + 1)
     except (OSError, HTTPException) as error:
         # A private loopback endpoint that cannot be reached is a startup fault.
@@ -384,21 +395,40 @@ class MihomoDriver(RuntimeDriver):
         entries = provider.get("proxies")
         if not isinstance(entries, list):
             raise RuntimeSessionError("mihomo did not report its provider inventory")
-        accepted = tuple(
-            entry.get("name")
-            for entry in entries
-            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
-        )
+        for entry in entries:
+            if (
+                not isinstance(entry, dict) or not isinstance(entry.get("name"), str)
+                or not isinstance(entry.get("id"), str)
+                or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", entry["id"]) is None
+                or entry.get("provider-name") != PROVIDER_NAME
+            ):
+                raise RuntimeSessionError("mihomo did not report a valid provider identity")
+        accepted = tuple(entry["name"] for entry in entries)
+        identities = tuple(entry["id"] for entry in entries)
         selected = group.get("now")
         if not isinstance(selected, str):
             raise RuntimeSessionError("mihomo did not report its selected proxy")
         # Mihomo names its own placeholder in `emptyFallback`, so the check does
         # not depend only on a hard-coded list of placeholder names.
         fallback = group.get("emptyFallback")
-        bypassing = selected in _BYPASS_SELECTIONS or (
+        members = group.get("all")
+        bypassing = selected not in accepted or selected in _BYPASS_SELECTIONS or (
             isinstance(fallback, str) and fallback != "" and selected == fallback
+        ) or not isinstance(members, list) or tuple(members) != accepted
+        return LoadedNodes(accepted=accepted, selected=selected, bypassing=bypassing, identities=identities)
+
+    def reload_provider(self, control_port, control_secret, timeout):
+        """Request native file-provider reload; acceptance still needs inspection.
+
+        A non-204 answer is terminal: Mihomo uses 503 for both invalid provider
+        content and local read failures, so it cannot safely be classified as
+        transient connectivity. The session must never retry this blindly.
+        """
+
+        _control_request(
+            control_port, control_secret, "/providers/proxies/%s" % PROVIDER_NAME,
+            timeout, method="PUT",
         )
-        return LoadedNodes(accepted=accepted, selected=selected, bypassing=bypassing)
 
     def create_process(self, executable, config_path, session_root, log_path, backend_log_level, log_sink=None):
         # type: (Path, Path, Path, Path, str, object) -> object

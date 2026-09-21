@@ -52,7 +52,7 @@ MihomoDriver
 -----------------------------------------------------
 
 .. autoclass:: MihomoDriver
-   :members: __init__,name,projection,loaded_nodes,create_process,wait_ready,stop
+   :members: __init__,name,projection,loaded_nodes,reload_provider,create_process,wait_ready,stop
 
 
 MihomoProcess

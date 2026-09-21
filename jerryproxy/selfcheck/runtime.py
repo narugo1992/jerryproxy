@@ -129,6 +129,9 @@ class _ProbeDriver(RuntimeDriver):
         self.stopped += 1
         process.stop()
 
+    def reload_provider(self, control_port, control_secret, timeout):
+        del control_port, control_secret, timeout
+
 
 def _check_runtime_driver_contract():
     """Run a foreground session against a substitute driver.

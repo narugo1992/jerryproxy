@@ -32,6 +32,9 @@ class LoadedNodes(object):
     bypassing: bool
     """The selection is a direct or reject placeholder rather than a node."""
 
+    identities: tuple = ()
+    """Backend-generated instance IDs, independent of provider-controlled names."""
+
 
 class RuntimeDriver(object, metaclass=ABCMeta):
     """Backend-specific projection and process lifecycle contract.
@@ -77,6 +80,15 @@ class RuntimeDriver(object, metaclass=ABCMeta):
         Drivers own the backend's inspection protocol; the session owns what to
         do about the answer.  Raise :class:`~jerryproxy.errors.JerryProxyError`
         when the answer cannot be obtained, rather than reporting a guess.
+        """
+
+    @abstractmethod
+    def reload_provider(self, control_port, control_secret, timeout):
+        # type: (int, str, float) -> None
+        """Reload the session's published provider without replacing the child.
+
+        Completion acknowledges the request only. The session must inspect
+        candidate acceptance and selection before checking connectivity.
         """
 
     @abstractmethod

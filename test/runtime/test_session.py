@@ -112,7 +112,10 @@ def _control_documents(accepted=("fixture-node",), selected="fixture-node"):
     def request(port, secret, path, timeout):
         del port, secret, timeout
         if path.startswith("/providers/proxies/"):
-            return {"proxies": [{"name": name, "type": "Shadowsocks"} for name in accepted]}
+            return {"proxies": [
+                {"name": name, "type": "Shadowsocks", "id": "12345678-1234-4234-8234-123456789abc",
+                 "provider-name": "jerryproxy"} for name in accepted
+            ]}
         return {"now": selected, "all": list(accepted) or ["COMPATIBLE"], "emptyFallback": "COMPATIBLE"}
 
     return request
@@ -641,6 +644,9 @@ def test_runtime_accepts_a_driver_without_changing_session_ownership(tmp_path):
             del timeout
             process.stop()
 
+        def reload_provider(self, control_port, control_secret, timeout):
+            del control_port, control_secret, timeout
+
     record = _record(nodes=1)
     runtime = RuntimeSession(
         JerryProxyPaths(tmp_path / ".jerryproxy"),
@@ -1054,7 +1060,8 @@ def test_a_selection_matching_the_backend_empty_fallback_is_refused(tmp_path):
     def inspector(port, secret, path, timeout):
         del port, secret, timeout
         if path.startswith("/providers/proxies/"):
-            return {"proxies": [{"name": "placeholder"}]}
+            return {"proxies": [{"name": "placeholder", "id": "12345678-1234-4234-8234-123456789abc",
+                                 "provider-name": "jerryproxy"}]}
         return {"now": "placeholder", "all": ["placeholder"], "emptyFallback": "placeholder"}
 
     runtime = _session(tmp_path, record, FakeProbe([True]), inspector=inspector)
@@ -1125,7 +1132,8 @@ def test_a_recovery_candidate_that_the_backend_bypasses_is_not_accepted(tmp_path
             # The first launch is accepted. Every later launch reports what a
             # backend says about a node whose protocol or dialect it refused.
             if len(inspections) == 1:
-                return {"proxies": [{"name": "first"}]}
+                return {"proxies": [{"name": "first", "id": "12345678-1234-4234-8234-123456789abc",
+                                     "provider-name": "jerryproxy"}]}
             return {"proxies": []}
         if len(inspections) <= 1:
             return {"now": "first", "all": ["first"], "emptyFallback": "COMPATIBLE"}

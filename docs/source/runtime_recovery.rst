@@ -1,5 +1,5 @@
 Persistent recovery implementation contract
-==========================================
+===========================================
 
 This is the acceptance contract for the ongoing implementation, not a claim
 that these behaviors are already available. It implements the maintainer's

@@ -109,7 +109,7 @@ class _Process(object):
 def _inspector(port, secret, path, timeout):
     del port, secret, timeout
     if path.startswith("/providers/proxies/"):
-        return {"proxies": [{"name": "n"}]}
+        return {"proxies": [{"name": "n", "id": "12345678-1234-4234-8234-123456789abc", "provider-name": "jerryproxy"}]}
     return {"now": "n", "all": ["n"], "emptyFallback": "COMPATIBLE"}
 
 
