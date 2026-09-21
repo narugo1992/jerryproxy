@@ -127,3 +127,35 @@ def test_default_probe_zero_budget_starts_no_process():
     assert all(item.detail == "probe_deadline" for item in snapshot.targets)
     assert set(child.pid for child in multiprocessing.active_children()) == before
     probe.close()
+
+
+def test_connect_authentication_refusal_is_terminal_across_process_boundary():
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    methods = []
+
+    class Proxy(BaseHTTPRequestHandler):
+        def do_CONNECT(self):  # noqa: N802 - standard library callback
+            methods.append(self.command)
+            self.send_response(407, "private-provider-diagnostic")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Proxy)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),), quorum=1, timeout=5)
+    try:
+        snapshot = probe.check(server.server_port, "local-user", "local-password")
+        assert methods == ["CONNECT"]
+        assert not snapshot.ok
+        assert snapshot.targets[0].detail == "proxy_authentication_failed"
+        assert "private-provider-diagnostic" not in repr(snapshot)
+        assert "local-password" not in repr(snapshot)
+    finally:
+        probe.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(2)

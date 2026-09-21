@@ -1021,3 +1021,108 @@ def test_the_control_secret_never_reaches_the_log_or_access_file(tmp_path):
         assert "127.0.0.1:%d" % runtime.control_port in access
     finally:
         runtime.stop()
+
+
+@pytest.mark.parametrize("stage", ["process_start", "readiness", "acceptance", "success"])
+def test_startup_process_hooks_and_deadlines_share_confirmed_cleanup(tmp_path, stage):
+    now = [0.0]
+    hooks = []
+    children = []
+    record = _record(nodes=1)
+    runtime = _session(tmp_path, record, FakeProbe([True]), clock=lambda: now[0])
+
+    class Process(FakeProcess):
+        def set_log_lock(self, lock):
+            hooks.append(("lock", lock))
+
+        def set_readiness_challenge(self, username, password, protocol, address):
+            hooks.append(("challenge", username, password, protocol, address))
+
+        def start(self):
+            children.append(self)
+            if stage == "process_start":
+                raise OSError("private child details")
+            if stage == "readiness":
+                now[0] = 100
+            return super().start()
+
+        def wait_ready(self, port):
+            if stage == "acceptance":
+                now[0] = 100
+
+    runtime.driver = MihomoDriver(process_factory=Process, inspector=_control_documents())
+    try:
+        if stage == "success":
+            runtime.start("main", record.nodes[0].node_id, install_missing=False)
+        else:
+            with pytest.raises(RuntimeSessionError) as caught:
+                runtime.start("main", record.nodes[0].node_id, install_missing=False)
+            assert "private child details" not in str(caught.value)
+        assert hooks[0] == ("lock", runtime._log_file_lock)
+        assert hooks[1][0] == "challenge"
+    finally:
+        runtime.stop()
+    assert len(children) == 1 and children[0].stopped
+    assert not runtime.session_root.exists()
+
+
+def test_invalid_injected_driver_is_rejected_before_initialization(tmp_path):
+    with pytest.raises(TypeError, match="driver must implement"):
+        RuntimeSession(JerryProxyPaths(tmp_path / "home"), driver=object())
+    assert not (tmp_path / "home").exists()
+
+
+def test_cache_age_requires_a_selected_subscription(tmp_path):
+    runtime = RuntimeSession(JerryProxyPaths(tmp_path / "home"))
+    with pytest.raises(SubscriptionStateError, match="subscription is not selected"):
+        runtime._is_stale()
+
+
+def test_expired_candidate_budget_preserves_loaded_node(tmp_path):
+    from jerryproxy.runtime.health import RecoveryDeadline
+
+    record = _record(nodes=2)
+    runtime = _session(tmp_path, record, FakeProbe([True]))
+    try:
+        runtime.start("main", record.nodes[0].node_id, install_missing=False)
+        now = [0]
+        deadline = RecoveryDeadline(1, clock=lambda: now[0])
+        now[0] = 1
+        generation = runtime._loaded_identity
+        assert not runtime._try_candidate(record.nodes[1], deadline)
+        assert runtime.node == record.nodes[0]
+        assert runtime._loaded_identity == generation
+    finally:
+        runtime.stop()
+
+
+def test_health_log_omits_successes_from_failed_target_summary(tmp_path):
+    from jerryproxy.runtime.health import TargetHealth
+
+    record = _record(nodes=1)
+    snapshot = HealthSnapshot((TargetHealth("healthy-target", True), TargetHealth("failed-target", False)), 1, 1, 0)
+
+    class Probe:
+        def check(self, *args):
+            return snapshot
+
+    runtime = _session(tmp_path, record, Probe())
+    try:
+        runtime.start("main", record.nodes[0].node_id, install_missing=False)
+        log = runtime.log_path.read_text()
+        assert "failed=failed-target:failed" in log
+        assert "healthy-target" not in log
+    finally:
+        runtime.stop()
+
+
+def test_driver_without_separate_provider_publishes_only_config(tmp_path, monkeypatch):
+    record = _record(nodes=1)
+    runtime = _session(tmp_path, record, FakeProbe([True]))
+    monkeypatch.setattr(runtime.driver, "projection", lambda *a, **kw: RuntimeProjection(b"config-only\n", None))
+    try:
+        runtime.start("main", record.nodes[0].node_id, install_missing=False)
+        assert runtime.config_path.read_bytes() == b"config-only\n"
+        assert not runtime.provider_path.exists()
+    finally:
+        runtime.stop()

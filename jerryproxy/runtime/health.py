@@ -7,12 +7,26 @@ import time
 from dataclasses import dataclass
 
 import requests
+from urllib3.exceptions import MaxRetryError, ProxyError
 
 from ..errors import RuntimeSessionError
 from ._probe import ProbeProcess
 from .recovery import RETRY_POLICIES, parse_retry_chain
 
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def _connect_authentication_failed(error):
+    """Recognize only the pinned Requests/urllib3/stdlib CONNECT error chain."""
+
+    wrapped = error.args[0] if len(error.args) == 1 else None
+    proxy = wrapped.reason if isinstance(wrapped, MaxRetryError) else None
+    cause = proxy.original_error if isinstance(proxy, ProxyError) else None
+    # http.client discards the numeric status when raising OSError. Inspect its
+    # exact locally generated prefix only after verifying the exception chain;
+    # never search arbitrary messages or retain the remote reason phrase.
+    return (type(cause) is OSError and len(cause.args) == 1 and isinstance(cause.args[0], str)
+            and cause.args[0].startswith("Tunnel connection failed: 407 "))
 
 
 @dataclass(frozen=True)
@@ -198,6 +212,11 @@ class ConnectivityProbe(object):
             # dependency is absent; keep the action-oriented diagnosis without
             # exposing the target URL or the raw exception text.
             detail = "socks_dependency_missing" if self.protocol == "socks5" else "invalid_proxy_schema"
+            return TargetHealth(target.name, False, detail=detail)
+        except requests.exceptions.ProxyError as error:
+            # CONNECT refusal loses its response in Requests; only a verified
+            # 407 wrapper is authentication failure, other proxy errors retry.
+            detail = "proxy_authentication_failed" if _connect_authentication_failed(error) else "transport_failed"
             return TargetHealth(target.name, False, detail=detail)
         except requests.exceptions.RequestException:
             # Transport failures are classified as a failed target only.

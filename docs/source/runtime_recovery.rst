@@ -50,9 +50,12 @@ clamps each underlying socket read to the remaining time; no deadline worker
 is allocated. Ambiguous control state, authentication, integrity, TLS, permission
 and unsafe cleanup failures remain terminal. Health probes report certificate
 validation failure and explicit HTTP 407 responses as closed terminal
-verdicts, never as ordinary target outages. CONNECT authentication failures
-wrapped by the HTTP client still require dedicated transport validation. Confirmed child exit must not be
-confused with inability to stop a child.
+verdicts, never as ordinary target outages. CONNECT 407 refusals are recognized
+only through the pinned Requests/urllib3/standard-library exception chain and
+the locally generated status prefix; arbitrary exception messages are never
+searched or logged. Other proxy connection failures remain retryable. A real
+loopback proxy refusal verifies classification across the health process
+boundary. Confirmed child exit must not be confused with inability to stop a child.
 
 Cache age requests a refresh but does not disqualify verified cached nodes.
 Temporary refresh failure preserves the last good revision. Successful refresh

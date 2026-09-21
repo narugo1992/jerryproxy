@@ -78,3 +78,37 @@ def test_supervisor_deadline_preserves_evidence_until_completion(tmp_path, monke
     supervisor._cleanup(token, Starter() if stage == "starter" else None, object(), tmp_path, tmp_path / "worker")
     assert supervisor.pending is (stage != "process_recovers")
     assert bool(removed) is (stage == "process_recovers")
+
+
+@pytest.mark.parametrize("failure", ["oversized", "open", "zero_write", "fsync", "short_write"])
+def test_worker_result_publication_fails_closed_on_io_boundaries(tmp_path, monkeypatch, failure):
+    import json
+
+    path = tmp_path / "result.json"
+    value = {"ok": False, "error": "source failed"}
+    real_open, real_write = manager_module.os.open, manager_module.os.write
+    if failure == "oversized":
+        monkeypatch.setattr(manager_module, "_FETCH_RESULT_MAXIMUM_BYTES", 1)
+    elif failure == "open":
+        def denied(*args, **kwargs):
+            raise PermissionError("private path")
+        monkeypatch.setattr(manager_module.os, "open", denied)
+    elif failure == "zero_write":
+        monkeypatch.setattr(manager_module.os, "write", lambda *args: 0)
+    elif failure == "fsync":
+        def failed_flush(descriptor):
+            raise OSError("flush failed")
+        monkeypatch.setattr(manager_module.os, "fsync", failed_flush)
+    else:
+        monkeypatch.setattr(manager_module.os, "write", lambda descriptor, data: real_write(descriptor, data[:1]))
+    manager_module._write_fetch_result(str(path), value)
+    monkeypatch.setattr(manager_module.os, "open", real_open)
+    if failure in ("oversized", "open"):
+        assert not path.exists()
+    elif failure == "zero_write":
+        assert path.read_bytes() == b""
+    else:
+        assert json.loads(path.read_text()) == value
+    # A closed descriptor allows immediate cleanup even on native Windows.
+    if path.exists():
+        path.unlink()

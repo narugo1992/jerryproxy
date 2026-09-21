@@ -283,3 +283,40 @@ def test_result_descriptor_is_validated_and_read_is_independently_bounded(
         manager.refresh("main")
     assert manager.get("main").revision == original.revision
     assert not tuple(manager.paths.runtimes.glob(".subscription-fetch-*"))
+
+
+@pytest.mark.parametrize("failure", ["start", "construct", "exit", "deadline"])
+def test_worker_lifecycle_failures_preserve_cached_revision(tmp_path, monkeypatch, worker_boundary, failure):
+    manager, original = _manager(tmp_path, monkeypatch, [None])
+
+    class Process:
+        exitcode = 23
+
+        def start(self):
+            if failure == "start":
+                raise OSError("private process details")
+
+        def is_alive(self):
+            return False
+
+        def join(self, timeout):
+            pass
+
+    class Context:
+        Event = threading.Event
+
+        def Process(self, **kwargs):
+            if failure == "construct":
+                raise OSError("private process details")
+            return Process()
+
+    monkeypatch.setattr(manager_module.multiprocessing, "get_context", lambda method: Context())
+    if failure == "deadline":
+        ticks = iter([0, 0, 2])
+        monkeypatch.setattr(manager_module.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(SubscriptionFetchError) as caught:
+        manager.refresh("main", timeout=1)
+    assert isinstance(caught.value, SubscriptionTransportError) is (failure == "deadline")
+    assert "private process details" not in str(caught.value)
+    assert manager.get("main").revision == original.revision
+    assert not tuple(manager.paths.runtimes.glob(".subscription-fetch-*"))

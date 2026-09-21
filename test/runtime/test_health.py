@@ -513,3 +513,43 @@ def test_session_missing_socks_dependency_is_terminal(tmp_path):
     with pytest.raises(RuntimeSessionError, match="install PySocks"):
         session.start("main", record.nodes[0].node_id, install_missing=False)
     assert session._operation_lock is None
+
+
+@pytest.mark.parametrize("shape", ["authentication", "other_status", "substring", "wrong_type", "wrong_args",
+                                   "nontext", "unwrapped", "wrong_reason", "multiple_args"])
+def test_proxy_error_classification_requires_the_exact_connect_chain(shape):
+    from urllib3.exceptions import MaxRetryError, ProxyError
+
+    cause = OSError("Tunnel connection failed: 407 private-diagnostic")
+    if shape == "other_status":
+        cause = OSError("Tunnel connection failed: 503 proxy unavailable")
+    elif shape == "substring":
+        cause = OSError("remote message mentions Tunnel connection failed: 407 private-diagnostic")
+    elif shape == "wrong_type":
+        cause = ValueError("Tunnel connection failed: 407 private-diagnostic")
+    elif shape == "wrong_args":
+        cause = OSError()
+    elif shape == "nontext":
+        cause = OSError(407)
+    reason = ProxyError("proxy connection failed", cause)
+    if shape == "wrong_reason":
+        reason = cause
+    wrapped = MaxRetryError(None, "/", reason=reason)
+    if shape == "unwrapped":
+        wrapped = cause
+    args = (wrapped, "extra") if shape == "multiple_args" else (wrapped,)
+    error = requests.exceptions.ProxyError(*args)
+
+    class Session:
+        def get(self, *args, **kwargs):
+            raise error
+
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),),
+                              quorum=1, session_factory=Session)
+    try:
+        result = probe.check(17777, None, None)
+        expected = "proxy_authentication_failed" if shape == "authentication" else "transport_failed"
+        assert result.targets[0].detail == expected
+        assert "private-diagnostic" not in repr(result)
+    finally:
+        probe.close()

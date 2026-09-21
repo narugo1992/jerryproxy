@@ -395,8 +395,7 @@ class SubscriptionManager(object):
         finally:
             cleanup_error = None
             if startup_thread is not None and startup_thread.is_alive():
-                if cancel_gate is not None:
-                    cancel_gate.set()
+                cancel_gate.set()
                 if not _stop_fetch_process(process):
                     cleanup_error = SubscriptionFetchError("subscription source worker could not be stopped")
                 startup_done.wait(_FETCH_STOP_SECONDS)
@@ -463,8 +462,6 @@ class SubscriptionManager(object):
             return fetched.body, fetched.final_url, format_hint
         if not isinstance(body, bytes):
             raise TypeError("subscription body must be bytes")
-        if source_url is not None:
-            source_url = validate_source_url(source_url, allow_http=allow_http)
         return body, source_url, format_hint
 
     def add(self, name, source_url, body=None, format_hint="auto", allow_http=False):

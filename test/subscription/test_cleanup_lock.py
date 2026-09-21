@@ -307,3 +307,115 @@ def test_interrupted_starter_join_cannot_hide_pending_process_start(tmp_path, mo
         poisoned.clear()
     _wait_for_manager_cleanup(manager)
     assert stopped.is_set()
+
+
+@pytest.mark.parametrize("supervisor_available", [False, True])
+def test_unstoppable_started_worker_retains_home_and_cache(tmp_path, monkeypatch, worker_boundary,
+                                                         supervisor_available):
+    from .test_refresh_budget import _manager
+
+    manager, original = _manager(tmp_path, monkeypatch, [None])
+    release = threading.Event()
+    real_start = threading.Thread.start
+    starter = []
+
+    class Process:
+        exitcode = None
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return not release.is_set()
+
+        def join(self, timeout):
+            pass
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    class Context:
+        Event = threading.Event
+
+        def Process(self, **kwargs):
+            return Process()
+
+    def start(thread):
+        if thread.name == "jerryproxy-subscription-cleanup" and not supervisor_available:
+            raise RuntimeError("thread unavailable")
+        real_start(thread)
+        if thread.name == "jerryproxy-subscription-start":
+            # Ensure this case exercises an exited starter with a live child.
+            thread.join(1)
+            starter.append(thread)
+
+    monkeypatch.setattr(manager_module.multiprocessing, "get_context", lambda method: Context())
+    monkeypatch.setattr(threading.Thread, "start", start)
+    monkeypatch.setattr(manager_module, "_FETCH_STOP_SECONDS", 0.001)
+    try:
+        with pytest.raises(SubscriptionFetchError, match="cleanup failed"):
+            manager.refresh("main", timeout=0.1)
+        assert starter and not starter[0].is_alive()
+        with pytest.raises(JerryProxyBusyError):
+            with JerryProxyOperationLock(manager.paths):
+                pass
+        assert tuple(manager.paths.runtimes.glob(".subscription-fetch-*"))
+    finally:
+        release.set()
+    if supervisor_available:
+        _wait_for_manager_cleanup(manager)
+        assert manager.get("main").revision == original.revision
+    else:
+        # No supervisor exists; explicitly retry its recorded cleanup in test
+        # teardown only after the fake child's termination has been confirmed.
+        for token in tuple(manager._fetch_cleanup._pending):
+            for path in manager.paths.runtimes.glob(".subscription-fetch-*"):
+                manager._fetch_cleanup._cleanup(token, None, None, manager.paths.runtimes, path)
+        assert manager.get("main").revision == original.revision
+
+
+def test_starter_finishing_during_final_cleanup_removes_private_tree(tmp_path, monkeypatch):
+    release = threading.Event()
+    started = threading.Event()
+    starter = []
+    calls = []
+
+    class Process:
+        exitcode = 0
+
+        def start(self):
+            starter.append(threading.current_thread())
+            started.set()
+            release.wait(2)
+
+        def is_alive(self):
+            if threading.current_thread() is threading.main_thread():
+                calls.append(True)
+                if len(calls) == 2:
+                    release.set()
+                    starter[0].join(1)
+            return False
+
+    class Context:
+        Event = threading.Event
+
+        def Process(self, **kwargs):
+            return Process()
+
+    monkeypatch.setattr(manager_module.multiprocessing, "get_context", lambda method: Context())
+    monkeypatch.setattr(manager_module, "_FETCH_START_SECONDS", 0.01)
+    monkeypatch.setattr(manager_module, "_FETCH_STOP_SECONDS", 0.01)
+    manager = SubscriptionManager(JerryProxyPaths(tmp_path / "home"))
+    try:
+        with pytest.raises(SubscriptionFetchError, match="startup deadline"):
+            manager.add("main", "https://provider.invalid/sub")
+        assert started.is_set() and release.is_set()
+        assert not manager._fetch_cleanup.pending
+        assert not tuple(manager.paths.runtimes.glob(".subscription-fetch-*"))
+        with JerryProxyOperationLock(manager.paths):
+            pass
+    finally:
+        release.set()

@@ -503,7 +503,7 @@ class RuntimeSession(object):
             self.health_probe.close()
         self._require_fetch_cleanup()
 
-    def _launch_node(self, node, deadline=None):
+    def _launch_node(self, node, deadline):
         self.node = node
         self._write_projection()
         try:
@@ -531,24 +531,17 @@ class RuntimeSession(object):
                     self.bind_address,
                 )
             self.process.start()
-            if deadline is not None:
-                remaining = deadline.remaining()
-                if remaining <= 0:
-                    raise RuntimeSessionError("proxy recovery deadline exhausted")
-                self.driver.wait_ready(self.process, self.port, timeout=min(5.0, remaining))
-            else:
-                self.driver.wait_ready(self.process, self.port, timeout=5.0)
+            remaining = deadline.remaining()
+            if remaining <= 0:
+                raise RuntimeSessionError("proxy recovery deadline exhausted")
+            self.driver.wait_ready(self.process, self.port, timeout=min(5.0, remaining))
         except (OSError, RuntimeSessionError) as error:
             # The caller decides whether this candidate is recoverable; no raw
             # backend diagnostics cross this boundary.
-            self.process = None if self.process is None else self.process
             raise RuntimeSessionError("mihomo backend candidate failed to start") from error
         # Outside the launch failure boundary, because a backend that started
         # cleanly but is not using the node is a different verdict and keeps its
-        # own message. Inside `_launch_node` rather than beside one call of it,
-        # so a startup retry and the recovery sweep are both covered -- the sweep
-        # launches a *different* node, the case most likely to carry a protocol
-        # the backend refuses.
+        # own message. Recovery reloads verify acceptance in _try_candidate.
         self._require_node_in_use(deadline=deadline)
         self._loaded_node = node
         self._log("INFO", "backend accepted node %s and routes through it" % node.node_id)
@@ -604,7 +597,7 @@ class RuntimeSession(object):
             message += "; next=%s" % redact_text(action)
         self._log(level, message)
 
-    def _require_node_in_use(self, deadline=None, node=None):
+    def _require_node_in_use(self, deadline, node=None):
         """Refuse to report readiness unless the backend is using the node.
 
         A backend can start, listen, and answer a connectivity probe while
@@ -617,12 +610,10 @@ class RuntimeSession(object):
 
         # Two sequential requests happen inside, so an unclamped timeout could
         # overrun the recovery deadline once per swept candidate.
-        timeout = 5.0
-        if deadline is not None:
-            remaining = deadline.remaining()
-            if remaining <= 0:
-                raise RuntimeSessionError("proxy recovery deadline exhausted")
-            timeout = min(5.0, remaining / 2.0)
+        remaining = deadline.remaining()
+        if remaining <= 0:
+            raise RuntimeSessionError("proxy recovery deadline exhausted")
+        timeout = min(5.0, remaining / 2.0)
         loaded = self.driver.loaded_nodes(self.control_port, self.control_secret, timeout)
         node = node or self.node
         if loaded.bypassing or len(loaded.accepted) != 1 or loaded.selected != loaded.accepted[0]:
