@@ -1091,3 +1091,32 @@ def test_a_provider_node_keeps_its_credentials_off_the_public_view(tmp_path):
     # The runtime boundary still returns the payload the backend consumes.
     assert record.nodes[0].secret_uri().startswith("proxies:")
     assert "sspass" in record.nodes[0].secret_uri()
+
+
+def test_subscription_manager_requires_a_parser_adapter(tmp_path):
+    paths = JerryProxyPaths(tmp_path / "home")
+    with pytest.raises(TypeError, match="parser must implement"):
+        SubscriptionManager(paths, parser=object())
+    assert not paths.root.exists()
+
+
+@pytest.mark.parametrize("body,expected", [(None, SubscriptionStateError), ("not bytes", TypeError)])
+def test_public_add_refuses_missing_or_nonbyte_source(tmp_path, body, expected):
+    manager = SubscriptionManager(JerryProxyPaths(tmp_path / "home"))
+    with pytest.raises(expected):
+        manager.add("main", None, body=body)
+    assert manager.list() == ()
+
+
+def test_validation_of_absent_home_is_read_only(tmp_path):
+    paths = JerryProxyPaths(tmp_path / "home")
+    with pytest.raises(SubscriptionStateError, match="subscription not found"):
+        SubscriptionManager(paths).validate("main")
+    assert not paths.root.exists()
+
+
+def test_public_add_never_persists_plaintext_source(tmp_path):
+    manager = SubscriptionManager(JerryProxyPaths(tmp_path / "home"))
+    with pytest.raises(SubscriptionFetchError, match="HTTP subscription sources cannot be persisted"):
+        manager.add("main", "http://provider.invalid/sub", allow_http=True)
+    assert manager.list() == ()
