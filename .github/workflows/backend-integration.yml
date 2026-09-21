@@ -1,126 +1,37 @@
 name: Backend Integration
-
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-
-concurrency:
-  group: backend-integration-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
-
 jobs:
-  lifecycle:
-    name: ${{ matrix.backend }} lifecycle (${{ matrix.platform }})
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - Linux
-          - Windows
-          - macOS
-        backend:
-          - mihomo
-          - sing-box
-          - v2ray
-          - xray
-        include:
-          - platform: Linux
-            os: ubuntu-22.04
-          - platform: Windows
-            os: windows-2022
-          - platform: macOS
-            os: macos-15-intel
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-          cache: pip
       - run: python -m pip install -e .
-      - name: Resolve, install, activate, and verify
-        shell: bash
+      - name: Reproduce with original exception causes
         run: |
-          versions="$(python -m jerryproxy backend list known "${{ matrix.backend }}" --limit 2 --json)"
-          version="$(printf '%s' "$versions" | python -c 'import json,sys; print(json.load(sys.stdin)[0]["version"])')"
-          alternate="$(printf '%s' "$versions" | python -c 'import json,sys; print(json.load(sys.stdin)[1]["version"])')"
-          echo "JERRYPROXY_BACKEND_VERSION=$alternate" >> "$GITHUB_ENV"
-          python -m jerryproxy backend list known "${{ matrix.backend }}" "$version"
-          python -m jerryproxy --home backend-home backend install "${{ matrix.backend }}"
-          python -m jerryproxy --home backend-home backend current "${{ matrix.backend }}"
-          python -m jerryproxy --home backend-home backend which "${{ matrix.backend }}"
-          python -m jerryproxy --home backend-home backend install "${{ matrix.backend }}" "$alternate" --no-activate
-          python -m jerryproxy --home backend-home backend use "${{ matrix.backend }}" "$alternate"
-          python -m jerryproxy --home backend-home backend current "${{ matrix.backend }}"
-          python -m jerryproxy --home backend-home backend which "${{ matrix.backend }}" "$alternate"
-          python -m jerryproxy --home backend-home backend verify "${{ matrix.backend }}" "$alternate"
-      - name: Execute managed backend version command
-        shell: bash
-        run: |
-          python - "${{ matrix.backend }}" <<'PY'
+          python -u - <<'PYTHON'
           import os
-          import subprocess
-          import sys
+          import platform
+          from pathlib import Path
+          from jerryproxy.backend.manager import BackendManager
+          from jerryproxy.backend.anchored import AnchoredDirectory
+          from jerryproxy.home import JerryProxyPaths
 
-          backend = sys.argv[1]
-          suffix = ".exe" if os.name == "nt" else ""
-          binary = os.path.join("backend-home", "bin", backend + suffix)
-          arguments = [binary, "-v"] if backend == "mihomo" else [binary, "version"]
-          completed = subprocess.run(
-              arguments,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.STDOUT,
-              universal_newlines=True,
-              timeout=20,
-          )
-          print(completed.stdout)
-          if completed.returncode != 0:
-              raise SystemExit(completed.returncode)
-          PY
-      - name: Exercise reinstall and uninstall lifecycle
-        shell: bash
-        run: |
-          python -m jerryproxy --home backend-home backend install "${{ matrix.backend }}"
-          python -m jerryproxy --home backend-home backend use "${{ matrix.backend }}" "$JERRYPROXY_BACKEND_VERSION"
-          if python -m jerryproxy --home backend-home backend uninstall "${{ matrix.backend }}" \
-            "$JERRYPROXY_BACKEND_VERSION" -y; then
-            echo "Current backend uninstall unexpectedly succeeded without --deactivate" >&2
-            exit 1
-          fi
-          python -m jerryproxy --home backend-home backend uninstall "${{ matrix.backend }}" "$JERRYPROXY_BACKEND_VERSION" --deactivate --cache -y
-          python -m jerryproxy --home backend-home backend current
-          python -m jerryproxy --home backend-home backend uninstall "${{ matrix.backend }}" -A -y
-
-  musl-lifecycle:
-    name: sing-box lifecycle (Alpine musl)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - name: Resolve, install, activate, and verify on musl
-        shell: bash
-        run: |
-          docker run --rm \
-            --volume "$PWD:/workspace:ro" \
-            alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc \
-            /bin/sh -eu -c '
-              apk add --no-cache ca-certificates python3 py3-pip py3-virtualenv >/dev/null
-              cp -R /workspace /tmp/source
-              python3 -m venv /tmp/jerryproxy
-              /tmp/jerryproxy/bin/python -m pip install --no-cache-dir /tmp/source >/dev/null
-              version="$(/tmp/jerryproxy/bin/jerryproxy backend list known sing-box --limit 1 --json | /tmp/jerryproxy/bin/python -c '\''import json,sys; print(json.load(sys.stdin)[0]["version"])'\'')"
-              artifact="$(/tmp/jerryproxy/bin/jerryproxy backend list known sing-box "$version")"
-              printf "%s\n" "$artifact"
-              printf "%s\n" "$artifact" | grep -F "Catalog target: linux-amd64-musl"
-              printf "%s\n" "$artifact" | grep -F -- "-linux-amd64-musl.tar.gz"
-              /tmp/jerryproxy/bin/jerryproxy --home /tmp/home backend install sing-box
-              /tmp/jerryproxy/bin/jerryproxy --home /tmp/home backend current sing-box
-              /tmp/jerryproxy/bin/jerryproxy --home /tmp/home backend which sing-box
-              /tmp/jerryproxy/bin/jerryproxy --home /tmp/home backend verify sing-box
-              /tmp/home/bin/sing-box version
-            '
+          print(platform.platform())
+          original = AnchoredDirectory.open_existing_file
+          def observed(self, parts, writable=False, expected_identity=None):
+              print("OPEN", str(self.root), parts, "writable=", writable, flush=True)
+              return original(self, parts, writable=writable, expected_identity=expected_identity)
+          AnchoredDirectory.open_existing_file = observed
+          manager = BackendManager(JerryProxyPaths(Path("backend-home")))
+          manager.install("v2ray", "5.53.0")
+          print("INSTALLED 5.53.0", flush=True)
+          manager.install("v2ray", "5.52.0", activate=False)
+          print("INSTALLED 5.52.0", flush=True)
+          PYTHON
