@@ -191,7 +191,7 @@ def test_reload_rejects_invalid_budgets_without_network(timeout):
 @pytest.mark.parametrize("payload, message", [
     (b"[]", "not a JSON object"),
     (b"\xff", "not valid JSON"),
-    (b'{"nested":' + b"[" * 10000 + b"0" + b"]" * 10000 + b"}", "not valid JSON"),
+    pytest.param(b'{"nested":' + b"[" * 10000 + b"0", "not valid JSON", id="deeply-incomplete"),
 ])
 def test_inventory_rejects_nonobject_and_invalid_utf8(controller, monkeypatch, payload, message):
     monkeypatch.setattr(_Controller, "documents", {"/providers/proxies/jerryproxy": payload})
@@ -311,3 +311,20 @@ def test_control_deadline_checks_elapsed_time_at_each_io_boundary(controller, mo
     message = "deadline exhausted" if boundary == "complete" else "unreachable"
     with pytest.raises(RuntimeSessionError, match=message):
         MihomoDriver().reload_provider(controller, _Controller.secret, 1.0)
+
+
+def test_decoder_recursion_failure_is_a_sanitized_control_error(controller, monkeypatch):
+    import types
+
+    from jerryproxy.runtime import mihomo
+
+    monkeypatch.setattr(_Controller, "documents", _documents(("n",), "n"))
+    monkeypatch.setattr(_Controller, "oversize", False)
+
+    def exhausted(payload):
+        raise RecursionError("private-control-data")
+
+    monkeypatch.setattr(mihomo, "json", types.SimpleNamespace(loads=exhausted))
+    with pytest.raises(RuntimeSessionError, match="not valid JSON") as failure:
+        MihomoDriver().loaded_nodes(controller, _Controller.secret, 1.0)
+    assert "private-control-data" not in str(failure.value)

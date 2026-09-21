@@ -202,7 +202,8 @@ class RuntimeSession(object):
                 _ensure_extension_directory(self.log_path.parent)
                 if is_path_alias(self.log_path):
                     raise RuntimeSessionError("runtime log path is aliased")
-                flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                flags = (os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_BINARY", 0))
                 descriptor = os.open(str(self.log_path), flags, 0o600)
                 status = os.fstat(descriptor)
                 if not stat.S_ISREG(status.st_mode):
