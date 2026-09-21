@@ -446,3 +446,70 @@ def test_probe_close_requires_thread_exit_after_target_completion(monkeypatch):
     finally:
         release.set()
         probe.close(timeout=1)
+
+
+@pytest.mark.parametrize("fault, detail", [("tls", "tls_failed"), ("proxy_auth", "proxy_authentication_failed")])
+def test_session_does_not_retry_tls_or_proxy_authentication_failures(tmp_path, fault, detail):
+    from test.runtime.test_session import _record, _session
+
+    calls = []
+
+    class Refused(FakeSession):
+        def get(self, *args, **kwargs):
+            calls.append(1)
+            assert len(calls) == 1, "terminal probe failures must not be retried"
+            if fault == "tls":
+                raise requests.exceptions.SSLError("private TLS context")
+            return FakeResponse(status_code=407)
+
+    record = _record(nodes=1)
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),), quorum=1,
+                              session_factory=lambda: Refused(None))
+    def no_retry_sleep(delay):
+        pytest.fail("terminal probe failure must not enter retry waits")
+
+    session = _session(tmp_path, record, probe, sleeper=no_retry_sleep)
+    with pytest.raises(RuntimeSessionError, match=detail) as failure:
+        session.start("main", record.nodes[0].node_id, install_missing=False)
+    assert len(calls) == 1
+    assert "private TLS context" not in str(failure.value)
+    assert session._operation_lock is None
+    assert not session.session_root.exists()
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_probe_enforces_body_deadline_and_required_header_with_minimal_transport(late):
+    now = [0.0]
+
+    class Response(FakeResponse):
+        def iter_content(self, chunk_size):
+            yield b""
+            if late:
+                now[0] = 2.0
+                yield b"late"
+
+    response = Response(headers={"X-Online": "yes"})
+
+    class Session:
+        def get(self, *args, **kwargs):
+            return response
+
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204,
+                                                    required_header="X-Online: yes"),),
+                              quorum=1, timeout=1, clock=lambda: now[0], session_factory=Session)
+    result = probe.check(17777, None, None)
+    assert result.ok is not late
+    assert result.targets[0].detail == ("probe_deadline" if late else "")
+    probe.close()
+
+
+def test_session_missing_socks_dependency_is_terminal(tmp_path):
+    from test.runtime.test_session import _record, _session
+
+    record = _record(nodes=1)
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),), quorum=1,
+                              protocol="socks5", session_factory=lambda: MissingSocksSession(None))
+    session = _session(tmp_path, record, probe)
+    with pytest.raises(RuntimeSessionError, match="install PySocks"):
+        session.start("main", record.nodes[0].node_id, install_missing=False)
+    assert session._operation_lock is None

@@ -48,7 +48,10 @@ readiness. Each control request has an absolute wall deadline covering response
 headers and body, including slow trickles. A standard-library buffered reader
 clamps each underlying socket read to the remaining time; no deadline worker
 is allocated. Ambiguous control state, authentication, integrity, TLS, permission
-and unsafe cleanup failures remain terminal. Confirmed child exit must not be
+and unsafe cleanup failures remain terminal. Health probes report certificate
+validation failure and explicit HTTP 407 responses as closed terminal
+verdicts, never as ordinary target outages. CONNECT authentication failures
+wrapped by the HTTP client still require dedicated transport validation. Confirmed child exit must not be
 confused with inability to stop a child.
 
 Cache age requests a refresh but does not disqualify verified cached nodes.

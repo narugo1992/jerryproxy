@@ -114,10 +114,8 @@ class ConnectivityProbe(object):
             port,
         )
 
-    def _one(self, target, port, username, password, timeout=None):
-        request_budget = self.timeout if timeout is None else min(self.timeout, float(timeout))
-        if request_budget <= 0:
-            return TargetHealth(target.name, False, detail="probe_deadline")
+    def _one(self, target, port, username, password, timeout):
+        request_budget = min(self.timeout, timeout)
         started = self.clock()
         session = self.session_factory()
         try:
@@ -134,6 +132,8 @@ class ConnectivityProbe(object):
             )
             try:
                 header_latency = max(0.0, self.clock() - started)
+                if response.status_code == 407:
+                    return TargetHealth(target.name, False, header_latency, detail="proxy_authentication_failed")
                 if response.status_code != target.status:
                     return TargetHealth(target.name, False, header_latency, detail="unexpected_status")
                 if getattr(response, "is_redirect", False) or response.headers.get("Location"):
@@ -183,6 +183,9 @@ class ConnectivityProbe(object):
                 return TargetHealth(target.name, True, header_latency, first_chunk or 0.0, speed)
             finally:
                 response.close()
+        except requests.exceptions.SSLError:
+            # Certificate validation failures are terminal, never outage retries.
+            return TargetHealth(target.name, False, detail="tls_failed")
         except requests.exceptions.Timeout:
             # Timeout is a normal degraded target result; it is not an
             # exception shown to the user or recorded with the target URL.

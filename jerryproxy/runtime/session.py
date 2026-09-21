@@ -571,6 +571,9 @@ class RuntimeSession(object):
         if not hasattr(result, "ok"):
             raise RuntimeSessionError("proxy health probe returned an invalid result")
         self.last_health = result
+        for target in result.targets:
+            if target.detail in ("tls_failed", "proxy_authentication_failed"):
+                raise RuntimeSessionError("proxy health check refused: %s" % target.detail)
         if any(getattr(target, "detail", "") == "socks_dependency_missing" for target in result.targets):
             raise RuntimeSessionError("install PySocks>=1.7.1 and retry the SOCKS5 server")
         return result
