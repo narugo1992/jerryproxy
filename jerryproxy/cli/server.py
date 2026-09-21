@@ -144,6 +144,10 @@ bounded line stream is redacted, persisted, and forwarded live; only the
 backend name is shown (`[mihomo]`, `[v2ray]`, and so on), never the original
 stream name.
 
+JSONL writes lifecycle events to stdout and ordinary logs to stderr. Lifecycle
+events remain visible at every log level and report starting, degraded,
+retrying, ready and stopped states with counters and retry delays.
+
 Human startup output is emitted through the JerryProxy log stream as one
 readable readiness summary, one copyable proxy URL, and a short
 environment-variable guide. The private runtime log filename contains its UTC
@@ -382,9 +386,10 @@ def server_command(
         emphasize=False,
         preserve_local_auth=False,
         multiline=False,
+        lifecycle=False,
         **event_fields
     ):
-        if source == "jerryproxy" and _LOG_PRIORITIES[level] < _LOG_PRIORITIES[log_level]:
+        if not lifecycle and source == "jerryproxy" and _LOG_PRIORITIES[level] < _LOG_PRIORITIES[log_level]:
             return
         if log_format == "jsonl":
             payload = {
@@ -426,6 +431,16 @@ def server_command(
         )
         rich_handler.emit(record)
 
+    def event_sink(event):
+        if log_format == "jsonl":
+            click.echo(json.dumps(event, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        else:
+            data = event["data"]
+            log_sink("jerryproxy", "INFO",
+                     "%s: %s; node=%s; attempt=%d; candidates=%d; next=%.3fs"
+                     % (event["event"], data["reason"], data["node"], data["attempts"],
+                        data["candidates"], data["delay"]), lifecycle=True)
+
     def startup_log(message, emphasize=False, preserve_local_auth=False, multiline=False):
         log_sink(
             "jerryproxy",
@@ -454,6 +469,7 @@ def server_command(
         log_level=log_level,
         backend_log_level=backend_log_level,
         log_sink=log_sink,
+        event_sink=event_sink,
         recovery_policy=policy,
     )
     try:
@@ -470,9 +486,7 @@ def server_command(
         info.pop("log_file", None)
         if bind_all:
             startup_warning("Listener is exposed on all interfaces; use --auth on untrusted networks.")
-        if log_format == "jsonl":
-            click.echo(json.dumps({"event": "session.ready", "data": info}, sort_keys=True, separators=(",", ":")))
-        else:
+        if log_format == "human":
             listener = info["listener"]
             address = listener["address"]
             port = listener["port"]

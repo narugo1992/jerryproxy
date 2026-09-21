@@ -65,6 +65,19 @@ readiness or exposes secrets. Threads, children, statistics and recent logs
 remain bounded for an indefinitely running session. Ctrl-C and SIGTERM must
 cancel probes, refreshes and backoff and complete safe cleanup.
 
+Lifecycle events use a separate optional event callback. JSONL emits these
+events on stdout and ordinary logs on stderr, independent of log-level
+filtering. The session writes the same bounded event summary to its private
+log. Each event includes a closed reason code, attempt and round counters,
+candidate count, last healthy effective node, loaded node, attempted node,
+current quorum and actual next delay. Startup emits ready only after access
+publication; recovery emits ready only after acceptance and quorum. Stopped
+is emitted only after child and artifact cleanup succeeds, while the home
+lock still protects the event log write. Refresh events preserve the current
+state and distinguish stale cache, unchanged content, updated content and
+transient transport failure. Repeated stop is
+idempotent. A closed output stream does not interrupt service.
+
 Connectivity checks allocate at most three workers. If a request outlives a
 check's budget, subsequent checks report it as unfinished and allocate no new
 workers until that batch finishes. Late results do not establish readiness for

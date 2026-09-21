@@ -27,6 +27,13 @@ def runtime(monkeypatch):
             if captured.get("start_error"):
                 raise captured["start_error"]
             captured["log_sink"]("jerryproxy", "DEBUG", "debug-details")
+            policy = captured["recovery_policy"]
+            captured["event_sink"]({"event": "session.ready", "data": {
+                "reason": "startup_healthy", "node": node_id, "attempts": 1,
+                "candidates": 1, "delay": 0, "retry_policy": policy.retry_policy,
+                "retry_chain": (policy.retry_chain or "current:1,adaptive:3,random:all")
+                if policy.retry_policy == "fallback" else None,
+            }})
 
         def public_info(self):
             if captured.get("invalid_envelope"):
@@ -184,3 +191,40 @@ def test_guided_protocol_and_port_share_the_complete_runtime_path(tmp_path, monk
     assert runtime["listener_protocol"] == "http"
     assert runtime["preferred_port"] is None
     assert runtime["recovery_policy"].retry_policy == "fixed"
+
+
+@pytest.mark.parametrize("log_format", ["jsonl", "human"])
+def test_lifecycle_output_reports_recovery_at_error_log_level(tmp_path, monkeypatch, log_format):
+    from test.runtime.test_persistent import Clock, Probe, ReloadingDriver
+    from test.runtime.test_session import _record, _session
+
+    clock = Clock()
+    record = _record(nodes=1)
+    session = _session(tmp_path, record, Probe(lambda: clock.now >= 20),
+                       clock=clock, sleeper=clock.sleep)
+    session.driver = ReloadingDriver()
+    session.wait = lambda: 0
+
+    def runtime_factory(paths, **options):
+        session.event_sink = options.get("event_sink")
+        session.log_sink = options["log_sink"]
+        session.log_level = options["log_level"]
+        return session
+
+    monkeypatch.setattr(server_module, "RuntimeSession", runtime_factory)
+    result = CliRunner().invoke(cli, ["--home", str(tmp_path), "server", "--subscription", "main",
+                                     "--node", record.nodes[0].node_id, "--no-install-missing",
+                                     "--log-format", log_format, "--log-level", "ERROR"])
+    assert result.exit_code == 0, result.output
+    if log_format == "jsonl":
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        names = [event["event"] for event in events]
+        assert names[0] == "session.starting"
+        assert names[-2:] == ["session.ready", "session.stopped"]
+        assert names.count("session.ready") == 1
+        assert "session.degraded" in names and "session.retrying" in names
+        assert events[-2]["data"]["health"]["ok"]
+    else:
+        assert "session.degraded" in result.output
+        assert "session.ready" in result.output
+        assert "session.stopped" in result.output

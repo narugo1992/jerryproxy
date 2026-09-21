@@ -508,8 +508,11 @@ recovery never rewrites the saved preference. Temporary subscription transport
 failures retain verified cache, with separate refresh backoff and Retry-After
 handling. Cache older than 12 hours requests refresh without disqualifying its
 nodes. Control, TLS, authentication, integrity and unclassified failures remain
-terminal. Cancellation, lifecycle events and long-running resource bounds
-are still being completed in this draft.
+terminal. Lifecycle events report starting, degradation, retry attempts,
+refresh outcomes, readiness and completed cleanup. JSONL sends events to stdout
+and ordinary logs to stderr; event visibility is independent of log level.
+Both log producers retain recent redacted diagnostics within a 4 MiB file.
+Cancellation and full long-running resource validation remain unfinished.
 
 Choose `--retry-policy none|fixed|random|adaptive|fallback` in a complete command
 or select the same policy in the guided TTY flow. The default `fallback` uses

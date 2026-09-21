@@ -482,12 +482,17 @@ def test_server_jsonl_uses_core_source_and_omits_owner_for_jerryproxy(tmp_path, 
             del paths
             self.process = None
             self._sink = kwargs["log_sink"]
+            self._events = kwargs["event_sink"]
 
         def start(self, subscription_name, node_id, install_missing):
             del subscription_name, node_id, install_missing
             self._sink("jerryproxy", "INFO", "proxy listener ready")
             self._sink("mihomo", "INFO", "connected")
             self._sink("mihomo", "INFO", "HTTP request complete")
+            info = self.public_info()
+            info.pop("access_file", None)
+            info.pop("log_file", None)
+            self._events({"event": "session.ready", "data": info})
 
         def public_info(self):
             return {
