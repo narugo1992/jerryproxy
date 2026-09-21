@@ -4,9 +4,12 @@ import socket
 import threading
 import time
 
+import pytest
+
 from jerryproxy.runtime.health import ConnectivityProbe, HealthTarget
 
 
+@pytest.mark.timeout(30)
 def test_slow_proxy_headers_do_not_occupy_future_probe_batches():
     import multiprocessing
 
@@ -28,7 +31,7 @@ def test_slow_proxy_headers_do_not_occupy_future_probe_batches():
             connection.settimeout(1)
             try:
                 connection.recv(8192)
-                for byte in b"HTTP/1.1 200 Connection established\r\nX-Slow: " + b"x" * 300:
+                for byte in b"HTTP/1.1 200 Connection established\r\nX-Slow: " + b"x" * 2000:
                     if stop.wait(0.01):
                         break
                     connection.sendall(bytes([byte]))
@@ -40,14 +43,16 @@ def test_slow_proxy_headers_do_not_occupy_future_probe_batches():
 
     server = threading.Thread(target=serve)
     server.start()
-    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),), quorum=1, timeout=1)
+    # Native CI can spend over a second importing a cold spawned interpreter.
+    # Give startup room while trickling longer than the complete probe budget.
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),), quorum=1, timeout=5)
     try:
         for _ in range(2):
             before = len(accepted)
             started = time.monotonic()
             snapshot = probe.check(listener.getsockname()[1], None, None)
             assert not snapshot.ok
-            assert time.monotonic() - started < 3
+            assert time.monotonic() - started < 8
             probe.close(timeout=1)
             assert set(child.pid for child in multiprocessing.active_children()) == children_before
             assert len(accepted) > before

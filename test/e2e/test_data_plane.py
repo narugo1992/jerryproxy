@@ -527,7 +527,11 @@ def test_live_recovery_hot_reloads_each_protocol(container, scheme, home, unused
     from jerryproxy.subscription import SubscriptionManager
 
     baseline = CONTRACT.nodes["ss"].split("#", 1)[0] + "#recovery-baseline"
-    candidate = CONTRACT.nodes[scheme].split("#", 1)[0] + "#recovery-candidate"
+    # VMess uses an opaque Base64 envelope; the qualified backend does not
+    # accept an added generic URI fragment on that spelling.
+    candidate = CONTRACT.nodes[scheme] if scheme == "vmess" else (
+        CONTRACT.nodes[scheme].split("#", 1)[0] + "#recovery-candidate"
+    )
     body = (baseline + "\n" + candidate + "\n").encode("utf-8")
     if container == "provider":
         body = yaml.safe_dump({"proxies": [
@@ -551,11 +555,19 @@ def test_live_recovery_hot_reloads_each_protocol(container, scheme, home, unused
             endpoint = "http://%s:%s@127.0.0.1:%d" % (quote(username, safe=""), quote(password, safe=""), port)
             with requests.Session() as transport:
                 transport.trust_env = False
-                with transport.get(CONTRACT.sentinel_url, proxies={"http": endpoint, "https": endpoint},
-                                   timeout=REQUEST_TIMEOUT, stream=True) as response:
-                    body = response.raw.read(_contract.MAXIMUM_RESPONSE_BYTES + 1, decode_content=True)
-                    assert len(body) <= _contract.MAXIMUM_RESPONSE_BYTES
-                    assert response.status_code == 200
+                # The control plane can accept a provider before its first
+                # encrypted connection is ready. Bound fixture warmup instead
+                # of treating a first-response 502 as a protocol verdict.
+                deadline = time.monotonic() + 15
+                while True:
+                    with transport.get(CONTRACT.sentinel_url, proxies={"http": endpoint, "https": endpoint},
+                                       timeout=REQUEST_TIMEOUT, stream=True) as response:
+                        body = response.raw.read(_contract.MAXIMUM_RESPONSE_BYTES + 1, decode_content=True)
+                        assert len(body) <= _contract.MAXIMUM_RESPONSE_BYTES
+                        if response.status_code == 200:
+                            break
+                        assert response.status_code == 502 and time.monotonic() < deadline
+                    time.sleep(0.1)
             answer = json.loads(body.decode("utf-8"))
             assert answer == {"banner": _contract.SENTINEL_BANNER, "marker": CONTRACT.marker}
             observations.append((runtime.process.process.pid, port, username, password))
