@@ -13,6 +13,7 @@ jerryproxy.runtime
    health
    interfaces
    mihomo
+   recovery
    session
 
 \_\_all\_\_
