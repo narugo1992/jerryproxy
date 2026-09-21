@@ -2,6 +2,8 @@
 
 import json
 import logging
+import signal
+from contextlib import contextmanager
 from urllib.parse import quote
 
 import click
@@ -22,6 +24,28 @@ from . import _common
 _BACKENDS = ("mihomo", "sing-box", "xray", "v2ray")
 _LOG_PRIORITIES = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 _DEFAULT_PORT = 17777
+
+
+@contextmanager
+def _interrupt_signals():
+    """Unwind once on termination, then let mandatory cleanup finish."""
+
+    interrupted = []
+    previous = [(number, signal.getsignal(number)) for number in (signal.SIGINT, signal.SIGTERM)]
+
+    def interrupt(number, frame):
+        del frame
+        if not interrupted:
+            interrupted.append(number)
+            raise KeyboardInterrupt
+
+    try:
+        for number, _ in previous:
+            signal.signal(number, interrupt)
+        yield interrupted
+    finally:
+        for number, handler in previous:
+            signal.signal(number, handler)
 
 
 def _proxy_url(protocol, address, port, username=None, password=None):
@@ -146,7 +170,9 @@ stream name.
 
 JSONL writes lifecycle events to stdout and ordinary logs to stderr. Lifecycle
 events remain visible at every log level and report starting, degraded,
-retrying, ready and stopped states with counters and retry delays.
+retrying, ready and stopped states with counters and retry delays. During the
+foreground session, SIGINT and SIGTERM request cleanup and exit with status
+130 and 143 respectively. Repeated signals do not interrupt cleanup.
 
 Human startup output is emitted through the JerryProxy log stream as one
 readable readiness summary, one copyable proxy URL, and a short
@@ -472,74 +498,75 @@ def server_command(
         event_sink=event_sink,
         recovery_policy=policy,
     )
-    try:
-        runtime.start(subscription_name, node_id=node_id, install_missing=install_missing)
-        info = runtime.public_info()
-        if not isinstance(info, dict):
-            raise RuntimeSessionError("runtime returned an invalid public session envelope")
-        # Access and runtime-log paths are private implementation details even
-        # when a future driver accidentally includes them in its envelope.
-        info = dict(info)
-        info["retry_policy"] = policy.retry_policy
-        info["retry_chain"] = (policy.retry_chain or DEFAULT_RETRY_CHAIN) if policy.retry_policy == "fallback" else None
-        info.pop("access_file", None)
-        info.pop("log_file", None)
-        if bind_all:
-            startup_warning("Listener is exposed on all interfaces; use --auth on untrusted networks.")
-        if log_format == "human":
-            listener = info["listener"]
-            address = listener["address"]
-            port = listener["port"]
-            listener_protocol = listener.get("protocol", "mixed")
-            proxy_url = _proxy_url(
-                listener_protocol,
-                address,
-                port,
-                runtime.username if authenticate else None,
-                runtime.password if authenticate else None,
-            )
-            startup_log(
-                "JerryProxy is ready: %s %s, %s proxy at %s:%d; authentication is %s."
-                % (
-                    info.get("backend", "mihomo"),
-                    info.get("backend_version", backend_version),
+    with _interrupt_signals() as interrupted:
+        try:
+            runtime.start(subscription_name, node_id=node_id, install_missing=install_missing)
+            info = runtime.public_info()
+            if not isinstance(info, dict):
+                raise RuntimeSessionError("runtime returned an invalid public session envelope")
+            # Access and runtime-log paths are private implementation details even
+            # when a future driver accidentally includes them in its envelope.
+            info = dict(info)
+            info.pop("access_file", None)
+            info.pop("log_file", None)
+            if bind_all:
+                startup_warning("Listener is exposed on all interfaces; use --auth on untrusted networks.")
+            if log_format == "human":
+                listener = info["listener"]
+                address = listener["address"]
+                port = listener["port"]
+                listener_protocol = listener.get("protocol", "mixed")
+                proxy_url = _proxy_url(
                     listener_protocol,
                     address,
                     port,
-                    "enabled" if authenticate else "disabled",
+                    runtime.username if authenticate else None,
+                    runtime.password if authenticate else None,
                 )
-            )
-            startup_log("Proxy URL: %s" % proxy_url, emphasize=True, preserve_local_auth=True)
-            startup_log("Recovery policy: %s" % policy.retry_policy)
-            if policy.retry_policy == "fallback":
-                startup_log("Recovery chain: %s" % (policy.retry_chain or DEFAULT_RETRY_CHAIN))
-            guide = [
-                "Shell guide: copy these commands into the shell where you want to use the proxy.",
-            ]
-            if authenticate:
-                guide.append(
-                    "Authentication is enabled; use username '%s' and password '%s' when prompted."
-                    % (runtime.username, runtime.password)
+                startup_log(
+                    "JerryProxy is ready: %s %s, %s proxy at %s:%d; authentication is %s."
+                    % (
+                        info.get("backend", "mihomo"),
+                        info.get("backend_version", backend_version),
+                        listener_protocol,
+                        address,
+                        port,
+                        "enabled" if authenticate else "disabled",
+                    )
                 )
-            guide.extend(
-                (
-                    "  export HTTP_PROXY='%s'" % proxy_url,
-                    "  export HTTPS_PROXY='%s'" % proxy_url,
-                    "  export ALL_PROXY='%s'" % proxy_url,
+                startup_log("Proxy URL: %s" % proxy_url, emphasize=True, preserve_local_auth=True)
+                startup_log("Recovery policy: %s" % policy.retry_policy)
+                if policy.retry_policy == "fallback":
+                    startup_log("Recovery chain: %s" % (policy.retry_chain or DEFAULT_RETRY_CHAIN))
+                guide = [
+                    "Shell guide: copy these commands into the shell where you want to use the proxy.",
+                ]
+                if authenticate:
+                    guide.append(
+                        "Authentication is enabled; use username '%s' and password '%s' when prompted."
+                        % (runtime.username, runtime.password)
+                    )
+                guide.extend(
+                    (
+                        "  export HTTP_PROXY='%s'" % proxy_url,
+                        "  export HTTPS_PROXY='%s'" % proxy_url,
+                        "  export ALL_PROXY='%s'" % proxy_url,
+                    )
                 )
-            )
-            if listener_protocol == "socks5":
-                guide.append("SOCKS5 uses the `socks5h` URL so DNS lookups also go through the proxy.")
-            guide.append("When finished, run: unset HTTP_PROXY HTTPS_PROXY ALL_PROXY")
-            startup_log("\n".join(guide), preserve_local_auth=authenticate, multiline=True)
-        exit_code = runtime.wait()
-        if exit_code and exit_code != 130:
-            raise click.ClickException("Mihomo exited with status %d" % exit_code)
-    except KeyboardInterrupt:
-        runtime.stop()
-    except (RuntimeSessionError, BackendNotInstalledError):
-        runtime.stop()
-        raise
-    finally:
-        if runtime.process is not None:
+                if listener_protocol == "socks5":
+                    guide.append("SOCKS5 uses the `socks5h` URL so DNS lookups also go through the proxy.")
+                guide.append("When finished, run: unset HTTP_PROXY HTTPS_PROXY ALL_PROXY")
+                startup_log("\n".join(guide), preserve_local_auth=authenticate, multiline=True)
+            exit_code = runtime.wait()
+            if exit_code and exit_code != 130:
+                raise click.ClickException("Mihomo exited with status %d" % exit_code)
+        except KeyboardInterrupt:
             runtime.stop()
+        except (RuntimeSessionError, BackendNotInstalledError):
+            runtime.stop()
+            raise
+        finally:
+            if runtime.process is not None:
+                runtime.stop()
+    if interrupted:
+        raise click.exceptions.Exit(128 + interrupted[0])

@@ -36,8 +36,8 @@ rewriting the saved preference. Recovery uses repeated bounded rounds; healthy
 sessions do not explore. Refresh retains verified cache on explicitly transient
 transport failures, propagates network budgets and observes independent backoff
 and Retry-After. Explicit and guided CLI support none, fixed, random, adaptive
-and fallback strategies with a closed optional fallback chain. SIGTERM,
-hard network cancellation and long-run resource validation remain active
+and fallback strategies with a closed optional fallback chain. Scoped SIGINT
+and SIGTERM handlers unwind foreground sessions; hard network cancellation and long-run resource validation remain active
 implementation work. Structured lifecycle events and bounded recent logs exist.
 Nodes are labelled from their URI fragment or provider name, depending on the
 container format. A stored node projection that no longer matches its source

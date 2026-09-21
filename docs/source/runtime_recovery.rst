@@ -63,7 +63,11 @@ Sanitized events expose starting, degraded, retrying, ready and stopped states,
 actual retry delays, skip reasons and current health. No event falsely reports
 readiness or exposes secrets. Threads, children, statistics and recent logs
 remain bounded for an indefinitely running session. Ctrl-C and SIGTERM must
-cancel probes, refreshes and backoff and complete safe cleanup.
+cancel probes, refreshes and backoff and complete safe cleanup. The CLI owns
+SIGINT and SIGTERM handlers only during the foreground session. The first
+signal requests unwinding; repeated signals are ignored until cleanup has
+finished, then prior handlers are restored. Successful cancellation exits
+with 128 plus the signal number. Cleanup failure remains a terminal error.
 
 Lifecycle events use a separate optional event callback. JSONL emits these
 events on stdout and ordinary logs on stderr, independent of log-level
