@@ -175,6 +175,7 @@ catalog_update:
 
 catalog_check:
 	$(PYTHON) -m tools.backend_catalog --validate-only
+	$(PYTHON) -m pytest tools/test_catalog_workflow.py -q --no-cov
 
 license_check:
 	$(PYTHON) -m tools.licenses $(if $(WRITE),--write,)

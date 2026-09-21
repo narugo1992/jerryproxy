@@ -447,6 +447,14 @@ prefers GitHub API digests, and reads official checksum text only for legacy
 assets where the API has no digest. It never downloads backend archives to
 calculate catalog fingerprints. The updater is not included in the wheel.
 
+Scheduled and manual runs first look for an open catalog review. New reviews
+use the exact title `chore(catalog): refresh backend release catalogs` and the
+body marker `<!-- jerryproxy:backend-catalog-refresh -->`; both must match.
+Existing legacy bot reviews are also recognized by title, author, and branch.
+When a review is open, the run comments on the newest matching PR and skips
+refreshing or publishing a branch. After that review is merged or closed, a
+later run may create a new review. Query failures stop the workflow.
+
 Relay-health monitoring is also repository infrastructure, not JerryProxy
 runtime behavior. Its 57-site configuration lives in a dedicated
 [Gist](https://gist.github.com/narugo1992/78fb0ee6135fcdf4f0e5c7ec38f2fd59).
