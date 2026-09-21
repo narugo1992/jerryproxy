@@ -20,6 +20,7 @@ from ..backend.durable import flush_directory
 from ..errors import RuntimeSessionError
 from ..home import is_path_alias
 from ..subscription.redaction import redact_bytes, redact_text, terminal_safe_text
+from ._logs import append_recent
 from .interfaces import LoadedNodes, RuntimeDriver, RuntimeProjection
 
 QUALIFIED_VERSION = "1.19.29"
@@ -1286,16 +1287,14 @@ class MihomoProcess(object):
                 _private_directory(self.log_path.parent, boundary=self.log_path.parent)
                 if is_path_alias(self.log_path):
                     raise RuntimeSessionError("runtime log path is aliased")
-                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
                 descriptor = os.open(str(self.log_path), flags, 0o600)
                 status = os.fstat(descriptor)
                 if not stat.S_ISREG(status.st_mode):
                     raise RuntimeSessionError("runtime log path is not a regular file")
                 if os.name == "posix" and stat.S_IMODE(status.st_mode) != 0o600:
                     raise RuntimeSessionError("runtime log path has unsafe permissions")
-                if status.st_size >= MAXIMUM_LOG_BYTES:
-                    raise RuntimeSessionError("runtime log exceeds its size bound")
-                os.write(descriptor, line[: MAXIMUM_LOG_BYTES - status.st_size])
+                append_recent(descriptor, line, status.st_size, MAXIMUM_LOG_BYTES)
         except (OSError, RuntimeSessionError, ValueError) as error:
             # Log publication can fail after launch; draining must continue.
             self._record_drain_error(error)

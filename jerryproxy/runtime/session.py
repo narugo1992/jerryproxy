@@ -30,6 +30,7 @@ from ..subscription.interfaces import NodeSource
 from ..subscription.redaction import redact_text, terminal_safe_text
 from ..subscription.storage import _ensure_extension_directory, _require_node_projection
 from ..subscription.transport import MIHOMO_SUBSCRIPTION_PARSER
+from ._logs import append_recent
 from .health import ConnectivityProbe, RecoveryDeadline, RecoveryPolicy
 from .interfaces import RuntimeDriver
 from .mihomo import (
@@ -183,29 +184,25 @@ class RuntimeSession(object):
         self._next_refresh_at = 0.0
         self._refresh_failures = 0
 
-    def _append_log_line(self, source, level, message):
+    def _append_log_line(self, level, message):
         safe = terminal_safe_text(redact_text(" ".join(str(message).split())))[:4096]
         if not safe:
             return
-        if source == "jerryproxy":
-            line = ("[%s] %s\n" % (level, safe)).encode("utf-8", "replace")
-        else:
-            line = ("[%s] %s\n" % (source, safe)).encode("utf-8", "replace")
+        line = ("[%s] %s\n" % (level, safe)).encode("utf-8", "replace")
         descriptor = -1
         try:
             with self._log_file_lock:
                 _ensure_extension_directory(self.log_path.parent)
                 if is_path_alias(self.log_path):
                     raise RuntimeSessionError("runtime log path is aliased")
-                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
                 descriptor = os.open(str(self.log_path), flags, 0o600)
                 status = os.fstat(descriptor)
                 if not stat.S_ISREG(status.st_mode):
                     raise RuntimeSessionError("runtime log path is not a regular file")
                 if os.name == "posix" and stat.S_IMODE(status.st_mode) != 0o600:
                     raise RuntimeSessionError("runtime log path has unsafe permissions")
-                if status.st_size < MAXIMUM_LOG_BYTES:
-                    os.write(descriptor, line[: MAXIMUM_LOG_BYTES - status.st_size])
+                append_recent(descriptor, line, status.st_size, MAXIMUM_LOG_BYTES)
         except (OSError, RuntimeSessionError, ValueError) as error:
             # Logging must not interrupt proxy service; retain a bounded error.
             if len(self._log_errors) < 8:
@@ -218,7 +215,7 @@ class RuntimeSession(object):
         normalized = str(level).upper()
         if normalized not in _LOG_LEVELS or _LOG_LEVELS[normalized] < _LOG_LEVELS[self.log_level]:
             return
-        self._append_log_line("jerryproxy", normalized, message)
+        self._append_log_line(normalized, message)
         if self.log_sink is not None:
             try:
                 self.log_sink("jerryproxy", normalized, redact_text(message))

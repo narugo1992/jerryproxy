@@ -71,6 +71,13 @@ workers until that batch finishes. Late results do not establish readiness for
 a later check. This bounds worker accumulation but does not by itself prove
 that every network wait is cancellable; cancellation remains a separate gate.
 
+Runtime logs retain recent diagnostics within a 4 MiB file. Both producers
+serialize writes under the existing shared lock. On overflow they discard
+the oldest portion, retain complete recent lines from the final half and
+append the new redacted line through the same validated descriptor. No
+rotation paths are created. A crash during this in-place compaction can lose
+diagnostic history; it cannot modify managed configuration or credentials.
+
 Verification required before merge
 ----------------------------------
 
