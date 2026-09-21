@@ -1,8 +1,8 @@
 Persistent recovery implementation contract
 ===========================================
 
-This is the acceptance contract for the ongoing implementation, not a claim
-that these behaviors are already available. It implements the maintainer's
+This contract defines persistent recovery and its merge acceptance criteria.
+It implements the maintainer's
 Chinese design document, revision 8, dated 2026-09-21.
 
 Inputs and boundaries
@@ -127,8 +127,8 @@ is tracked with worker-owned events instead of interruptible joins; cleanup
 must confirm all workers have exited before releasing the home lock. An
 unconfirmed worker makes cleanup fail closed. This bounds worker accumulation but does not by itself prove
 that an arbitrary injected transport can be cancelled. Default network
-transports instead use the disposable process described above; native platform
-cancellation evidence remains part of the final verification gate.
+transports instead use the disposable process described above. Native platform
+and packaged-executable verification run in the repository CI matrix.
 
 Runtime logs retain recent diagnostics within a 4 MiB file. Both producers
 serialize writes under the existing shared lock. Descriptors use binary mode
