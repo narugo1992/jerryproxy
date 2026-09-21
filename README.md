@@ -339,8 +339,8 @@ compatibility, and one lock-consistent installed/active backend inventory. It
 also exercises a complete synthetic backend lifecycle plus install, activation,
 and removal hard-exit recovery in isolated temporary JerryProxy homes without
 changing the configured home. A separate health-worker check spawns the actual
-network worker against a reserved, non-listening loopback port, verifies the
-refusal result and confirms cleanup without external traffic. It then streams one fixed 1 MiB Range from
+network worker against a temporary loopback HTTP server, verifies the
+response and confirms cleanup without external traffic. It then streams one fixed 1 MiB Range from
 a pinned public Xray release through each built-in relay. The probe separates
 response-header latency, first-chunk latency, and the speed of the remaining
 chunks, uses a five-second connect/read timeout, and has a parent-enforced

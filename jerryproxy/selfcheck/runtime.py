@@ -3,6 +3,8 @@
 import os
 import socket
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from ..errors import (
@@ -40,23 +42,37 @@ class _ProbeHealth(object):
 def _check_health_process():
     """Verify the installed health worker can spawn, report and terminate."""
 
-    probe = ConnectivityProbe(targets=(HealthTarget("local-refusal", "http://self-check.invalid/", 204),),
+    observed = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - standard library callback
+            observed.append(True)
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    probe = ConnectivityProbe(targets=(HealthTarget("local-response", "http://self-check.invalid/", 204),),
                               quorum=1, timeout=10)
     try:
-        try:
-            # A bound socket without listen() reserves a refused loopback endpoint;
-            # no DNS or external network is used, even in a frozen executable.
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
-                reserved.bind(("127.0.0.1", 0))
-                result = probe.check(reserved.getsockname()[1], "self-check", "temporary-local-secret")
-            if result.ok or result.targets[0].detail != "transport_failed":
-                return CheckResult.fail("health worker did not report the expected local connection refusal")
-        finally:
-            probe.close()
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                try:
+                    result = probe.check(server.server_port, None, None)
+                finally:
+                    probe.close()
+            finally:
+                server.shutdown()
+                thread.join(2)
+            if not result.ok or not observed:
+                return CheckResult.fail("health worker did not complete the local HTTP round trip")
     except (OSError, RuntimeError, RuntimeSessionError) as error:
         # Host process/socket allocation and worker cleanup failures are diagnostics.
         return _error_result(error)
-    return CheckResult.ok("health worker spawned, reported a local refusal and terminated")
+    return CheckResult.ok("health worker completed a local HTTP round trip and terminated")
 
 
 class _ProbeChild(object):
