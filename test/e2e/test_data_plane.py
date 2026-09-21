@@ -505,3 +505,81 @@ def test_an_in_network_source_url_is_refused_before_any_fetch(home):
     listed = _run(["subscription", "list", "--json"], home)
     assert listed.returncode == 0, _redacted(listed.stdout.decode("utf-8", "replace"))
     assert json.loads(listed.stdout.decode("utf-8") or "[]") == []
+
+
+@pytest.mark.timeout(CASE_TIMEOUT)
+@pytest.mark.parametrize("scheme", sorted(_contract.NODE_VARIABLES))
+def test_live_recovery_hot_reloads_each_uri_protocol(scheme, home, unused_port, isolated_sentinel):
+    """Use the real private sentinel before and after a forced health outage.
+
+    Only the outage verdict is injected. Provider publication, native reload,
+    backend identity/selection checks, encrypted traffic, and cleanup are real.
+    The runner cannot obtain the nonce by bypassing the selected proxy.
+    """
+
+    from urllib.parse import quote
+
+    from jerryproxy.home import JerryProxyPaths
+    from jerryproxy.runtime import HealthSnapshot, RecoveryPolicy, RuntimeSession
+    from jerryproxy.subscription import SubscriptionManager
+
+    baseline = CONTRACT.nodes["ss"].split("#", 1)[0] + "#recovery-baseline"
+    candidate = CONTRACT.nodes[scheme].split("#", 1)[0] + "#recovery-candidate"
+    paths = JerryProxyPaths(home)
+    subscriptions = SubscriptionManager(paths)
+    record = subscriptions.add("reload", None, body=(baseline + "\n" + candidate + "\n").encode("utf-8"))
+    initial, alternate = record.nodes
+    observations = []
+    events = []
+
+    class SentinelProbe:
+        calls = 0
+
+        def check(self, port, username, password):
+            self.calls += 1
+            if 2 <= self.calls <= 4:
+                return HealthSnapshot((), 0, 1, time.monotonic())
+            endpoint = "http://%s:%s@127.0.0.1:%d" % (quote(username, safe=""), quote(password, safe=""), port)
+            with requests.Session() as transport:
+                transport.trust_env = False
+                with transport.get(CONTRACT.sentinel_url, proxies={"http": endpoint, "https": endpoint},
+                                   timeout=REQUEST_TIMEOUT, stream=True) as response:
+                    body = response.raw.read(_contract.MAXIMUM_RESPONSE_BYTES + 1, decode_content=True)
+                    assert len(body) <= _contract.MAXIMUM_RESPONSE_BYTES
+                    assert response.status_code == 200
+            answer = json.loads(body.decode("utf-8"))
+            assert answer == {"banner": _contract.SENTINEL_BANNER, "marker": CONTRACT.marker}
+            observations.append((runtime.process.process.pid, port, username, password))
+            return HealthSnapshot((), 1, 1, time.monotonic())
+
+    def event_sink(event):
+        if event["event"] == "session.ready":
+            events.append((event, runtime._loaded_identity))
+
+    def sleeper(delay):
+        if len(events) == 2:
+            raise KeyboardInterrupt
+        time.sleep(delay)
+
+    runtime = RuntimeSession(paths, subscription_manager=subscriptions, health_probe=SentinelProbe(),
+                             preferred_port=unused_port, strict_port=True, authenticate=True,
+                             backend_log_level="OFF", event_sink=event_sink, sleeper=sleeper,
+                             recovery_policy=RecoveryPolicy(retry_policy="fallback", retry_chain="current:1,random:all",
+                                                            health_interval=0.01, confirmation_delay=0.01))
+    try:
+        runtime.start("reload", initial.node_id, install_missing=False)
+        assert runtime.wait() == 130
+        assert len(observations) == 2
+        assert observations[0] == observations[1], "hot reload changed backend, listener or credentials"
+        assert len(events) == 2 and events[0][1] != events[1][1], "provider generation did not change"
+        assert events[0][0]["data"]["node"] == initial.node_id
+        assert events[1][0]["data"]["node"] == alternate.node_id
+        assert events[1][0]["data"]["preference_node"] == initial.node_id
+        assert events[1][0]["data"]["health"]["ok"]
+        rendered = json.dumps([item[0] for item in events])
+        assert CONTRACT.nodes[scheme] not in rendered
+        assert CONTRACT.marker not in rendered
+        assert observations[0][2] not in rendered and observations[0][3] not in rendered
+    finally:
+        runtime.stop()
+    assert not runtime.session_root.exists()
