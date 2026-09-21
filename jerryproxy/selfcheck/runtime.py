@@ -13,7 +13,7 @@ from ..errors import (
 )
 from ..home import JerryProxyPaths
 from ..lock import JerryProxyOperationLock
-from ..runtime.health import DEFAULT_HEALTH_TARGETS, HealthSnapshot, RecoveryPolicy
+from ..runtime.health import DEFAULT_HEALTH_TARGETS, ConnectivityProbe, HealthSnapshot, HealthTarget, RecoveryPolicy
 from ..runtime.interfaces import LoadedNodes, RuntimeDriver, RuntimeProjection
 from ..runtime.mihomo import build_provider_config
 from ..runtime.session import RuntimeSession
@@ -35,6 +35,28 @@ class _ProbeHealth(object):
     def check(self, port, username, password):  # type: (int, str, str) -> HealthSnapshot
         del port, username, password
         return HealthSnapshot(targets=(), passed=1, required=1, started_at=0.0)
+
+
+def _check_health_process():
+    """Verify the installed health worker can spawn, report and terminate."""
+
+    probe = ConnectivityProbe(targets=(HealthTarget("local-refusal", "http://self-check.invalid/", 204),),
+                              quorum=1, timeout=10)
+    try:
+        try:
+            # A bound socket without listen() reserves a refused loopback endpoint;
+            # no DNS or external network is used, even in a frozen executable.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+                reserved.bind(("127.0.0.1", 0))
+                result = probe.check(reserved.getsockname()[1], "self-check", "temporary-local-secret")
+            if result.ok or result.targets[0].detail != "transport_failed":
+                return CheckResult.fail("health worker did not report the expected local connection refusal")
+        finally:
+            probe.close()
+    except (OSError, RuntimeError, RuntimeSessionError) as error:
+        # Host process/socket allocation and worker cleanup failures are diagnostics.
+        return _error_result(error)
+    return CheckResult.ok("health worker spawned, reported a local refusal and terminated")
 
 
 class _ProbeChild(object):

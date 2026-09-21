@@ -115,6 +115,9 @@ budget and fails closed on uncertain process ownership. Injected transports
 run in-process for deterministic testing. Library scripts that launch default
 probes must use the standard ``if __name__ == "__main__"`` entry guard
 required by multiprocessing spawn; the CLI already provides that guard.
+The installed ``self-check`` exercises the actual spawned health worker against
+a bound, non-listening loopback port. It requires a transport refusal and
+confirmed cleanup; standalone artifact CI runs this check on each target OS.
 
 Injected in-process checks allocate at most three workers. If a request outlives
 a check's budget, subsequent checks report it as unfinished and allocate no new

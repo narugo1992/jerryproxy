@@ -67,3 +67,45 @@ def test_driver_contract_diagnostic_detects_missing_home_exclusion(monkeypatch):
     result = runtime_module._check_runtime_driver_contract()
     assert result.level == "FAIL"
     assert "did not hold the home-wide lock" in result.detail
+
+
+def test_substitute_driver_reload_requires_no_network_or_credentials():
+    driver = runtime_module._ProbeDriver("mihomo")
+    before = dict(vars(driver))
+    assert driver.reload_provider(1, "unused-private-secret", 0.1) is None
+    assert vars(driver) == before
+
+
+def test_health_process_diagnostic_uses_real_spawn_and_reaps_worker():
+    import multiprocessing
+
+    before = {child.pid for child in multiprocessing.active_children()}
+    result = runtime_module._check_health_process()
+    assert result.level == "OK"
+    assert {child.pid for child in multiprocessing.active_children()} == before
+
+
+@pytest.mark.parametrize("outcome", ["unexpected_success", "wrong_failure", "spawn_error", "cleanup_error"])
+def test_health_process_diagnostic_rejects_incomplete_verification(monkeypatch, outcome):
+    from jerryproxy.errors import RuntimeSessionError
+    from jerryproxy.runtime.health import HealthSnapshot, TargetHealth
+
+    closed = []
+
+    class Probe:
+        def check(self, *args):
+            if outcome == "spawn_error":
+                raise RuntimeSessionError("health worker could not start")
+            ok = outcome == "unexpected_success"
+            detail = "" if ok else "probe_deadline" if outcome == "wrong_failure" else "transport_failed"
+            return HealthSnapshot((TargetHealth("local-refusal", ok, detail=detail),), int(ok), 1, 0)
+
+        def close(self):
+            closed.append(True)
+            if outcome == "cleanup_error":
+                raise RuntimeSessionError("health cleanup remains unconfirmed")
+
+    monkeypatch.setattr(runtime_module, "ConnectivityProbe", lambda **kwargs: Probe())
+    result = runtime_module._check_health_process()
+    assert result.level == ("ERR" if outcome.endswith("error") else "FAIL")
+    assert closed == [True]
