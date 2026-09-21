@@ -181,7 +181,7 @@ def test_recovery_refresh_is_throttled_and_preserves_usable_cache(tmp_path, mode
         else:
             assert len(times) >= 2
             interval = 180 if mode == "retry_after" else 60
-            assert all(b + 1e-9 >= a + interval for a, b in zip(times, times[1:])), times
+            assert all(b >= a + interval for a, b in zip(times, times[1:])), times
     finally:
         session.stop()
 
