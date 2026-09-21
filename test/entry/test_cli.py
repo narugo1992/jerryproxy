@@ -13,6 +13,7 @@ from click.testing import CliRunner
 
 import jerryproxy.cli as cli_module
 import jerryproxy.cli._common as common_module
+from jerryproxy import __VERSION__
 from jerryproxy.backend.catalog import BackendCatalog
 from jerryproxy.backend.manager import BackendManager
 from jerryproxy.backend.platform import detect_platform
@@ -55,7 +56,7 @@ def install_fake_mihomo(home, tmp_path, version, payload, activate):
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "jerryproxy, version 0.1.0" in result.output
+    assert ("jerryproxy, version %s" % __VERSION__) in result.output
 
 
 def test_home_override(tmp_path):
@@ -159,7 +160,7 @@ def test_local_backend_list_rejects_unsafe_version_permissions_without_repair(tm
 def test_doctor_reports_platform_and_counts(tmp_path):
     result = CliRunner().invoke(cli, ["--home", str(tmp_path), "doctor"])
     assert result.exit_code == 0
-    assert "JerryProxy 0.1.0" in result.output
+    assert ("JerryProxy %s" % __VERSION__) in result.output
     assert "Installed backends: 0" in result.output
     assert "Active backends: 0" in result.output
     assert "File lock:" in result.output
@@ -1258,7 +1259,7 @@ def test_scoped_current_ignores_unrelated_corrupt_active_state(tmp_path, monkeyp
 def test_console_main_returns_success_for_real_version_command(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["jerryproxy", "--version"])
     assert main() == 0
-    assert "jerryproxy, version 0.1.0" in capsys.readouterr().out
+    assert ("jerryproxy, version %s" % __VERSION__) in capsys.readouterr().out
 
 
 def test_console_main_returns_click_usage_exit_code(monkeypatch, capsys):
@@ -1273,7 +1274,7 @@ def test_python_module_entrypoint_executes_real_cli(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_module("jerryproxy.__main__", run_name="__main__")
     assert exit_info.value.code == 0
-    assert "jerryproxy, version 0.1.0" in capsys.readouterr().out
+    assert ("jerryproxy, version %s" % __VERSION__) in capsys.readouterr().out
 
 
 def test_interactive_prompts_translate_interrupts_and_missing_input(tmp_path, monkeypatch):

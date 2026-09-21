@@ -1,7 +1,7 @@
 Installation
 ============
 
-JerryProxy 0.1.0 is the first public, alpha-quality release. It supports Python
+JerryProxy 0.2.0 is prepared for release; publication is pending. It supports Python
 3.7 and newer and is distributed as a pure-Python wheel. The ``0.x`` API and
 managed-state formats are not stable yet.
 

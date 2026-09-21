@@ -5,7 +5,7 @@ JerryProxy is a Python 3.7+ multi-backend proxy CLI and backend manager.
 
 .. warning::
 
-   JerryProxy 0.1.0 is the first public, alpha-quality release. The current
+   JerryProxy 0.2.0 is prepared for release; publication is pending. The current
    runtime slice accepts bounded ``V2RAY_SUBSCRIPTION`` URI sources and
    Mihomo/Clash proxy-provider YAML for the encrypted protocols the qualified
    backend accepts, and runs Mihomo 1.19.29 in the foreground. Native profiles,
