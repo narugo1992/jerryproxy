@@ -27,11 +27,18 @@ jobs:
           original = AnchoredDirectory.open_existing_file
           def observed(self, parts, writable=False, expected_identity=None):
               print("OPEN", str(self.root), parts, "writable=", writable, flush=True)
-              return original(self, parts, writable=writable, expected_identity=expected_identity)
+              return original(self, parts, writable=False if os.name == "posix" else writable, expected_identity=expected_identity)
           AnchoredDirectory.open_existing_file = observed
           manager = BackendManager(JerryProxyPaths(Path("backend-home")))
           manager.install("v2ray", "5.53.0")
           print("INSTALLED 5.53.0", flush=True)
           manager.install("v2ray", "5.52.0", activate=False)
           print("INSTALLED 5.52.0", flush=True)
+          for attempt in range(5):
+              trial = BackendManager(JerryProxyPaths(Path("trial-%d" % attempt)))
+              for version in ("5.53.0", "5.52.0"):
+                  archive = Path("backend-home/downloads/v2ray") / version / "v2ray-linux-64.zip"
+                  digest = {"5.53.0": "6bbb8aee65a57d0b12599b4b7c842b3ad0daca4436e661d94015c447cb31b4fa", "5.52.0": "98b123c0f3ba1138eedc2be9b25935e5289236cb6800d1e6370a08d86e797177"}[version]
+                  trial.install_from_archive("v2ray", version, archive, expected_sha256=digest, activate=True)
+                  print("PASS", attempt, version, flush=True)
           PYTHON
