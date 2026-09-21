@@ -234,6 +234,8 @@ def _read_fetch_result(path):  # type: (str) -> object
         if isinstance(value, dict) and value == {"error": "subscription source fetch failed", "ok": False}:
             raise SubscriptionFetchError("subscription source fetch failed")
         raise SubscriptionFetchError("subscription worker result is invalid")
+    if not isinstance(value["body"], str):
+        raise SubscriptionFetchError("subscription worker result body is invalid")
     try:
         body = base64.b64decode(value["body"].encode("ascii"), validate=True)
     except (ValueError, TypeError, UnicodeEncodeError) as error:

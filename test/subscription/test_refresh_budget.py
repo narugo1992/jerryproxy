@@ -152,3 +152,134 @@ def test_timed_out_worker_is_retryable_only_after_confirmed_stop(tmp_path, monke
     assert 0 < observed[0] <= 0.5
     assert manager.get("main").revision == original.revision
     assert not tuple(manager.paths.runtimes.glob(".subscription-fetch-*"))
+
+
+@pytest.mark.parametrize("body", [None, 1, True, [], {}, "\u2603", "not base64!"])
+def test_worker_body_type_and_encoding_are_closed_failures(tmp_path, monkeypatch, worker_boundary, body):
+    manager, original = _manager(tmp_path, monkeypatch, [None])
+
+    def malformed(url, result_path, *args):
+        path = Path(result_path)
+        path.write_text(json.dumps({"ok": True, "body": body, "final_url": url}))
+        path.chmod(0o600)
+
+    monkeypatch.setattr(manager_module, "_fetch_worker", malformed)
+    with pytest.raises(SubscriptionFetchError, match="result body is invalid"):
+        manager.refresh("main")
+    assert manager.get("main").revision == original.revision
+    assert not tuple(manager.paths.runtimes.glob(".subscription-fetch-*"))
+
+
+@pytest.mark.parametrize("value", [
+    [], None, {}, {"ok": True}, {"ok": False, "error": "unknown"},
+    {"ok": True, "body": "", "final_url": 42},
+    {"ok": True, "body": "", "final_url": "http://provider.example/sub"},
+])
+def test_untrusted_worker_envelopes_fail_without_replacing_cache(tmp_path, monkeypatch, worker_boundary, value):
+    manager, original = _manager(tmp_path, monkeypatch, [None])
+
+    def malformed(url, result_path, *args):
+        path = Path(result_path)
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+
+    monkeypatch.setattr(manager_module, "_fetch_worker", malformed)
+    with pytest.raises(SubscriptionFetchError, match="worker result"):
+        manager.refresh("main")
+    assert manager.get("main").revision == original.revision
+
+
+@pytest.mark.parametrize("payload", [b"\xff", b"not-json", b"[" * 10000])
+def test_invalid_worker_json_is_a_bounded_source_failure(tmp_path, monkeypatch, worker_boundary, payload):
+    manager, original = _manager(tmp_path, monkeypatch, [None])
+
+    def malformed(url, result_path, *args):
+        path = Path(result_path)
+        path.write_bytes(payload)
+        path.chmod(0o600)
+
+    monkeypatch.setattr(manager_module, "_fetch_worker", malformed)
+    with pytest.raises(SubscriptionFetchError, match="worker result is invalid"):
+        manager.refresh("main")
+    assert manager.get("main").revision == original.revision
+
+
+@pytest.mark.parametrize("fault", ["missing", "oversized", "permissions", "unreadable", "body_oversized"])
+def test_worker_result_file_and_body_bounds_are_enforced(tmp_path, monkeypatch, worker_boundary, fault):
+    import base64
+    import os
+
+    if fault == "permissions" and os.name != "posix":
+        pytest.skip("POSIX permission boundary")
+    manager, original = _manager(tmp_path, monkeypatch, [None])
+    original_open = os.open
+
+    def unreadable(path, flags, *args, **kwargs):
+        if str(path).endswith("result.json"):
+            monkeypatch.setattr(os, "open", original_open)
+            raise PermissionError("denied")
+        return original_open(path, flags, *args, **kwargs)
+
+    def malformed(url, result_path, *args):
+        if fault == "missing":
+            return
+        path = Path(result_path)
+        if fault == "oversized":
+            with path.open("wb") as stream:
+                stream.truncate(manager_module._FETCH_RESULT_MAXIMUM_BYTES + 1)
+        else:
+            body = b"a" * (8 * 1024 * 1024 + 1) if fault == "body_oversized" else SS
+            path.write_text(json.dumps({"ok": True, "body": base64.b64encode(body).decode("ascii"),
+                                        "final_url": url}))
+        path.chmod(0o644 if fault == "permissions" else 0o600)
+        if fault == "unreadable":
+            monkeypatch.setattr(os, "open", unreadable)
+
+    monkeypatch.setattr(manager_module, "_fetch_worker", malformed)
+    with pytest.raises(SubscriptionFetchError, match="worker result"):
+        manager.refresh("main")
+    monkeypatch.setattr(os, "open", original_open)
+    assert manager.get("main").revision == original.revision
+
+
+@pytest.mark.parametrize("fault", ["device", "grows_after_stat"])
+def test_result_descriptor_is_validated_and_read_is_independently_bounded(
+    tmp_path, monkeypatch, worker_boundary, fault,
+):
+    import os
+
+    if fault == "device" and os.name != "posix":
+        pytest.skip("POSIX character device descriptor")
+    manager, original = _manager(tmp_path, monkeypatch, [None])
+    original_open = os.open
+    original_fdopen = os.fdopen
+    result_file = []
+    monkeypatch.setattr(manager_module, "_FETCH_RESULT_MAXIMUM_BYTES", 1024)
+
+    def substitute(path, flags, *args, **kwargs):
+        if str(path) == result_file[0] and fault == "device":
+            monkeypatch.setattr(os, "open", original_open)
+            return original_open(os.devnull, os.O_RDONLY)
+        return original_open(path, flags, *args, **kwargs)
+
+    def grow(descriptor, *args, **kwargs):
+        monkeypatch.setattr(os, "fdopen", original_fdopen)
+        with open(result_file[0], "ab") as stream:
+            stream.write(b" " * 1025)
+        return original_fdopen(descriptor, *args, **kwargs)
+
+    def malformed(url, result_path, *args):
+        result_file.append(result_path)
+        path = Path(result_path)
+        path.write_bytes(b"{}")
+        path.chmod(0o600)
+        if fault == "device":
+            monkeypatch.setattr(os, "open", substitute)
+        else:
+            monkeypatch.setattr(os, "fdopen", grow)
+
+    monkeypatch.setattr(manager_module, "_fetch_worker", malformed)
+    with pytest.raises(SubscriptionFetchError, match="worker result"):
+        manager.refresh("main")
+    assert manager.get("main").revision == original.revision
+    assert not tuple(manager.paths.runtimes.glob(".subscription-fetch-*"))
