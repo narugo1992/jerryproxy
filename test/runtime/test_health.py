@@ -270,8 +270,10 @@ def test_repeated_timeouts_do_not_accumulate_live_probe_workers():
             assert release.wait(15)
             return FakeResponse()
 
+    # Hold the logical deadline open until the worker enters; native scheduler
+    # latency must not turn this stalled-request case into a pre-request expiry.
     probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),),
-                              quorum=1, timeout=0.001, session_factory=lambda: Stalled(None))
+                              quorum=1, timeout=0.001, session_factory=lambda: Stalled(None), clock=lambda: 0.0)
     try:
         assert not probe.check(17777, None, None).ok
         assert entered.wait(1)
@@ -280,6 +282,7 @@ def test_repeated_timeouts_do_not_accumulate_live_probe_workers():
         assert len(calls) == 1
     finally:
         release.set()
+        probe.close()
 
 
 def test_many_targets_use_at_most_three_workers_and_can_recover():
