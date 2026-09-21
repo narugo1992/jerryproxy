@@ -131,6 +131,7 @@ python37:
 # Offline invariants of the harness assets: no Docker, no network.
 e2e_check:
 	cd ${TOOLS_DIR}/e2e && $(PYTHON) check.py
+	$(PYTHON) -m pytest tools/e2e/test_provision.py -q
 
 lint:
 	ruff check ${SRC_DIR} ${TEST_DIR} ${TOOLS_DIR} jerryproxy_cli.py setup.py auto_rst.py auto_rst_top_index.py
