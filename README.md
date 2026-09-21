@@ -513,8 +513,10 @@ refresh outcomes, readiness and completed cleanup. JSONL sends events to stdout
 and ordinary logs to stderr; event visibility is independent of log level.
 Both log producers retain recent redacted diagnostics within a 4 MiB file.
 SIGINT and SIGTERM unwind the foreground session and exit with status 130
-and 143 after cleanup; repeated signals do not interrupt that cleanup. Hard
-network cancellation and full long-running resource validation remain unfinished.
+and 143 after cleanup; repeated signals do not interrupt that cleanup. Default
+health requests run in a disposable process that is stopped at the wall deadline,
+so stalled network requests cannot occupy future probe batches. Native platform
+verification and full long-running resource validation remain unfinished.
 
 Choose `--retry-policy none|fixed|random|adaptive|fallback` in a complete command
 or select the same policy in the guided TTY flow. The default `fallback` uses

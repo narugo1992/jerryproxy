@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import requests
 
 from ..errors import RuntimeSessionError
+from ._probe import ProbeProcess
 from .recovery import RETRY_POLICIES, parse_retry_chain
 
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -81,12 +82,14 @@ class ConnectivityProbe(object):
         self.targets = tuple(DEFAULT_HEALTH_TARGETS if targets is None else targets)
         if not self.targets:
             raise ValueError("at least one health target is required")
-        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+                or not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("health timeout must be positive")
         if not isinstance(quorum, int) or isinstance(quorum, bool) or not 1 <= quorum <= len(self.targets):
             raise ValueError("health quorum is outside the target set")
         self.timeout = float(timeout)
         self.quorum = quorum
+        self._network_process = ProbeProcess() if session_factory is None else None
         self.session_factory = session_factory or requests.Session
         self.clock = clock or time.monotonic
         if protocol not in ("http", "mixed", "socks5"):
@@ -207,6 +210,10 @@ class ConnectivityProbe(object):
     def check(self, port, username, password, timeout=None):  # type: (int, str, str, object) -> HealthSnapshot
         """Run all quorum targets concurrently within one bounded timeout."""
 
+        if self._network_process is not None:
+            budget = self.timeout if timeout is None else min(self.timeout, float(timeout))
+            return self._network_process.check(self.targets, self.quorum, budget, self.protocol,
+                                               port, username, password)
         started = self.clock()
         effective_timeout = self.timeout if timeout is None else min(self.timeout, float(timeout))
         if any(not done.is_set() or worker.is_alive()
@@ -270,6 +277,8 @@ class ConnectivityProbe(object):
     def close(self, timeout=2.0):
         """Cancel pending targets and confirm worker cleanup before unlocking."""
 
+        if self._network_process is not None:
+            self._network_process.close(timeout)
         self._cancel.set()
         deadline = time.monotonic() + timeout
         for done in self._worker_done:

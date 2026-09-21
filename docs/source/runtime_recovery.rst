@@ -98,14 +98,27 @@ state and distinguish stale cache, unchanged content, updated content and
 transient transport failure. Repeated stop is
 idempotent. A closed output stream does not interrupt service.
 
-Connectivity checks allocate at most three workers. If a request outlives a
-check's budget, subsequent checks report it as unfinished and allocate no new
+Default network checks run in one disposable spawned process with at most
+three request threads. The parent includes process startup in the check
+budget, terminates the process on timeout or interruption, and confirms exit
+before accepting another batch. Credentials travel through multiprocessing
+IPC rather than command arguments or files. Results use a bounded, validated
+JSON envelope with closed diagnostic codes. Cleanup retains a separate bounded
+budget and fails closed on uncertain process ownership. Injected transports
+run in-process for deterministic testing. Library scripts that launch default
+probes must use the standard ``if __name__ == "__main__"`` entry guard
+required by multiprocessing spawn; the CLI already provides that guard.
+
+Injected in-process checks allocate at most three workers. If a request outlives
+a check's budget, subsequent checks report it as unfinished and allocate no new
 workers until that batch finishes. Late results do not establish readiness for
 a later check. Cancellation prevents pending targets from starting. Completion
 is tracked with worker-owned events instead of interruptible joins; cleanup
 must confirm all workers have exited before releasing the home lock. An
 unconfirmed worker makes cleanup fail closed. This bounds worker accumulation but does not by itself prove
-that every network wait is cancellable; cancellation remains a separate gate.
+that an arbitrary injected transport can be cancelled. Default network
+transports instead use the disposable process described above; native platform
+cancellation evidence remains part of the final verification gate.
 
 Runtime logs retain recent diagnostics within a 4 MiB file. Both producers
 serialize writes under the existing shared lock. Descriptors use binary mode
