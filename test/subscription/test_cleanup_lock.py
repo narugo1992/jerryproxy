@@ -246,3 +246,64 @@ def test_discarding_failed_manager_does_not_release_unconfirmed_home(tmp_path, l
         # Test teardown explicitly ends ownership only after real cleanup.
         if retained() is not None:
             retained().__exit__(None, None, None)
+
+
+def test_interrupted_starter_join_cannot_hide_pending_process_start(tmp_path, monkeypatch):
+    """Model old CPython's interrupted join reporting a live starter as dead."""
+    release = threading.Event()
+    stopped = threading.Event()
+    poisoned = set()
+    original_join = threading.Thread.join
+    original_alive = threading.Thread.is_alive
+
+    class Process:
+        exitcode = None
+        launched = False
+
+        def start(self):
+            release.wait(2)
+            self.launched = True
+
+        def is_alive(self):
+            return self.launched and not stopped.is_set()
+
+        def join(self, timeout):
+            pass
+
+        def terminate(self):
+            stopped.set()
+            self.exitcode = -15
+
+    class Context:
+        Event = threading.Event
+
+        def Process(self, **kwargs):
+            return Process()
+
+    def interrupted_join(thread, timeout=None):
+        if (threading.current_thread() is threading.main_thread()
+                and thread.name == "jerryproxy-subscription-start" and not release.is_set()):
+            poisoned.add(thread)
+            raise KeyboardInterrupt
+        return original_join(thread, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", interrupted_join)
+    monkeypatch.setattr(threading.Thread, "is_alive",
+                        lambda thread: False if thread in poisoned else original_alive(thread))
+    monkeypatch.setattr(manager_module.multiprocessing, "get_context", lambda method: Context())
+    monkeypatch.setattr(manager_module, "_FETCH_START_SECONDS", 0.005)
+    monkeypatch.setattr(manager_module, "_FETCH_STOP_SECONDS", 0.005)
+    manager = SubscriptionManager(JerryProxyPaths(tmp_path / "home"))
+    try:
+        with pytest.raises((KeyboardInterrupt, SubscriptionFetchError)):
+            manager.add("main", "https://provider.invalid/sub")
+        with pytest.raises(JerryProxyBusyError):
+            with JerryProxyOperationLock(manager.paths):
+                pass
+        assert tuple(manager.paths.runtimes.glob(".subscription-fetch-*"))
+    finally:
+        release.set()
+        # Restore accurate thread state for the independent cleanup owner.
+        poisoned.clear()
+    _wait_for_manager_cleanup(manager)
+    assert stopped.is_set()

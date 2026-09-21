@@ -70,6 +70,10 @@ retained lock on its next operation only after the supervisor confirms both work
 artifact removal. A runtime session similarly refuses to announce stopped
 or release its own lock while subscription cleanup is pending. No cleanup
 thread releases a thread-owned FileLock or acquires a second home lock.
+The subscription caller waits on a starter-owned completion event rather than
+an interruptible thread join, which can incorrectly report a live starter as
+stopped on older CPython versions. The cleanup supervisor also confirms actual
+starter exit before removing the private worker directory.
 Acquired operation locks remain strongly referenced until explicit exit, so
 discarding a failed owner cannot release an unconfirmed operation through
 garbage collection. Discarding such an owner forfeits in-process cleanup

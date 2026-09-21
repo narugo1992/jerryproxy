@@ -359,7 +359,9 @@ class SubscriptionManager(object):
             if not startup_done.wait(startup_budget):
                 cancel_gate.set()
                 _stop_fetch_process(process)
-                startup_thread.join(_FETCH_STOP_SECONDS)
+                # Interrupted Thread.join can misreport a live starter on older
+                # CPython; wait for the worker-owned completion event instead.
+                startup_done.wait(_FETCH_STOP_SECONDS)
                 # Only the cleanup block below may decide to retain the worker
                 # tree.  Deciding it here would freeze a stale liveness reading:
                 # a starter that finishes during the raise would leave a
@@ -397,7 +399,7 @@ class SubscriptionManager(object):
                     cancel_gate.set()
                 if not _stop_fetch_process(process):
                     cleanup_error = SubscriptionFetchError("subscription source worker could not be stopped")
-                startup_thread.join(_FETCH_STOP_SECONDS)
+                startup_done.wait(_FETCH_STOP_SECONDS)
                 if startup_thread.is_alive():
                     preserve_worker_tree = True
                     registered = self._fetch_cleanup.register(
