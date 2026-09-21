@@ -45,7 +45,7 @@ ConnectivityProbe
 -----------------------------------------------------
 
 .. autoclass:: ConnectivityProbe
-   :members: __init__,check
+   :members: __init__,check,close
 
 
 RecoveryPolicy

@@ -93,6 +93,8 @@ class ConnectivityProbe(object):
             raise ValueError("unsupported local proxy protocol")
         self.protocol = protocol
         self._workers = []
+        self._worker_done = []
+        self._cancel = threading.Event()
 
     @staticmethod
     def _proxy_url(port, username, password, protocol="http"):
@@ -204,7 +206,8 @@ class ConnectivityProbe(object):
 
         started = self.clock()
         effective_timeout = self.timeout if timeout is None else min(self.timeout, float(timeout))
-        if any(worker.is_alive() for worker in self._workers):
+        if any(not done.is_set() or worker.is_alive()
+               for worker, done in zip(self._workers, self._worker_done)):
             # A timed-out request must finish before another check can allocate
             # workers. Never reuse its late result as evidence of current health.
             return HealthSnapshot(
@@ -214,37 +217,65 @@ class ConnectivityProbe(object):
         results = [None] * len(self.targets)
         threads = []
         self._workers = threads
+        self._worker_done = []
+        self._cancel.clear()
         worker_count = min(3, len(self.targets))
         deadline = started + max(0.0, effective_timeout)
 
-        def run(worker_index):
-            for index in range(worker_index, len(self.targets), worker_count):
-                remaining = deadline - self.clock()
-                if remaining <= 0:
-                    break
-                results[index] = self._one(self.targets[index], port, username, password, timeout=remaining)
+        def run(worker_index, done):
+            try:
+                for index in range(worker_index, len(self.targets), worker_count):
+                    remaining = deadline - self.clock()
+                    if remaining <= 0 or self._cancel.is_set():
+                        break
+                    results[index] = self._one(self.targets[index], port, username, password, timeout=remaining)
+            finally:
+                done.set()
 
-        for index in range(worker_count):
-            thread = threading.Thread(target=run, args=(index,), name="jerryproxy-health-%d" % index)
-            thread.daemon = True
-            threads.append(thread)
-            thread.start()
-        for thread in threads:
-            remaining = deadline - self.clock()
-            if remaining > 0:
-                thread.join(remaining)
-        for thread in threads:
-            if thread.is_alive():
-                # Requests read timeouts are bounded, but a custom injected
-                # session may ignore them; retain an explicit failed result
-                # rather than allowing an unjoined worker to count as healthy.
-                thread.join(0.05)
+        try:
+            for index in range(worker_count):
+                done = threading.Event()
+                thread = threading.Thread(target=run, args=(index, done), name="jerryproxy-health-%d" % index)
+                thread.daemon = True
+                threads.append(thread)
+                self._worker_done.append(done)
+                try:
+                    thread.start()
+                except RuntimeError as error:
+                    # Thread allocation failed before its target could run.
+                    threads.pop()
+                    self._worker_done.pop()
+                    self._cancel.set()
+                    raise RuntimeSessionError("health worker could not start") from error
+            for done in self._worker_done:
+                remaining = deadline - self.clock()
+                if remaining > 0:
+                    done.wait(remaining)
+        except KeyboardInterrupt:
+            # Wait on completion events, not Thread.join: interrupted joins can
+            # mark a still-running worker stopped on older CPython versions.
+            self._cancel.set()
+            raise
         for index, result in enumerate(results):
             if result is None:
-                detail = "probe_worker_alive" if threads[index % worker_count].is_alive() else "probe_deadline"
+                done = self._worker_done[index % worker_count]
+                detail = "probe_deadline" if done.is_set() else "probe_worker_alive"
                 results[index] = TargetHealth(self.targets[index].name, False, detail=detail)
         passed = sum(1 for result in results if result.ok)
         return HealthSnapshot(tuple(results), passed, self.quorum, started)
+
+    def close(self, timeout=2.0):
+        """Cancel pending targets and confirm worker cleanup before unlocking."""
+
+        self._cancel.set()
+        deadline = time.monotonic() + timeout
+        for done in self._worker_done:
+            if not done.wait(max(0.0, deadline - time.monotonic())):
+                raise RuntimeSessionError("health worker cleanup remains unconfirmed")
+        for worker in self._workers:
+            worker.join(max(0.0, deadline - time.monotonic()))
+            if worker.is_alive():
+                raise RuntimeSessionError("health worker cleanup remains unconfirmed")
 
 
 @dataclass(frozen=True)

@@ -310,3 +310,139 @@ def test_many_targets_use_at_most_three_workers_and_can_recover():
     assert len(closed) <= 3
     probe.session_factory = lambda: FakeSession(FakeResponse())
     assert probe.check(17777, None, None, timeout=1).ok
+
+
+def test_probe_close_waits_for_real_worker_completion_and_cancels_pending_targets():
+    release = threading.Event()
+    entered = threading.Event()
+    calls = []
+
+    class Stalled(FakeSession):
+        def get(self, *args, **kwargs):
+            calls.append(1)
+            entered.set()
+            assert release.wait(5)
+            return FakeResponse()
+
+    probe = ConnectivityProbe(targets=tuple(HealthTarget(str(i), "https://example.invalid", 204) for i in range(12)),
+                              quorum=2, timeout=0.01, session_factory=lambda: Stalled(None))
+    try:
+        assert not probe.check(17777, None, None).ok
+        assert entered.wait(1)
+        with pytest.raises(RuntimeSessionError, match="health.*cleanup"):
+            probe.close(timeout=0.01)
+        assert len(calls) <= 3
+    finally:
+        release.set()
+    probe.close(timeout=1)
+    assert len(calls) <= 3
+    assert all(not worker.is_alive() for worker in probe._workers)
+    probe.close(timeout=0)
+
+
+def test_session_retains_lock_when_health_worker_cleanup_is_unconfirmed(tmp_path):
+    from jerryproxy.errors import JerryProxyBusyError
+    from jerryproxy.lock import JerryProxyOperationLock
+    from test.runtime.test_session import _record, _session
+
+    release = threading.Event()
+
+    class Stalled(FakeSession):
+        def get(self, *args, **kwargs):
+            assert release.wait(10)
+            return FakeResponse()
+
+    record = _record(nodes=1)
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),),
+                              quorum=1, timeout=0.001, session_factory=lambda: Stalled(None))
+    runtime = _session(tmp_path, record, probe, policy=RecoveryPolicy(retry_policy="none", confirmation_delay=0.001))
+    events = []
+    runtime.event_sink = events.append
+    try:
+        with pytest.raises(RuntimeSessionError, match="cleanup"):
+            runtime.start("main", record.nodes[0].node_id, install_missing=False)
+        assert runtime._operation_lock is not None
+        assert not any(event["event"] == "session.stopped" for event in events)
+        with pytest.raises(JerryProxyBusyError):
+            with JerryProxyOperationLock(runtime.paths):
+                pass
+    finally:
+        release.set()
+        for worker in probe._workers:
+            worker.join(1)
+        runtime.stop()
+    assert runtime._operation_lock is None
+
+
+def test_probe_interrupt_waits_on_completion_event_and_retains_live_worker(monkeypatch):
+    release = threading.Event()
+    entered = threading.Event()
+
+    class Stalled(FakeSession):
+        def get(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return FakeResponse()
+
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),),
+                              quorum=1, session_factory=lambda: Stalled(None))
+    original_wait = threading.Event.wait
+
+    def interrupt(event, timeout=None):
+        if event in probe._worker_done and threading.current_thread() is threading.main_thread():
+            assert original_wait(entered, 1)
+            raise KeyboardInterrupt
+        return original_wait(event, timeout)
+
+    monkeypatch.setattr(threading.Event, "wait", interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            probe.check(17777, None, None)
+        monkeypatch.setattr(threading.Event, "wait", original_wait)
+        assert not probe.check(17777, None, None).ok
+        with pytest.raises(RuntimeSessionError, match="cleanup"):
+            probe.close(timeout=0)
+    finally:
+        monkeypatch.setattr(threading.Event, "wait", original_wait)
+        release.set()
+        probe.close(timeout=1)
+
+
+def test_probe_reports_worker_allocation_failure_and_cleans_started_workers(monkeypatch):
+    original = threading.Thread.start
+    calls = []
+
+    def refuse(thread):
+        calls.append(thread)
+        if len(calls) == 2:
+            raise RuntimeError("thread allocation refused")
+        original(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", refuse)
+    probe = ConnectivityProbe(session_factory=lambda: FakeSession(FakeResponse()))
+    with pytest.raises(RuntimeSessionError, match="could not start"):
+        probe.check(17777, None, None)
+    probe.close(timeout=1)
+    assert len(probe._workers) == 1
+
+
+def test_probe_close_requires_thread_exit_after_target_completion(monkeypatch):
+    release = threading.Event()
+    original_thread = threading.Thread
+
+    class DelayedExit(original_thread):
+        def run(self):
+            super(DelayedExit, self).run()
+            assert release.wait(5)
+
+    monkeypatch.setattr(threading, "Thread", DelayedExit)
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),), quorum=1,
+                              session_factory=lambda: FakeSession(FakeResponse()))
+    try:
+        assert probe.check(17777, None, None).ok
+        assert not probe.check(17777, None, None).ok
+        with pytest.raises(RuntimeSessionError, match="cleanup"):
+            probe.close(timeout=0.01)
+    finally:
+        release.set()
+        probe.close(timeout=1)

@@ -98,7 +98,10 @@ idempotent. A closed output stream does not interrupt service.
 Connectivity checks allocate at most three workers. If a request outlives a
 check's budget, subsequent checks report it as unfinished and allocate no new
 workers until that batch finishes. Late results do not establish readiness for
-a later check. This bounds worker accumulation but does not by itself prove
+a later check. Cancellation prevents pending targets from starting. Completion
+is tracked with worker-owned events instead of interruptible joins; cleanup
+must confirm all workers have exited before releasing the home lock. An
+unconfirmed worker makes cleanup fail closed. This bounds worker accumulation but does not by itself prove
 that every network wait is cancellable; cancellation remains a separate gate.
 
 Runtime logs retain recent diagnostics within a 4 MiB file. Both producers

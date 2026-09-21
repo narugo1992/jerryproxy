@@ -499,6 +499,8 @@ class RuntimeSession(object):
                 # Process termination failures are terminal recovery failures.
                 raise RuntimeSessionError("mihomo backend cleanup failed") from error
             self.process = None
+        if isinstance(self.health_probe, ConnectivityProbe):
+            self.health_probe.close()
         self._require_fetch_cleanup()
 
     def _launch_node(self, node, deadline=None):
