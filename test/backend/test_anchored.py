@@ -1,6 +1,10 @@
 import errno
+import hashlib
 import os
+import shutil
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +24,28 @@ POSIX_FAULT_INJECTION = pytest.mark.skipif(
 def _write_private(path, payload=b"data"):
     path.write_bytes(payload)
     path.chmod(0o600)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux executable write exclusion")
+def test_file_evidence_flushes_an_executing_binary_without_write_access(tmp_path):
+    with AnchoredDirectory(tmp_path / "root") as anchored:
+        executable = anchored.root / "sleep"
+        shutil.copyfile("/bin/sleep", str(executable))
+        executable.chmod(0o700)
+        child = subprocess.Popen([str(executable), "30"])
+        try:
+            # Popen's exec handshake ensures the kernel holds the executable.
+            with pytest.raises(OSError) as busy:
+                os.open(str(executable), os.O_RDWR)
+            assert busy.value.errno == errno.ETXTBSY
+            size, digest, identity = anchored.file_evidence(("sleep",), flush=True)
+            payload = executable.read_bytes()
+            assert size == len(payload)
+            assert digest == hashlib.sha256(payload).hexdigest()
+            assert identity == anchored.identity(("sleep",))
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
 
 
 @pytest.mark.parametrize(

@@ -1746,7 +1746,10 @@ class AnchoredDirectory(object):
 
         stream, identity = self.open_existing_file(
             parts,
-            writable=flush,
+            # POSIX fsync accepts a read-only descriptor. Requesting write
+            # access after an executable probe can race Linux text cleanup
+            # and fail with ETXTBSY; Windows flushing still needs write access.
+            writable=flush and not self._posix,
             expected_identity=expected_identity,
         )
         digest = hashlib.sha256()
