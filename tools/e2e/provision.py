@@ -82,6 +82,31 @@ NODE_VARIABLES = {
     "anytls": "JERRYPROXY_E2E_ANYTLS_NODE",
 }
 
+PROVIDER_VARIABLE = "JERRYPROXY_E2E_PROVIDER_NODES"
+
+
+def compose_providers(values):  # type: (dict) -> dict
+    """Compose opaque provider fixtures from the same disposable credentials."""
+
+    tls = {"sni": values["tls_server_name"], "skip-cert-verify": True}
+    nodes = {
+        "ss": {"port": SS_PORT, "cipher": SS_METHOD, "password": values["ss_password"]},
+        "vmess": {"port": VMESS_PORT, "uuid": values["vmess_id"], "alterId": 0, "cipher": "auto"},
+        "vless": {
+            "port": VLESS_PORT, "uuid": values["vless_id"], "flow": VLESS_FLOW,
+            "tls": True, "servername": CAMOUFLAGE_SNI, "client-fingerprint": "chrome",
+            "reality-opts": {"public-key": values["reality_public_key"], "short-id": values["short_id"]},
+        },
+        "trojan": dict(tls, port=TROJAN_PORT, password=values["trojan_password"]),
+        "hysteria2": dict(tls, port=HYSTERIA2_PORT, password=values["hysteria2_password"]),
+        "tuic": dict(tls, port=TUIC_PORT, uuid=values["tuic_uuid"], password=values["tuic_password"],
+                     alpn=["h3"], **{"congestion-controller": "bbr"}),
+        "anytls": dict(tls, port=ANYTLS_PORT, password=values["anytls_password"]),
+    }
+    for scheme, node in nodes.items():
+        node.update({"type": scheme, "name": "e2e-" + scheme, "server": PROXY_HOST})
+    return nodes
+
 
 def _reality_keypair(xray):  # type: (str) -> tuple
     """Ask the pinned proxy binary for an X25519 pair rather than reimplementing it."""
@@ -285,6 +310,7 @@ def _emit_nodes(path):  # type: (str) -> int
     with open(path, "a", encoding="utf-8") as stream:
         for scheme, variable in sorted(NODE_VARIABLES.items()):
             stream.write("%s=%s\n" % (variable, nodes[scheme]))
+        stream.write("%s=%s\n" % (PROVIDER_VARIABLE, json.dumps(compose_providers(parts), separators=(",", ":"))))
     sys.stdout.write("composed %d node URIs\n" % len(nodes))
     return 0
 

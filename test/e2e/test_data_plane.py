@@ -22,8 +22,10 @@ import time
 
 import pytest
 import requests
+import yaml
 
 from jerryproxy.subscription import redact_text
+from jerryproxy.subscription.audit import PROVIDER_TYPES
 
 from . import _contract
 
@@ -508,8 +510,9 @@ def test_an_in_network_source_url_is_refused_before_any_fetch(home):
 
 
 @pytest.mark.timeout(CASE_TIMEOUT)
-@pytest.mark.parametrize("scheme", sorted(_contract.NODE_VARIABLES))
-def test_live_recovery_hot_reloads_each_uri_protocol(scheme, home, unused_port, isolated_sentinel):
+@pytest.mark.parametrize("container,scheme", [("uri", scheme) for scheme in sorted(_contract.NODE_VARIABLES)]
+                         + [("provider", scheme) for scheme in sorted(PROVIDER_TYPES)])
+def test_live_recovery_hot_reloads_each_protocol(container, scheme, home, unused_port, isolated_sentinel):
     """Use the real private sentinel before and after a forced health outage.
 
     Only the outage verdict is injected. Provider publication, native reload,
@@ -525,9 +528,15 @@ def test_live_recovery_hot_reloads_each_uri_protocol(scheme, home, unused_port, 
 
     baseline = CONTRACT.nodes["ss"].split("#", 1)[0] + "#recovery-baseline"
     candidate = CONTRACT.nodes[scheme].split("#", 1)[0] + "#recovery-candidate"
+    body = (baseline + "\n" + candidate + "\n").encode("utf-8")
+    if container == "provider":
+        body = yaml.safe_dump({"proxies": [
+            dict(CONTRACT.providers["ss"], name="recovery-baseline"),
+            dict(CONTRACT.providers[scheme], name="recovery-candidate"),
+        ]}).encode("utf-8")
     paths = JerryProxyPaths(home)
     subscriptions = SubscriptionManager(paths)
-    record = subscriptions.add("reload", None, body=(baseline + "\n" + candidate + "\n").encode("utf-8"))
+    record = subscriptions.add("reload", None, body=body)
     initial, alternate = record.nodes
     observations = []
     events = []

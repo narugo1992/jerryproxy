@@ -280,7 +280,7 @@ def _check_enforcement_is_declared():  # type: () -> list
     # Node URIs no longer arrive as step `env:`; they are composed into
     # GITHUB_ENV by an earlier step, because the runner's credential heuristic
     # silently drops an output that looks like a credential URI.
-    composed = set(provision.NODE_VARIABLES.values())
+    composed = set(provision.NODE_VARIABLES.values()) | {provision.PROVIDER_VARIABLE}
     emitter = re.search(r"^ +env:\n((?: +[A-Z0-9_]+: .*\n)+) +run: python tools/e2e/provision\.py --emit-nodes",
                         text, re.MULTILINE)
     if composed and emitter is None:
@@ -306,7 +306,7 @@ def _check_enforcement_is_declared():  # type: () -> list
         if "%s:" % name not in block:
             failures.append("the data-plane step does not supply %s" % name)
     # The composer and the lane must agree on the exact variable names.
-    mismatch = sorted(set(contract.NODE_VARIABLES.values()) ^ composed)
+    mismatch = sorted((set(contract.NODE_VARIABLES.values()) | {contract.PROVIDER_NODES}) ^ composed)
     failures.extend(
         "%s is composed or expected by only one side of the lane contract" % name
         for name in mismatch
