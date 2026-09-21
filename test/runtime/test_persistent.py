@@ -1,6 +1,7 @@
 """Public session recovery with a deterministic clock and external driver."""
 
 import hashlib
+import random
 
 import pytest
 
@@ -477,7 +478,8 @@ def test_healthy_stale_cache_refresh_failure_does_not_switch_or_stop(tmp_path):
         session.stop()
 
 
-def test_refresh_backoff_is_independent_and_resets_after_success(tmp_path):
+@pytest.mark.parametrize("seed", [0, 63])
+def test_refresh_backoff_is_independent_and_resets_after_success(tmp_path, seed):
     clock = Clock()
     record = _record(nodes=1, source_url="https://example.invalid/sub")
     times = []
@@ -492,14 +494,18 @@ def test_refresh_backoff_is_independent_and_resets_after_success(tmp_path):
     session = _session(tmp_path, record, Probe(lambda: len(times) >= 4), manager=Refreshing(record),
                        clock=clock, sleeper=clock.sleep, policy=RecoveryPolicy(retry_policy="fixed"))
     session.driver = ReloadingDriver()
+    session._backoff.rng = random.Random(seed)
     try:
         session.start("main", record.nodes[0].node_id, install_missing=False)
-        assert len(times) == 4
+        # Discovery may run again before the next eligible probe. Its cadence,
+        # rather than an exact count, is the contract under a 60-second interval.
+        assert len(times) >= 4
         # Compare absolute deadlines, as the scheduler does: subtraction of
         # jittered floats can round an exact 120-second interval below 120.
         assert times[0] + 60 <= times[1] <= times[0] + 180
         assert times[1] + 120 <= times[2] <= times[1] + 240
         assert times[2] + 60 <= times[3] <= times[2] + 180
+        assert all(later >= earlier + 60 for earlier, later in zip(times[3:], times[4:]))
     finally:
         session.stop()
 

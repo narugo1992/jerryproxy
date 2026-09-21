@@ -35,9 +35,8 @@ class TimedProbe(ConnectivityProbe):
 
 
 def replacement(count):
-    body = _record(nodes=count).body.replace(b":443", b":1443").replace(b"example.com", b"new.example.com")
-    # Use distinct source bytes for every identity, including any non-first node.
-    body = b"\n".join(line + b"-replacement" for line in body.splitlines())
+    # The provider keeps its labels but replaces every server address.
+    body = _record(nodes=count).body.replace(b"192.0.2.1", b"192.0.2.2")
     return build_record("main", "a" * 32, parse_subscription_body(body, format_hint="uri-lines"),
                         source_url="https://example.invalid/sub")
 
