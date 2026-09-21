@@ -15,6 +15,7 @@ from ..backend.relay import ALLOWED_PATTERNS, iter_builtin_relays
 from ..errors import BackendNotInstalledError, RuntimeSessionError
 from ..runtime import QUALIFIED_VERSION, RecoveryPolicy, RuntimeSession
 from ..runtime.mihomo import LISTENER_PROTOCOLS, reserve_loopback_port
+from ..runtime.recovery import DEFAULT_RETRY_CHAIN, RETRY_POLICIES
 from ..subscription.redaction import redact_text, terminal_safe_text
 from . import _common
 
@@ -87,6 +88,15 @@ try alternate nodes within the selected subscription, and refresh the source
 when policy permits. Healthy sessions never switch for exploration. Automatic failover never rewrites the saved node
 preference. The bearer URL, UUIDs, Reality keys, and backend raw output are
 never printed as one unredacted blob.
+
+`--retry-policy fallback` tries the current node, then adaptive and random
+alternates. `none` exits after confirmed failure; `fixed` waits for the initial
+identity; `random` samples without replacement; `adaptive` explores and uses
+recent success estimates only during outages. All candidates stay within the
+selected subscription. Healthy sessions never automatically fail back.
+`--retry-chain` applies only to fallback: unique current, adaptive and random
+stages with positive counts or all; current permits only current:1.
+The default chain is current:1,adaptive:3,random:all.
 
 When the stored nodes no longer match their source bytes, startup refreshes
 that subscription's saved URL exactly once and then continues; a projection
@@ -217,6 +227,14 @@ that guide only when `--auth` is enabled.
     help="URL path pattern used with --relay-url.",
 )
 @click.option(
+    "--retry-policy", type=click.Choice(RETRY_POLICIES), default="fallback", show_default=True,
+    help="Outage strategy; healthy sessions keep their node.",
+)
+@click.option(
+    "--retry-chain", metavar="STAGES",
+    help="Fallback stages, e.g. current:1,adaptive:3,random:all.",
+)
+@click.option(
     "--health-interval",
     type=click.IntRange(5, 3600),
     default=30,
@@ -255,12 +273,13 @@ def server_command(
     relay,
     relay_url,
     relay_pattern,
+    retry_policy,
+    retry_chain,
     health_interval,
     recovery_deadline,
     refresh_on_recovery,
     yes,
 ):
-    # type: (click.Context, tuple, str, str, Optional[int], str, Optional[str], bool, bool, bool, str, str, str, str, Optional[str], Optional[str], int, int, bool, bool) -> None
     """Run one synchronous foreground session."""
 
     if len(subscriptions) > 1:
@@ -273,10 +292,18 @@ def server_command(
         raise click.UsageError("--relay and --relay-url are mutually exclusive")
     if relay_pattern is not None and relay_url is None:
         raise click.UsageError("--relay-pattern requires --relay-url")
+    try:
+        policy = RecoveryPolicy(
+            retry_policy=retry_policy, retry_chain=retry_chain, health_interval=health_interval,
+            recovery_deadline=recovery_deadline, refresh_on_failure=refresh_on_recovery,
+        )
+    except ValueError as error:
+        # User-supplied closed policy syntax must fail before selection or I/O.
+        raise click.UsageError(str(error)) from error
     guided_targets = not subscriptions or node_id is None
     subscription_name = subscriptions[0] if subscriptions else None
     if subscription_name is None:
-        if yes or not _common.interactive_available():
+        if yes or log_format == "jsonl" or not _common.interactive_available():
             raise click.UsageError(
                 "--subscription NAME is required in non-interactive mode; "
                 "-y/--yes cannot infer a subscription"
@@ -287,7 +314,7 @@ def server_command(
             enabled_only=True,
         )
     if node_id is None:
-        if yes or not _common.interactive_available():
+        if yes or log_format == "jsonl" or not _common.interactive_available():
             raise click.UsageError(
                 "--node NODE_ID is required in non-interactive mode; "
                 "-y/--yes cannot infer a node"
@@ -307,6 +334,21 @@ def server_command(
                     Choice("socks5", name="socks5 - SOCKS5 clients"),
                 ],
             )
+        )
+    if (
+        guided_targets and context.get_parameter_source("retry_policy") == ParameterSource.DEFAULT
+        and retry_chain is None
+    ):
+        retry_policy = str(_common.select("Select an outage recovery policy:", [
+            Choice("fallback", name="fallback - current, adaptive, then random (recommended)"),
+            Choice("fixed", name="fixed - wait for the initial node"),
+            Choice("random", name="random - visit subscription nodes without replacement"),
+            Choice("adaptive", name="adaptive - explore and use recent successes during outages"),
+            Choice("none", name="none - stop after confirmed failure"),
+        ]))
+        policy = RecoveryPolicy(
+            retry_policy=retry_policy, health_interval=health_interval,
+            recovery_deadline=recovery_deadline, refresh_on_failure=refresh_on_recovery,
         )
     strict_port = port is not None
     bind_address = "0.0.0.0" if bind_all else "127.0.0.1"
@@ -412,11 +454,7 @@ def server_command(
         log_level=log_level,
         backend_log_level=backend_log_level,
         log_sink=log_sink,
-        recovery_policy=RecoveryPolicy(
-            health_interval=health_interval,
-            recovery_deadline=recovery_deadline,
-            refresh_on_failure=refresh_on_recovery,
-        ),
+        recovery_policy=policy,
     )
     try:
         runtime.start(subscription_name, node_id=node_id, install_missing=install_missing)
@@ -426,6 +464,8 @@ def server_command(
         # Access and runtime-log paths are private implementation details even
         # when a future driver accidentally includes them in its envelope.
         info = dict(info)
+        info["retry_policy"] = policy.retry_policy
+        info["retry_chain"] = (policy.retry_chain or DEFAULT_RETRY_CHAIN) if policy.retry_policy == "fallback" else None
         info.pop("access_file", None)
         info.pop("log_file", None)
         if bind_all:
@@ -456,6 +496,9 @@ def server_command(
                 )
             )
             startup_log("Proxy URL: %s" % proxy_url, emphasize=True, preserve_local_auth=True)
+            startup_log("Recovery policy: %s" % policy.retry_policy)
+            if policy.retry_policy == "fallback":
+                startup_log("Recovery chain: %s" % (policy.retry_chain or DEFAULT_RETRY_CHAIN))
             guide = [
                 "Shell guide: copy these commands into the shell where you want to use the proxy.",
             ]

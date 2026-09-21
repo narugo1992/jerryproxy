@@ -508,8 +508,24 @@ recovery never rewrites the saved preference. Temporary subscription transport
 failures retain verified cache, with separate refresh backoff and Retry-After
 handling. Cache older than 12 hours requests refresh without disqualifying its
 nodes. Control, TLS, authentication, integrity and unclassified failures remain
-terminal. Cancellation, long-running resource bounds and CLI strategy controls
+terminal. Cancellation, lifecycle events and long-running resource bounds
 are still being completed in this draft.
+
+Choose `--retry-policy none|fixed|random|adaptive|fallback` in a complete command
+or select the same policy in the guided TTY flow. The default `fallback` uses
+`current:1,adaptive:3,random:all`; `--retry-chain current:1,random:all` selects a
+custom fallback chain. Stages must be unique, counts must be positive integers
+(up to 10,000) or `all`, and `current` permits only `current:1`. Custom chains
+require `fallback`. `none` stops on confirmed failure and disables refresh;
+`fixed` never substitutes a different initial identity; `random` visits nodes
+without replacement; `adaptive` uses aging session-local successes with
+recovery-only exploration. Human and JSONL startup report the chosen policy.
+
+```shell
+jerryproxy server --subscription main --node NODE_ID --retry-policy fixed
+jerryproxy server --subscription main --node NODE_ID --retry-policy fallback \
+  --retry-chain current:1,adaptive:3,random:all
+```
 
 Nodes are listed with the label their provider put in the URI fragment, so
 several endpoints of one protocol stay distinguishable. That fragment is

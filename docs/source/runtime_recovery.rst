@@ -65,6 +65,12 @@ readiness or exposes secrets. Threads, children, statistics and recent logs
 remain bounded for an indefinitely running session. Ctrl-C and SIGTERM must
 cancel probes, refreshes and backoff and complete safe cleanup.
 
+Connectivity checks allocate at most three workers. If a request outlives a
+check's budget, subsequent checks report it as unfinished and allocate no new
+workers until that batch finishes. Late results do not establish readiness for
+a later check. This bounds worker accumulation but does not by itself prove
+that every network wait is cancellable; cancellation remains a separate gate.
+
 Verification required before merge
 ----------------------------------
 

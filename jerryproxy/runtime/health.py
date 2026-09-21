@@ -92,6 +92,7 @@ class ConnectivityProbe(object):
         if protocol not in ("http", "mixed", "socks5"):
             raise ValueError("unsupported local proxy protocol")
         self.protocol = protocol
+        self._workers = []
 
     @staticmethod
     def _proxy_url(port, username, password, protocol="http"):
@@ -203,18 +204,31 @@ class ConnectivityProbe(object):
 
         started = self.clock()
         effective_timeout = self.timeout if timeout is None else min(self.timeout, float(timeout))
+        if any(worker.is_alive() for worker in self._workers):
+            # A timed-out request must finish before another check can allocate
+            # workers. Never reuse its late result as evidence of current health.
+            return HealthSnapshot(
+                tuple(TargetHealth(target.name, False, detail="probe_worker_alive") for target in self.targets),
+                0, self.quorum, started,
+            )
         results = [None] * len(self.targets)
         threads = []
-
-        def run(index, target):
-            results[index] = self._one(target, port, username, password, timeout=effective_timeout)
-
-        for index, target in enumerate(self.targets):
-            thread = threading.Thread(target=run, args=(index, target), name="jerryproxy-health-%s" % target.name)
-            thread.daemon = True
-            thread.start()
-            threads.append(thread)
+        self._workers = threads
+        worker_count = min(3, len(self.targets))
         deadline = started + max(0.0, effective_timeout)
+
+        def run(worker_index):
+            for index in range(worker_index, len(self.targets), worker_count):
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    break
+                results[index] = self._one(self.targets[index], port, username, password, timeout=remaining)
+
+        for index in range(worker_count):
+            thread = threading.Thread(target=run, args=(index,), name="jerryproxy-health-%d" % index)
+            thread.daemon = True
+            threads.append(thread)
+            thread.start()
         for thread in threads:
             remaining = deadline - self.clock()
             if remaining > 0:
@@ -227,7 +241,7 @@ class ConnectivityProbe(object):
                 thread.join(0.05)
         for index, result in enumerate(results):
             if result is None:
-                detail = "probe_worker_alive" if threads[index].is_alive() else "probe_deadline"
+                detail = "probe_worker_alive" if threads[index % worker_count].is_alive() else "probe_deadline"
                 results[index] = TargetHealth(self.targets[index].name, False, detail=detail)
         passed = sum(1 for result in results if result.ok)
         return HealthSnapshot(tuple(results), passed, self.quorum, started)

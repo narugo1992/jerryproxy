@@ -35,8 +35,9 @@ selected subscription, and hot-reloads alternate single-node providers without
 rewriting the saved preference. Recovery uses repeated bounded rounds; healthy
 sessions do not explore. Refresh retains verified cache on explicitly transient
 transport failures, propagates network budgets and observes independent backoff
-and Retry-After. Cancellation, lifecycle events, CLI strategy selection and
-long-run resource bounds remain active implementation work.
+and Retry-After. Explicit and guided CLI support none, fixed, random, adaptive
+and fallback strategies with a closed optional fallback chain. Cancellation,
+lifecycle events and long-run resource bounds remain active implementation work.
 Nodes are labelled from their URI fragment or provider name, depending on the
 container format. A stored node projection that no longer matches its source
 bytes is recoverable drift rather than tampering, and one bounded refresh of the

@@ -126,8 +126,8 @@ def test_probe_rejects_invalid_constructor_values_and_partial_credentials():
         ConnectivityProbe(targets=(target,), timeout=0)
     with pytest.raises(ValueError):
         ConnectivityProbe(targets=(target,), quorum=2)
-    with pytest.raises(ValueError):
-        ConnectivityProbe(targets=(target,), protocol="ftp")
+    with pytest.raises(ValueError, match="unsupported local proxy protocol"):
+        ConnectivityProbe(targets=(target,), quorum=1, protocol="ftp")
     with pytest.raises(ValueError):
         ConnectivityProbe._proxy_url(17777, "user", None)
 
@@ -256,3 +256,57 @@ def test_recovery_policy_rejects_invalid_strategy_values(changes):
 def test_custom_closed_fallback_chain_is_accepted():
     policy = RecoveryPolicy(retry_chain="current:1,random:all")
     assert policy.retry_chain == "current:1,random:all"
+
+
+def test_repeated_timeouts_do_not_accumulate_live_probe_workers():
+    release = threading.Event()
+    entered = threading.Event()
+    calls = []
+
+    class Stalled(FakeSession):
+        def get(self, *args, **kwargs):
+            calls.append(1)
+            entered.set()
+            assert release.wait(15)
+            return FakeResponse()
+
+    probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),),
+                              quorum=1, timeout=0.001, session_factory=lambda: Stalled(None))
+    try:
+        assert not probe.check(17777, None, None).ok
+        assert entered.wait(1)
+        for _ in range(100):
+            assert not probe.check(17777, None, None).ok
+        assert len(calls) == 1
+    finally:
+        release.set()
+
+
+def test_many_targets_use_at_most_three_workers_and_can_recover():
+    release = threading.Event()
+    closed = []
+    workers = set()
+
+    class Stalled(FakeSession):
+        def get(self, *args, **kwargs):
+            workers.add(threading.current_thread().ident)
+            assert release.wait(15)
+            return FakeResponse()
+
+        def close(self):
+            closed.append(1)
+
+    targets = tuple(HealthTarget("target-%d" % index, "https://example.invalid", 204) for index in range(20))
+    probe = ConnectivityProbe(targets=targets, quorum=2, timeout=0.01, session_factory=lambda: Stalled(None))
+    try:
+        assert not probe.check(17777, None, None).ok
+        assert len(workers) <= 3
+    finally:
+        release.set()
+    # Wait on known worker handles to prove completion before a fresh check.
+    for thread in threading.enumerate():
+        if thread.ident in workers:
+            thread.join(1)
+    assert len(closed) <= 3
+    probe.session_factory = lambda: FakeSession(FakeResponse())
+    assert probe.check(17777, None, None, timeout=1).ok

@@ -293,6 +293,7 @@ def test_server_guided_selection_passes_explicit_targets_to_runtime(tmp_path, mo
             captured["stopped"] = True
 
     selections = iter(["main", "a" * 32])
+    monkeypatch.setattr(cli_common, "select", lambda message, choices: "fallback")
     monkeypatch.setattr(server_module, "RuntimeSession", FakeRuntime)
     monkeypatch.setattr(cli_common, "interactive_available", lambda: True)
     monkeypatch.setattr(
