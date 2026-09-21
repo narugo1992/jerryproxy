@@ -19,6 +19,7 @@ from ..errors import (
     BackendNotInstalledError,
     JerryProxyError,
     RuntimeSessionError,
+    SubscriptionFetchError,
     SubscriptionNodesMismatchError,
     SubscriptionStateError,
     SubscriptionTransportError,
@@ -479,19 +480,25 @@ class RuntimeSession(object):
         self.executable = installed.executable
         return self.executable
 
-    def _stop_process(self, deadline=None):
+    def _require_fetch_cleanup(self):
+        check = getattr(self.subscription_manager, "_require_fetch_cleanup", None)
+        if check is not None:
+            try:
+                check()
+            except SubscriptionFetchError as error:
+                # A retained source worker still owns secret-bearing runtime state.
+                raise RuntimeSessionError("subscription worker cleanup remains unconfirmed") from error
+
+    def _stop_process(self):
         process = self.process
-        if process is None:
-            return
-        try:
-            timeout = None
-            if deadline is not None:
-                timeout = max(0.01, min(2.0, deadline.remaining()))
-            self.driver.stop(process, timeout=timeout)
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-            # Process termination failures are terminal recovery failures.
-            raise RuntimeSessionError("mihomo backend cleanup failed") from error
-        self.process = None
+        if process is not None:
+            try:
+                self.driver.stop(process, timeout=None)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                # Process termination failures are terminal recovery failures.
+                raise RuntimeSessionError("mihomo backend cleanup failed") from error
+            self.process = None
+        self._require_fetch_cleanup()
 
     def _launch_node(self, node, deadline=None):
         self.node = node
@@ -646,6 +653,7 @@ class RuntimeSession(object):
     def start(self, subscription_name=None, node_id=None, install_missing=True):
         """Prepare, launch, authenticate, and health-check one selected node."""
 
+        self._require_fetch_cleanup()
         self._enter_operation_lock()
         try:
             self.subscription = self._select_subscription(subscription_name)

@@ -10,6 +10,7 @@ import stat
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 
 from ..backend.durable import flush_directory
 from ..backend.removal import _secure_remove_tree
@@ -107,6 +108,11 @@ class _FetchCleanupSupervisor(object):
         self._lock = threading.Lock()
         self._pending = set()
 
+    @property
+    def pending(self):
+        with self._lock:
+            return bool(self._pending)
+
     def register(self, startup_thread, process, runtime_root, temporary):  # type: (object, object, str, str) -> bool
         """Register one delayed starter and run its independent cleanup."""
 
@@ -124,8 +130,6 @@ class _FetchCleanupSupervisor(object):
         except RuntimeError:
             # A host that rejects another thread cannot provide delayed cleanup;
             # retain the evidence for the caller's explicit recovery path.
-            with self._lock:
-                self._pending.discard(token)
             return False
         return True
 
@@ -257,14 +261,42 @@ class SubscriptionManager(object):
             raise TypeError("parser must implement SubscriptionParser")
         self.store = SubscriptionStore(paths, parser=self.parser)
         self._fetch_cleanup = _FetchCleanupSupervisor()
+        self._retained_operation_lock = None
+
+    def _require_fetch_cleanup(self):
+        """Refuse to release ownership while a worker or its artifacts remain."""
+
+        if self._fetch_cleanup.pending:
+            raise SubscriptionFetchError("subscription worker cleanup remains unconfirmed; home lock retained")
+
+    def _release_retained_operation(self):
+        self._require_fetch_cleanup()
+        if self._retained_operation_lock is not None:
+            self._retained_operation_lock.__exit__(None, None, None)
+            self._retained_operation_lock = None
+
+    @contextmanager
+    def _operation(self, initialize=True):
+        self._release_retained_operation()
+        lock = JerryProxyOperationLock(self.paths, initialize=initialize)
+        lock.__enter__()
+        try:
+            yield
+        finally:
+            if self._fetch_cleanup.pending:
+                self._retained_operation_lock = lock
+            else:
+                lock.__exit__(None, None, None)
 
     def list(self, allow_node_mismatch=False):  # type: (bool) -> tuple
+        self._release_retained_operation()
         return self.store.list(allow_node_mismatch=allow_node_mismatch)
 
     def _list_locked(self, allow_node_mismatch=False):  # type: (bool) -> tuple
         return self.store._list_locked(allow_node_mismatch=allow_node_mismatch)
 
     def get(self, name):  # type: (str) -> SubscriptionRecord
+        self._release_retained_operation()
         return self.store.get(name)
 
     def _fetch_remote(self, source_url, allow_http, format_hint, timeout=None):
@@ -400,6 +432,8 @@ class SubscriptionManager(object):
                 try:
                     _secure_remove_tree(runtime_root, temporary, SubscriptionFetchError, private_names=True)
                 except (OSError, SubscriptionFetchError) as error:
+                    # Retain lock ownership until removal can be confirmed.
+                    self._fetch_cleanup.register(None, process, runtime_root, temporary)
                     cleanup_error = SubscriptionFetchError("subscription worker cleanup failed")
                     cleanup_error.__cause__ = error
             if cleanup_error is not None:
@@ -433,7 +467,7 @@ class SubscriptionManager(object):
         # type: (str, str, bytes, str, bool) -> SubscriptionRecord
         """Add one source after bounded transport and classification."""
 
-        with JerryProxyOperationLock(self.paths):
+        with self._operation():
             return self._add_locked(name, source_url, body, format_hint, allow_http)
 
     def _add_locked(self, name, source_url, body=None, format_hint="auto", allow_http=False):
@@ -463,7 +497,7 @@ class SubscriptionManager(object):
         # type: (str, str, bytes, str, bool) -> SubscriptionRecord
         """Replace one source while retaining its public subscription ID."""
 
-        with JerryProxyOperationLock(self.paths):
+        with self._operation():
             return self._replace_locked(name, source_url, body, format_hint, allow_http)
 
     def _replace_locked(
@@ -508,7 +542,7 @@ class SubscriptionManager(object):
         remains mandatory and has its own bounded stop intervals.
         """
 
-        with JerryProxyOperationLock(self.paths):
+        with self._operation():
             return self._refresh_locked(name, timeout=timeout)
 
     def _refresh_locked(self, name, timeout=None):
@@ -533,7 +567,7 @@ class SubscriptionManager(object):
         never repaired here.
         """
 
-        with JerryProxyOperationLock(self.paths):
+        with self._operation():
             return self._repair_node_projection_locked(name)
 
     def _repair_node_projection_locked(self, name):  # type: (str) -> SubscriptionRecord
@@ -567,7 +601,7 @@ class SubscriptionManager(object):
 
         if not self.paths._validate_existing_layout():
             raise SubscriptionStateError("subscription not found: %s" % name)
-        with JerryProxyOperationLock(self.paths, initialize=False):
+        with self._operation(initialize=False):
             return self._validate_locked(name)
 
     def _validate_locked(self, name):  # type: (str) -> SubscriptionRecord
@@ -578,5 +612,5 @@ class SubscriptionManager(object):
         return record
 
     def remove(self, name):  # type: (str) -> SubscriptionRecord
-        with JerryProxyOperationLock(self.paths):
+        with self._operation():
             return self.store._remove_locked(name)

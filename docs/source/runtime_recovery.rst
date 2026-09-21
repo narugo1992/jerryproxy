@@ -60,7 +60,13 @@ to one day; malformed values are discarded. Refresh starts no more often than
 once per 300 seconds by default, doubles its delay after consecutive transport
 failures up to one hour, and resets after success. Mandatory worker cleanup has
 separate bounded stop intervals and must complete even after the network
-budget expires; inability to prove cleanup is terminal.
+budget expires; inability to prove cleanup is terminal. A standalone
+subscription operation retains its original home lock while cleanup remains
+unconfirmed. The same manager, used on its owning thread, may release that
+retained lock on its next operation only after the supervisor confirms both worker termination and
+artifact removal. A runtime session similarly refuses to announce stopped
+or release its own lock while subscription cleanup is pending. No cleanup
+thread releases a thread-owned FileLock or acquires a second home lock.
 
 Sanitized events expose starting, degraded, retrying, ready and stopped states,
 actual retry delays, skip reasons and current health. No event falsely reports
