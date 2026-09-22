@@ -595,8 +595,13 @@ def test_live_recovery_hot_reloads_each_protocol(container, scheme, fault, home,
     try:
         runtime.start("reload", initial.node_id, install_missing=False)
         assert runtime.wait() == 130
-        assert len(observations) == 2
-        assert observations[0][1:] == observations[1][1:], "recovery changed listener or credentials"
+        assert len(observations) == 2 if fault == "health" else len(observations) >= 2
+        assert all(item[1:] == observations[0][1:] for item in observations), (
+            "recovery changed listener or credentials"
+        )
+        assert all(item[0] == observations[1][0] for item in observations[1:]), (
+            "the recovered backend did not remain stable"
+        )
         assert (observations[0][0] == observations[1][0]) == (fault == "health")
         assert len(events) == 2 and events[0][1] != events[1][1], "provider generation did not change"
         assert events[0][0]["data"]["node"] == initial.node_id
