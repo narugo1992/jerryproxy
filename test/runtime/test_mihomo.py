@@ -1151,3 +1151,51 @@ def test_launch_platform_and_containment_boundaries(tmp_path, monkeypatch, fault
             assert aborted == [True]
     finally:
         process._cancel_start_gate()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="executable script fixture requires POSIX")
+def test_real_backend_immediate_exit_is_recoverable_after_cleanup(tmp_path, monkeypatch):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    executable = tmp_path / "reject-node"
+    executable.write_text("#!%s\nraise SystemExit(1)\n" % sys.executable)
+    executable.chmod(0o700)
+    process = MihomoProcess(executable, tmp_path / "config", tmp_path, tmp_path / "log")
+    load_identity = process._load_guardian_identity
+
+    def after_exit(timeout):
+        assert process.process.wait(timeout=5) == 1
+        load_identity(timeout)
+
+    monkeypatch.setattr(process, "_load_guardian_identity", after_exit)
+    try:
+        with pytest.raises(RuntimeCandidateError):
+            process.start()
+    finally:
+        process.stop()
+    assert process.process.poll() is not None
+    assert not process._guardian_metadata_path.exists()
+
+
+@pytest.mark.parametrize("fault", ["permission", "invalid_record", "guardian_failure"])
+def test_guardian_local_failure_is_not_downgraded_to_node_failure(tmp_path, monkeypatch, fault):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = type("Child", (), {"poll": lambda self: 127 if fault == "guardian_failure" else 1})()
+    aborted = []
+    monkeypatch.setattr(process, "_abort_start", lambda: aborted.append(True))
+
+    def read(*args):
+        if fault == "permission":
+            raise PermissionError(13, "private path")
+        if fault == "invalid_record":
+            return b"[]"
+        raise FileNotFoundError(2, "missing")
+
+    monkeypatch.setattr(mihomo_module, "_read_private_metadata", read)
+    with pytest.raises(RuntimeSessionError) as caught:
+        process._load_guardian_identity(timeout=0.01)
+    assert not isinstance(caught.value, RuntimeCandidateError)
+    assert "private path" not in str(caught.value)
+    assert aborted == [True]
