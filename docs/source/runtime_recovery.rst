@@ -218,3 +218,35 @@ or a whole-repository average substituting for the affected-area audit.
 Python 3.7 compatibility, normal test gates, generated API documentation,
 documentation build and package build must pass. The PR body is English;
 completion requires review and CI evidence that the full scope is merge-ready.
+
+Availability-first recovery contract
+------------------------------------
+
+Node and remote-network failures belong to the recovery policy rather than a
+session-wide fatal exception. A failed certificate check still rejects that
+connection; certificate validation is never disabled. Other healthy targets
+may satisfy quorum, otherwise recovery tries other permitted nodes. Explicit
+``none`` remains the opt-out; ``fixed`` waits for its selected identity instead
+of choosing another when that identity disappears from a refreshed source.
+
+An unusable startup candidate, failed control verification, stale reload, or
+exited backend must be isolated and cleaned up before a replacement backend
+can be verified. The session retains its home lock, ports and credentials.
+Repeated outages use bounded attempts, candidate cooldowns and capped backoff;
+there is no default total retry limit, including when the host is offline.
+Readiness means verified routing and a passing health quorum, not merely a
+living process or open port.
+
+Remote subscription failures must never publish rejected bytes. Refused TLS,
+authentication, unsafe responses and malformed provider content retain the
+previous valid cache and delay the next source attempt. Local-state integrity,
+worker-envelope corruption, permissions, and unconfirmed child cleanup remain
+fatal boundaries: continuing recovery must not release ownership while an old
+child or untrusted secret-bearing artifact remains.
+
+Verification requires startup and periodic failure recovery, strict TLS
+negative controls, preserved listener identity, subscription replacement and
+fixed-identity absence, backend restart and control failure isolation,
+long-outage resource bounds, safe interruption, and adversarial cleanup and
+integrity failures. Changed executable functions require complete measured
+branch coverage; release checks also exercise real backend data-plane paths.

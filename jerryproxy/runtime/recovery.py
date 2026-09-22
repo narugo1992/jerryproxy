@@ -63,8 +63,6 @@ class RetrySchedule(object):
         """Replace the authoritative pool while preserving surviving progress."""
 
         nodes = tuple(dict.fromkeys(node_ids))
-        if self.policy == "fixed" and self.initial not in nodes:
-            raise ValueError("fixed node was removed from the selected subscription")
         self.nodes = nodes
         self.visited.intersection_update(nodes)
         self.statistics = {node: value for node, value in self.statistics.items() if node in nodes}

@@ -78,6 +78,10 @@ class SubscriptionFetchError(SubscriptionError):
     """Raised when a subscription source cannot be fetched safely."""
 
 
+class SubscriptionSourceError(SubscriptionFetchError):
+    """Rejected remote content; verified local cache may still be used."""
+
+
 class SubscriptionTransportError(SubscriptionFetchError):
     """A transient source failure that permits retaining verified cached nodes.
 
@@ -114,3 +118,7 @@ class SubscriptionNodesMismatchError(SubscriptionStateError):
 
 class RuntimeSessionError(JerryProxyError):
     """Raised when a foreground backend session cannot start or stop safely."""
+
+
+class RuntimeCandidateError(RuntimeSessionError):
+    """A backend route is unusable and must be isolated before recovery."""

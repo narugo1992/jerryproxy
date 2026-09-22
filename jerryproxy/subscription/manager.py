@@ -19,6 +19,7 @@ from ..errors import (
     SubscriptionFetchError,
     SubscriptionNodesMismatchError,
     SubscriptionParseError,
+    SubscriptionSourceError,
     SubscriptionStateError,
     SubscriptionTransportError,
 )
@@ -232,7 +233,7 @@ def _read_fetch_result(path):  # type: (str) -> object
                 raise SubscriptionFetchError("subscription worker retry result is invalid") from error
             raise failure
         if isinstance(value, dict) and value == {"error": "subscription source fetch failed", "ok": False}:
-            raise SubscriptionFetchError("subscription source fetch failed")
+            raise SubscriptionSourceError("subscription source fetch failed")
         raise SubscriptionFetchError("subscription worker result is invalid")
     if not isinstance(value["body"], str):
         raise SubscriptionFetchError("subscription worker result body is invalid")
@@ -315,8 +316,15 @@ class SubscriptionManager(object):
             or fetch_subscription is not _DEFAULT_FETCH_SUBSCRIPTION
             or self.parser is not MIHOMO_SUBSCRIPTION_PARSER
         ):
-            return fetch_subscription(source_url, session=self.session, allow_http=allow_http,
-                                      timeout=(min(5.0, budget), min(10.0, budget)))
+            try:
+                return fetch_subscription(source_url, session=self.session, allow_http=allow_http,
+                                          timeout=(min(5.0, budget), min(10.0, budget)))
+            except SubscriptionTransportError:
+                # Preserve bounded retry metadata from source transport.
+                raise
+            except SubscriptionFetchError as error:
+                # This boundary contains remote transport, not local publication.
+                raise SubscriptionSourceError("subscription source rejected") from error
         runtime_root = self.paths.runtimes
         # Worker artifacts are managed state; reject symlink/reparse aliases
         # before creating or traversing the runtime namespace.
@@ -513,7 +521,13 @@ class SubscriptionManager(object):
         body, source_url, format_hint = self._source_body(
             source_url, body, format_hint, allow_http, fetch_timeout=fetch_timeout
         )
-        parsed = self.parser.parse(body, format_hint)
+        try:
+            parsed = self.parser.parse(body, format_hint)
+        except SubscriptionParseError as error:
+            # Remote replacement content is rejected before any state publication.
+            if body_source:
+                raise
+            raise SubscriptionSourceError("subscription source content rejected") from error
         current_ids = {
             node.node_id
             for record in self.store._list_locked(allow_node_mismatch=True)

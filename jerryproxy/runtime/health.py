@@ -201,7 +201,8 @@ class ConnectivityProbe(object):
             finally:
                 response.close()
         except requests.exceptions.SSLError:
-            # Certificate validation failures are terminal, never outage retries.
+            # Reject this TLS connection. Session quorum and recovery decide
+            # whether another strictly verified target or node is usable.
             return TargetHealth(target.name, False, detail="tls_failed")
         except requests.exceptions.Timeout:
             # Timeout is a normal degraded target result; it is not an
