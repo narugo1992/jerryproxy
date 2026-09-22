@@ -251,3 +251,14 @@ fixed-identity absence, backend restart and control failure isolation,
 long-outage resource bounds, safe interruption, and adversarial cleanup and
 integrity failures. Changed executable functions require complete measured
 branch coverage; release checks also exercise real backend data-plane paths.
+
+
+To reproduce the affected-function audit after a branch-enabled pytest run::
+
+    python -m pytest test -m unittest --cov=jerryproxy --cov-branch --cov-report=json
+    python -m tools.changed_coverage coverage.json --base origin/main
+
+The audit checks every surviving function touched by additions or deletions,
+including branches outside the changed lines. Missing files and statement-only
+coverage are failures. Native CI retains coverage JSON beside its test reports;
+mocked OS failure outcomes supplement, rather than replace, native platform runs.
