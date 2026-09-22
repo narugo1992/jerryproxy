@@ -163,7 +163,7 @@ jobs:
         run: >-
           python -m pytest test -sv -m "unittest and not windows_native"
           --junitxml=junit.xml -o junit_family=legacy
-          --cov=jerryproxy --cov-branch --cov-report=term-missing --cov-report=xml
+          --cov=jerryproxy --cov-branch --cov-report=term-missing --cov-report=xml --cov-report=json
       - name: Upload unit coverage to Codecov
         if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
         uses: codecov/codecov-action@v7
@@ -182,6 +182,7 @@ jobs:
           path: |
             junit.xml
             coverage.xml
+            coverage.json
 
   windows-native:
     name: Native Windows filesystem tests
@@ -198,7 +199,7 @@ jobs:
         run: >-
           python -m pytest test -sv -m "unittest and windows_native"
           --junitxml=junit-windows-native.xml -o junit_family=legacy
-          --cov=jerryproxy --cov-branch --cov-report=term-missing --cov-report=xml
+          --cov=jerryproxy --cov-branch --cov-report=term-missing --cov-report=xml --cov-report=json
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -207,6 +208,7 @@ jobs:
           path: |
             junit-windows-native.xml
             coverage.xml
+            coverage.json
 
   provision:
     name: Data-plane credentials
@@ -490,7 +492,7 @@ jobs:
         run: >-
           python -m pytest test -sv -m "unittest and not windows_native"
           --junitxml=junit.xml -o junit_family=legacy
-          --cov=jerryproxy --cov-branch --cov-report=term-missing --cov-report=xml
+          --cov=jerryproxy --cov-branch --cov-report=term-missing --cov-report=xml --cov-report=json
       - name: Upload data-plane coverage to Codecov
         if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
         uses: codecov/codecov-action@v7

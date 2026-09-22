@@ -153,7 +153,8 @@ def test_remote_source_refusal_keeps_cache_and_recovers(tmp_path):
         session.stop()
 
 
-def test_periodic_control_refusal_rebuilds_before_claiming_health(tmp_path):
+@pytest.mark.parametrize("fault", ["refusal", "identity"])
+def test_periodic_control_refusal_rebuilds_before_claiming_health(tmp_path, fault):
     from jerryproxy.errors import RuntimeSessionError
 
     from .test_persistent import Probe
@@ -163,7 +164,11 @@ def test_periodic_control_refusal_rebuilds_before_claiming_health(tmp_path):
     class Driver(ReloadingDriver):
         def loaded_nodes(self, *args):
             if clock.now > 0 and self.launches == 1:
-                raise RuntimeSessionError('control authentication refused')
+                if fault == "refusal":
+                    raise RuntimeSessionError("control authentication refused")
+                from jerryproxy.runtime import LoadedNodes
+
+                return LoadedNodes(("same-name",), "same-name", False, ("unpublished-identity",))
             return super(Driver, self).loaded_nodes(*args)
 
     driver = Driver()
@@ -277,5 +282,69 @@ def test_exhausted_candidate_deadline_recovers_without_ending_session(tmp_path, 
         session.start("main", record.nodes[0].node_id, install_missing=False)
         assert session.driver.launches == 2
         assert session.last_health.ok
+    finally:
+        session.stop()
+
+
+def test_dead_listener_with_live_control_is_rebuilt(tmp_path):
+    from jerryproxy.errors import RuntimeSessionError
+
+    from .test_persistent import Probe
+
+    clock = Clock()
+
+    class Driver(ReloadingDriver):
+        def wait_ready(self, *args, **kwargs):
+            if clock.now > 0 and self.launches == 1:
+                raise RuntimeSessionError("listener stopped accepting")
+            return super(Driver, self).wait_ready(*args, **kwargs)
+
+    driver = Driver()
+    record = _record(nodes=1)
+    probe = Probe(lambda: clock.now == 0 or driver.launches > 1)
+    session = _session(tmp_path, record, probe, clock=clock, sleeper=clock.sleep,
+                       policy=RecoveryPolicy(health_interval=1, confirmation_delay=1))
+    session.driver = driver
+    session.start("main", record.nodes[0].node_id, install_missing=False)
+
+    def finish(delay):
+        if driver.launches > 1:
+            raise KeyboardInterrupt
+        assert clock.now < 180, "dead listener was never rebuilt"
+        clock.sleep(delay)
+
+    session.sleeper = finish
+    try:
+        assert session.wait() == 130
+        assert driver.launches == 2
+        assert session.last_health.ok
+    finally:
+        session.stop()
+
+
+def test_none_stops_on_periodic_control_failure_after_confirmed_cleanup(tmp_path):
+    from jerryproxy.errors import RuntimeSessionError
+
+    from .test_persistent import Probe
+
+    clock = Clock()
+    record = _record(nodes=1)
+    driver = ReloadingDriver()
+    session = _session(tmp_path, record, Probe(lambda: True), clock=clock, sleeper=clock.sleep,
+                       policy=RecoveryPolicy(retry_policy="none", health_interval=1))
+    session.driver = driver
+    session.start("main", record.nodes[0].node_id, install_missing=False)
+    child = session.process
+
+    def refused(*args):
+        raise RuntimeSessionError("private control refusal")
+
+    driver.loaded_nodes = refused
+    try:
+        with pytest.raises(RuntimeSessionError, match="retry policy is none"):
+            session.wait()
+        assert child.stopped
+        assert session.process is None
+        assert driver.launches == 1
     finally:
         session.stop()

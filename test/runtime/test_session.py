@@ -1037,7 +1037,8 @@ def test_startup_process_hooks_and_deadlines_share_confirmed_cleanup(tmp_path, s
     hooks = []
     children = []
     record = _record(nodes=1)
-    runtime = _session(tmp_path, record, FakeProbe([True]), clock=lambda: now[0])
+    runtime = _session(tmp_path, record, FakeProbe([True]), clock=lambda: now[0],
+                       policy=RecoveryPolicy(retry_policy="none", recovery_deadline=5))
 
     class Process(FakeProcess):
         def set_log_lock(self, lock):

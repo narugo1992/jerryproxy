@@ -805,6 +805,12 @@ class RuntimeSession(object):
         if self.process is None or self.process.process.poll() is not None:
             self._stop_process()
             self._launch_node(node, deadline)
+        else:
+            try:
+                self.driver.wait_ready(self.process, self.port, timeout=min(5.0, deadline.remaining()))
+            except RuntimeSessionError as error:
+                # A live control endpoint does not prove the proxy accepts traffic.
+                raise RuntimeCandidateError("backend listener verification failed") from error
         if self._loaded_node.node_id != node.node_id:
             previous_identity = self._loaded_identity
             if len(previous_identity) != 1:
@@ -951,10 +957,13 @@ class RuntimeSession(object):
                 now = self.clock()
                 if now >= next_health:
                     try:
-                        self._require_node_in_use(
+                        previous_identity = self._loaded_identity
+                        loaded = self._require_node_in_use(
                             RecoveryDeadline(min(5.0, self.recovery_policy.recovery_deadline), clock=self.clock),
                             node=self._loaded_node,
                         )
+                        if loaded.identities != previous_identity:
+                            raise RuntimeCandidateError("backend changed the active provider identity")
                     except RuntimeCandidateError:
                         # Stop an unverified route before rebuilding; never use
                         # successful egress as a substitute for route validation.

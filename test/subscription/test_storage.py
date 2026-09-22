@@ -1161,3 +1161,30 @@ def test_source_refusal_envelope_is_distinct_from_worker_corruption(tmp_path, va
         _read_fetch_result(str(result))
     assert isinstance(caught.value, SubscriptionSourceError) == valid
     assert "private remote diagnostic" not in str(caught.value)
+
+
+def test_invalid_local_replacement_keeps_parse_error_and_original_revision(tmp_path):
+    from jerryproxy.errors import SubscriptionSourceError
+
+    manager = SubscriptionManager(JerryProxyPaths(tmp_path / "home"))
+    original = manager.add("main", None, body=SS)
+    with pytest.raises(SubscriptionParseError) as caught:
+        manager.replace("main", body=b"invalid")
+    assert not isinstance(caught.value, SubscriptionSourceError)
+    assert manager.get("main").revision == original.revision
+
+
+def test_injected_transient_source_failure_retains_retry_after(tmp_path, monkeypatch):
+    from jerryproxy.errors import SubscriptionTransportError
+
+    error = SubscriptionTransportError("source unavailable", 120)
+
+    def fetch(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(manager_module, "fetch_subscription", fetch)
+    manager = SubscriptionManager(JerryProxyPaths(tmp_path / "home"))
+    with pytest.raises(SubscriptionTransportError) as caught:
+        manager._fetch_remote("https://provider.example/sub", False, "uri-lines")
+    assert caught.value is error
+    assert caught.value.retry_after == 120
