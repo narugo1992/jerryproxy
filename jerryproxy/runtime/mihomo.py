@@ -1,6 +1,7 @@
 """Mihomo 1.19.29 foreground projection for an opaque NodeSet."""
 
 import base64
+import errno
 import io
 import json
 import math
@@ -18,7 +19,7 @@ from http.client import HTTPConnection, HTTPException, HTTPResponse
 from pathlib import Path
 
 from ..backend.durable import flush_directory
-from ..errors import RuntimeSessionError
+from ..errors import RuntimeCandidateError, RuntimeSessionError
 from ..home import is_path_alias
 from ..subscription.redaction import redact_bytes, redact_text, terminal_safe_text
 from ._logs import append_recent
@@ -1485,7 +1486,10 @@ class MihomoProcess(object):
             self._cancel_start_gate()
             _windows_close_job(self._windows_job)
             self._windows_job = None
-            # Executable/guardian launch failures are terminal runtime errors.
+            # Resource contention may recover; permissions, missing binaries,
+            # and containment setup failures still require local intervention.
+            if isinstance(error, OSError) and error.errno in (errno.EAGAIN, errno.ENOMEM, errno.ETXTBSY):
+                raise RuntimeCandidateError("mihomo backend launch temporarily unavailable") from error
             raise RuntimeSessionError("mihomo backend launch failed") from error
         except RuntimeSessionError:
             self._cancel_start_gate()
@@ -1551,9 +1555,11 @@ class MihomoProcess(object):
                 raw = _read_private_metadata(self._guardian_metadata_path, 4096)
                 value = json.loads(raw.decode("ascii"))
                 break
-            except OSError:
-                # The guardian may still be atomically publishing its record.
-                pass
+            except OSError as error:
+                # Only an absent, not a refused, record may still be publishing.
+                if error.errno != errno.ENOENT:
+                    self._abort_start()
+                    raise RuntimeSessionError("mihomo guardian identity could not be read") from error
             except (RuntimeSessionError, UnicodeError, ValueError) as error:
                 # A malformed or aliased record is terminal; never leave an
                 # already-launched guardian running after failed authentication.
@@ -1563,7 +1569,11 @@ class MihomoProcess(object):
                 break
             time.sleep(0.01)
         if not isinstance(value, dict):
+            status = self.process.poll()
             self._abort_start()
+            # 125/127 are guardian authorization, launch or publication failures.
+            if value is None and status is not None and status not in (125, 127):
+                raise RuntimeCandidateError("mihomo backend exited before publishing identity")
             raise RuntimeSessionError("mihomo guardian did not publish identity")
         pid = value.get("pid")
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
@@ -1579,25 +1589,29 @@ class MihomoProcess(object):
             self._abort_start()
             raise RuntimeSessionError("mihomo guardian identity does not match the launch plan")
         self._linux_start_time = _posix_process_start_time(self.process.pid) if os.name == "posix" else None
+        identity_error = None
         if os.name == "posix":
             if self._backend_start_time is None or self._linux_start_time is None:
-                self._abort_start()
-                raise RuntimeSessionError("mihomo process identity is unavailable")
-            if not _posix_process_identity_matches(self.backend_pid, self._backend_start_time):
-                self._abort_start()
-                raise RuntimeSessionError("mihomo backend identity changed during launch")
-            parent = _posix_process_parent(self.backend_pid)
-            if parent != self.process.pid:
-                self._abort_start()
-                raise RuntimeSessionError("mihomo backend is not owned by its guardian")
-            if (
+                identity_error = "mihomo process identity is unavailable"
+            elif not _posix_process_identity_matches(self.backend_pid, self._backend_start_time):
+                identity_error = "mihomo backend identity changed during launch"
+            elif _posix_process_parent(self.backend_pid) != self.process.pid:
+                identity_error = "mihomo backend is not owned by its guardian"
+            elif (
                 self._backend_pgid != self.process.pid
                 or self._backend_sid != self.process.pid
                 or _posix_process_group(self.backend_pid) != self.process.pid
                 or _posix_process_session(self.backend_pid) != self.process.pid
             ):
-                self._abort_start()
-                raise RuntimeSessionError("mihomo backend process-group identity is invalid")
+                identity_error = "mihomo backend process-group identity is invalid"
+        # A backend may exit while the live identity is being sampled. Static
+        # metadata is already validated; confirm isolation before retrying it.
+        if self.process.poll() is not None:
+            self._abort_start()
+            raise RuntimeCandidateError("mihomo backend exited during identity verification")
+        if identity_error is not None:
+            self._abort_start()
+            raise RuntimeSessionError(identity_error)
 
     def _windows_abort_start(self):
         self._cancel_start_gate()
@@ -1762,8 +1776,8 @@ class MihomoProcess(object):
                         process.terminate()
                     except OSError as error:
                         note("guardian termination failed: %s" % error)
-                elif guardian_alive and sys.platform.startswith("linux"):
-                    note("guardian process-group identity is unavailable")
+                # An empty group may precede guardian exit. The bounded wait
+                # and final liveness check below decide whether cleanup finished.
         elif guardian_alive:
             try:
                 process.terminate()

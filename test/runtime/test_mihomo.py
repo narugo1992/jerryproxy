@@ -1,3 +1,4 @@
+import errno
 import io
 import json
 import os
@@ -982,3 +983,374 @@ def test_provider_config_rejects_an_unapproved_bind_address(tmp_path):
             "password",
             bind_address="192.0.2.1",
         )
+
+
+@pytest.mark.parametrize("error_number,retryable", [(errno.EAGAIN, True), (errno.ENOMEM, True), (errno.EACCES, False)])
+def test_launch_resource_failure_is_retryable_but_permission_failure_is_not(tmp_path, monkeypatch,
+                                                                          error_number, retryable):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    class RefusedPopen:
+        def __init__(self, *args, **kwargs):
+            raise OSError(error_number, "private diagnostic")
+
+    monkeypatch.setattr(mihomo_module, "_posix_process_start_time", lambda pid: 1)
+    monkeypatch.setattr(mihomo_module.subprocess, "Popen", RefusedPopen)
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    with pytest.raises(RuntimeSessionError) as caught:
+        process.start()
+    assert isinstance(caught.value, RuntimeCandidateError) == retryable
+    assert "private diagnostic" not in str(caught.value)
+    assert process.process is None
+    assert process._start_gate_write is None
+
+
+@pytest.mark.parametrize("exited", [True, False])
+def test_missing_guardian_record_requires_exit_before_candidate_retry(tmp_path, monkeypatch, exited):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = type("Child", (), {"poll": lambda self: 1 if exited else None})()
+    aborted = []
+    monkeypatch.setattr(process, "_abort_start", lambda: aborted.append(True))
+    with pytest.raises(RuntimeSessionError) as caught:
+        process._load_guardian_identity(timeout=0.01)
+    assert isinstance(caught.value, RuntimeCandidateError) == exited
+    assert aborted == [True]
+
+
+@pytest.mark.parametrize("fault", ["pid", "plan", "start_time", "reused", "parent", "group", "valid", "windows"])
+def test_guardian_identity_failure_never_becomes_a_candidate_retry(tmp_path, monkeypatch, fault):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = type("Child", (), {"pid": 100, "poll": lambda self: None})()
+    value = {"pid": 200, "start_time": 1, "pgid": 100, "sid": 100,
+             "executable": str(process.executable.absolute()), "config": str(process.config_path.absolute())}
+    if fault == "pid":
+        value["pid"] = False
+    if fault == "plan":
+        value["config"] = "another config"
+    if fault == "start_time":
+        value["start_time"] = None
+    monkeypatch.setattr(mihomo_module, "_read_private_metadata", lambda *args: json.dumps(value).encode("ascii"))
+    monkeypatch.setattr(mihomo_module, "_posix_process_start_time", lambda pid: 1)
+    monkeypatch.setattr(mihomo_module, "_posix_process_identity_matches", lambda *args: fault != "reused")
+    monkeypatch.setattr(mihomo_module, "_posix_process_parent", lambda pid: 999 if fault == "parent" else 100)
+    monkeypatch.setattr(mihomo_module, "_posix_process_group", lambda pid: 999 if fault == "group" else 100)
+    monkeypatch.setattr(mihomo_module, "_posix_process_session", lambda pid: 100)
+    aborted = []
+    monkeypatch.setattr(process, "_abort_start", lambda: aborted.append(True))
+    if fault == "windows":
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(mihomo_module, "os", SimpleNamespace(name="nt"))
+    rejected = fault in ("pid", "plan") or (os.name == "posix" and fault not in ("valid", "windows"))
+    if rejected:
+        with pytest.raises(RuntimeSessionError) as caught:
+            process._load_guardian_identity()
+        assert not isinstance(caught.value, RuntimeCandidateError)
+        assert aborted == [True]
+    else:
+        process._load_guardian_identity()
+        assert process.backend_pid == 200
+        assert aborted == []
+
+
+@pytest.mark.parametrize("fault", [
+    "logdir", "gate", "containment", "release", "identity", "pidfd", "pidfd_close",
+    "macos_parent", "macos", "windows_assign", "windows", "frozen", "success",
+    "foreign_child", "safe_log", "gate_close",
+])
+def test_launch_platform_and_containment_boundaries(tmp_path, monkeypatch, fault):
+    from types import SimpleNamespace
+
+    from jerryproxy.errors import RuntimeCandidateError
+
+    # Model OS API outcomes without replacing the host OS used by pathlib/pytest.
+    platform = "win32" if fault.startswith("windows") or fault == "containment" else (
+        "darwin" if fault.startswith("macos") else "linux")
+    native_os = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+    native_os.name = "nt" if platform == "win32" else "posix"
+    monkeypatch.setattr(mihomo_module, "os", native_os)
+    monkeypatch.setattr(mihomo_module, "sys",
+                        SimpleNamespace(platform=platform, executable=sys.executable, frozen=fault == "frozen"))
+    captured = {}
+    monkeypatch.setattr(mihomo_module, "build_environment", lambda *args: {})
+
+    class Child:
+        pid = 100
+        _handle = 42
+        stdout = None
+
+        def __new__(cls, *args, **kwargs):
+            if fault == "foreign_child":
+                return SimpleNamespace(pid=100, stdout=None)
+            return object.__new__(cls)
+
+        def __init__(self, arguments, **kwargs):
+            captured["arguments"] = arguments
+
+    monkeypatch.setattr(mihomo_module.subprocess, "Popen", Child)
+    monkeypatch.setattr(mihomo_module, "_linux_process_start_time", lambda pid: None if fault == "identity" else 1)
+    monkeypatch.setattr(mihomo_module, "_posix_process_start_time", lambda pid: None if fault == "macos_parent" else 1)
+    monkeypatch.setattr(mihomo_module, "_windows_create_job", lambda: None if fault == "containment" else 123)
+    closed_jobs = []
+    monkeypatch.setattr(mihomo_module, "_windows_close_job", closed_jobs.append)
+    monkeypatch.setattr(mihomo_module, "_windows_assign_job", lambda *args: fault != "windows_assign")
+    descriptor = os.open(os.devnull, os.O_RDONLY) if fault.startswith("pidfd") else None
+    monkeypatch.setattr(mihomo_module, "_linux_optional_pidfd_open", lambda pid: descriptor)
+
+    def signal_pidfd(*args):
+        raise OSError("pidfd unsupported")
+
+    monkeypatch.setattr(mihomo_module, "_linux_pidfd_send_signal", signal_pidfd)
+    if fault == "pidfd_close":
+        def close_descriptor(fd):
+            os.close(fd)
+            if fd == descriptor:
+                raise OSError("close diagnostic")
+        native_os.close = close_descriptor
+    if fault == "gate_close":
+        def close_gate(fd):
+            os.close(fd)
+            raise OSError("closed gate")
+        native_os.close = close_gate
+    if fault == "gate":
+        def inheritable(*args):
+            raise OSError("gate diagnostic")
+        native_os.set_inheritable = inheritable
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    aborted = []
+    monkeypatch.setattr(process, "_abort_start", lambda: aborted.append(True))
+    monkeypatch.setattr(process, "_windows_abort_start", lambda: aborted.append(True))
+    monkeypatch.setattr(process, "_load_guardian_identity", lambda timeout: None)
+
+    def release():
+        if fault == "release":
+            raise RuntimeSessionError("start authorization failed")
+        process._cancel_start_gate()
+
+    monkeypatch.setattr(process, "_release_start_gate", release)
+    if fault == "logdir":
+        process.log_path.mkdir()
+    if fault == "safe_log":
+        process.log_path.write_bytes(b"")
+        process.log_path.chmod(0o600)
+        if os.name == "nt":
+            # This case models POSIX permissions on a Windows host.
+            monkeypatch.setattr(mihomo_module, "stat",
+                                SimpleNamespace(S_IMODE=lambda mode: 0o600))
+    refused = fault in ("logdir", "gate", "containment", "release", "identity",
+                        "macos_parent", "windows_assign")
+    try:
+        if refused:
+            with pytest.raises(RuntimeSessionError) as caught:
+                process.start()
+            assert not isinstance(caught.value, RuntimeCandidateError)
+        else:
+            assert process.start().pid == 100
+            assert not process._threads
+            if fault == "frozen":
+                assert captured["arguments"][1] == "--jerryproxy-guardian"
+        if fault in ("release", "identity", "windows_assign"):
+            assert aborted == [True]
+    finally:
+        process._cancel_start_gate()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="executable script fixture requires POSIX")
+def test_real_backend_immediate_exit_is_recoverable_after_cleanup(tmp_path, monkeypatch):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    executable = tmp_path / "reject-node"
+    executable.write_text("#!%s\nraise SystemExit(1)\n" % sys.executable)
+    executable.chmod(0o700)
+    process = MihomoProcess(executable, tmp_path / "config", tmp_path, tmp_path / "log")
+    load_identity = process._load_guardian_identity
+
+    def after_exit(timeout):
+        assert process.process.wait(timeout=5) == 1
+        load_identity(timeout)
+
+    monkeypatch.setattr(process, "_load_guardian_identity", after_exit)
+    try:
+        with pytest.raises(RuntimeCandidateError):
+            process.start()
+    finally:
+        process.stop()
+    assert process.process.poll() is not None
+    assert not process._guardian_metadata_path.exists()
+
+
+@pytest.mark.parametrize("fault", ["permission", "invalid_record", "guardian_failure"])
+def test_guardian_local_failure_is_not_downgraded_to_node_failure(tmp_path, monkeypatch, fault):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = type("Child", (), {"poll": lambda self: 127 if fault == "guardian_failure" else 1})()
+    aborted = []
+    monkeypatch.setattr(process, "_abort_start", lambda: aborted.append(True))
+
+    def read(*args):
+        if fault == "permission":
+            raise PermissionError(13, "private path")
+        if fault == "invalid_record":
+            return b"[]"
+        raise FileNotFoundError(2, "missing")
+
+    monkeypatch.setattr(mihomo_module, "_read_private_metadata", read)
+    with pytest.raises(RuntimeSessionError) as caught:
+        process._load_guardian_identity(timeout=0.01)
+    assert not isinstance(caught.value, RuntimeCandidateError)
+    assert "private path" not in str(caught.value)
+    assert aborted == [True]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux group census")
+@pytest.mark.parametrize("exits", [True, False])
+def test_guardian_exit_during_group_signal_requires_fresh_liveness(tmp_path, monkeypatch, exits):
+    class Child:
+        pid = 456
+        calls = 0
+
+        def poll(self):
+            self.calls += 1
+            return 0 if exits and self.calls > 1 else None
+
+        def wait(self, timeout):
+            return 0
+
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = Child()
+    process._backend_pgid = process._backend_sid = 456
+    monkeypatch.setattr(mihomo_module, "_linux_process_group_members", lambda *args: ())
+    if exits:
+        process.stop(timeout=0.01)
+    else:
+        with pytest.raises(RuntimeSessionError, match="guardian did not stop"):
+            process.stop(timeout=0.01)
+
+
+@pytest.mark.parametrize("fault", [
+    "linux", "macos", "windows", "group_missing", "group_signal", "pidfd_identity", "pidfd_term",
+    "term_error", "wait_timeout", "kill_error", "wait_twice", "pidfd_kill", "pidfd_reused",
+    "backend_pidfd", "members_disappear", "members_stuck", "close_error", "metadata_error",
+    "drain_alive", "drain_error", "macos_kill", "windows_kill", "windows_wait", "fallback_group",
+    "macos_term", "windows_stopped", "members_killed",
+])
+def test_stop_requires_confirmed_containment_across_platform_failures(tmp_path, monkeypatch, fault):
+    from types import SimpleNamespace
+
+    # This fixture models POSIX signals even when hosted on Windows.
+    monkeypatch.setattr(signal, "SIGKILL", getattr(signal, "SIGKILL", 9), raising=False)
+
+    platform = "darwin" if fault.startswith("macos") else (
+        "win32" if fault.startswith("windows") or fault == "term_error" else "linux")
+    native_os = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+    native_os.name = "nt" if platform == "win32" else "posix"
+    monkeypatch.setattr(mihomo_module, "os", native_os)
+    monkeypatch.setattr(mihomo_module, "sys", SimpleNamespace(platform=platform))
+    calls = []
+    timed_out = fault in ("wait_timeout", "kill_error", "wait_twice", "pidfd_kill", "pidfd_reused",
+                          "macos_kill", "windows_kill", "windows_wait")
+
+    class Child:
+        pid = 456
+        stopped = False
+        waits = 0
+
+        def poll(self):
+            return 0 if self.stopped else None
+
+        def terminate(self):
+            if fault in ("term_error", "macos_term"):
+                raise OSError("termination refused")
+
+        def kill(self):
+            if fault in ("macos_kill", "windows_kill"):
+                raise OSError("kill refused")
+
+        def wait(self, timeout):
+            self.waits += 1
+            if timed_out and (self.waits == 1 or fault in ("wait_twice", "windows_wait")):
+                raise subprocess.TimeoutExpired("backend", timeout)
+            self.stopped = True
+            return 0
+
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = Child()
+    process.process.stopped = fault == "windows_stopped"
+    process._backend_pgid = process._backend_sid = 456
+    process.backend_pid = 789
+    process._backend_start_time = process._linux_start_time = 1
+    if fault == "fallback_group":
+        process._backend_pgid = None
+    if fault.startswith("pidfd"):
+        process._pidfd = 123
+    if fault in ("backend_pidfd", "close_error"):
+        process._backend_pidfd = 124
+    if fault == "close_error":
+        process._pidfd = 123
+
+    def identity(pid, token):
+        if fault == "pidfd_identity":
+            return False
+        if fault == "pidfd_reused" and process.process.waits:
+            return False
+        return fault not in ("group_missing", "group_signal", "macos_kill")
+
+    monkeypatch.setattr(mihomo_module, "_linux_process_identity_matches", identity)
+    monkeypatch.setattr(mihomo_module, "_linux_process_group", lambda pid: 456)
+    monkeypatch.setattr(mihomo_module, "_linux_process_session", lambda pid: 456)
+    census = []
+
+    def members(*args):
+        census.append(1)
+        if fault == "members_stuck" or (fault == "members_killed" and signal.SIGKILL not in calls):
+            return (789,)
+        if fault == "members_disappear" and len(census) == 1:
+            return (789,)
+        return ()
+
+    monkeypatch.setattr(mihomo_module, "_linux_process_group_members", members)
+
+    def killpg(group, signum):
+        calls.append(signum)
+        if fault in ("group_signal", "macos", "macos_kill", "macos_term", "kill_error"):
+            raise OSError("group unavailable")
+
+    native_os.killpg = killpg
+
+    def pidfd(fd, signum):
+        if fault == "pidfd_term" or (fault == "pidfd_kill" and signum == signal.SIGKILL) or fd == 124:
+            raise OSError("pidfd unavailable")
+
+    monkeypatch.setattr(mihomo_module, "_linux_pidfd_send_signal", pidfd)
+
+    def close(fd):
+        if fault == "close_error":
+            raise OSError("descriptor refused")
+
+    native_os.close = close
+    if fault == "metadata_error":
+        process._guardian_metadata_path = SimpleNamespace(exists=lambda: True, unlink=lambda: None)
+
+        def unlink():
+            raise OSError("metadata refused")
+
+        process._guardian_metadata_path.unlink = unlink
+        monkeypatch.setattr(mihomo_module, "is_path_alias", lambda path: False)
+    if fault == "drain_alive":
+        process._threads = [SimpleNamespace(join=lambda timeout: None, is_alive=lambda: True)]
+    if fault == "drain_error":
+        process._record_drain_error("drain failed")
+    failures = fault in ("macos_term", "pidfd_identity", "pidfd_term",
+                         "term_error", "wait_twice", "pidfd_kill", "members_stuck", "metadata_error", "drain_alive",
+                         "drain_error", "macos_kill", "windows_kill", "windows_wait")
+    if failures:
+        with pytest.raises(RuntimeSessionError):
+            process.stop(timeout=0.01)
+    else:
+        process.stop(timeout=0.01)
+        assert process.process.poll() == 0

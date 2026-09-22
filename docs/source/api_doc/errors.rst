@@ -115,6 +115,12 @@ SubscriptionFetchError
 .. autoclass:: SubscriptionFetchError
 
 
+SubscriptionSourceError
+-----------------------------------------------------
+
+.. autoclass:: SubscriptionSourceError
+
+
 SubscriptionTransportError
 -----------------------------------------------------
 
@@ -144,3 +150,9 @@ RuntimeSessionError
 -----------------------------------------------------
 
 .. autoclass:: RuntimeSessionError
+
+
+RuntimeCandidateError
+-----------------------------------------------------
+
+.. autoclass:: RuntimeCandidateError

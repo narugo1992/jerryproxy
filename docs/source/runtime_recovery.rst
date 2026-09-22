@@ -103,10 +103,11 @@ absence of direct bypass must be checked before connectivity can establish
 readiness. Each control request has an absolute wall deadline covering response
 headers and body, including slow trickles. A standard-library buffered reader
 clamps each underlying socket read to the remaining time; no deadline worker
-is allocated. Ambiguous control state, authentication, integrity, TLS, permission
-and unsafe cleanup failures remain terminal. Health probes report certificate
-validation failure and explicit HTTP 407 responses as closed terminal
-verdicts, never as ordinary target outages. CONNECT 407 refusals are recognized
+is allocated. Failed control verification isolates the child before rebuilding.
+Local integrity, permission and unconfirmed cleanup failures remain terminal.
+Health probes reject invalid certificates and explicit HTTP 407 responses, but
+these are target failures: a passing quorum keeps the current node; a failed
+quorum enters the configured recovery policy. CONNECT 407 refusals are recognized
 only through the pinned Requests/urllib3/standard-library exception chain and
 the locally generated status prefix; arbitrary exception messages are never
 searched or logged. Other proxy connection failures remain retryable. A real
@@ -115,11 +116,11 @@ boundary. Confirmed child exit must not be confused with inability to stop a chi
 
 Cache age requests a refresh but does not disqualify verified cached nodes.
 Temporary refresh failure preserves the last good revision. Successful refresh
-prunes removed identities and statistics; removing the fixed identity produces
-an actionable error. Recovery refresh receives an independent budget and respects its
+prunes removed identities and statistics; a missing fixed identity waits for
+a later refresh to restore it, without selecting another node. Recovery refresh receives an independent budget and respects its
 own minimum interval, backoff and server Retry-After. Retry-After is bounded
 to one day; malformed values are discarded. Refresh starts no more often than
-once per 60 seconds by default, doubles its delay after consecutive transport
+once per 60 seconds by default, doubles its delay after consecutive source
 failures up to one hour, and resets after success. Mandatory worker cleanup has
 separate bounded stop intervals and must complete even after the network
 budget expires; inability to prove cleanup is terminal. A standalone
@@ -218,3 +219,46 @@ or a whole-repository average substituting for the affected-area audit.
 Python 3.7 compatibility, normal test gates, generated API documentation,
 documentation build and package build must pass. The PR body is English;
 completion requires review and CI evidence that the full scope is merge-ready.
+
+Availability-first recovery contract
+------------------------------------
+
+Node and remote-network failures belong to the recovery policy rather than a
+session-wide fatal exception. A failed certificate check still rejects that
+connection; certificate validation is never disabled. Other healthy targets
+may satisfy quorum, otherwise recovery tries other permitted nodes. Explicit
+``none`` remains the opt-out; ``fixed`` waits for its selected identity instead
+of choosing another when that identity disappears from a refreshed source.
+
+An unusable startup candidate, failed control verification, stale reload, or
+exited backend must be isolated and cleaned up before a replacement backend
+can be verified. The session retains its home lock, ports and credentials.
+Repeated outages use bounded attempts, candidate cooldowns and capped backoff;
+there is no default total retry limit, including when the host is offline.
+Readiness means verified routing and a passing health quorum, not merely a
+living process or open port.
+
+Remote subscription failures must never publish rejected bytes. Refused TLS,
+authentication, unsafe responses and malformed provider content retain the
+previous valid cache and delay the next source attempt. Local-state integrity,
+worker-envelope corruption, permissions, and unconfirmed child cleanup remain
+fatal boundaries: continuing recovery must not release ownership while an old
+child or untrusted secret-bearing artifact remains.
+
+Verification requires startup and periodic failure recovery, strict TLS
+negative controls, preserved listener identity, subscription replacement and
+fixed-identity absence, backend restart and control failure isolation,
+long-outage resource bounds, safe interruption, and adversarial cleanup and
+integrity failures. Changed executable functions require complete measured
+branch coverage; release checks also exercise real backend data-plane paths.
+
+
+To reproduce the affected-function audit after a branch-enabled pytest run::
+
+    python -m pytest test -m unittest --cov=jerryproxy --cov-branch --cov-report=json
+    python -m tools.changed_coverage coverage.json --base origin/main
+
+The audit checks every surviving function touched by additions or deletions,
+including branches outside the changed lines. Missing files and statement-only
+coverage are failures. Native CI retains coverage JSON beside its test reports;
+mocked OS failure outcomes supplement, rather than replace, native platform runs.

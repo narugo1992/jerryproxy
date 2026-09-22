@@ -36,8 +36,8 @@ def test_disabled_and_fixed_never_select_alternates():
     assert fixed.next("b", 0) is None
     fixed.begin_sweep()
     assert fixed.next("b", 5) == "a"
-    with pytest.raises(ValueError, match="fixed node"):
-        fixed.update(("b",))
+    fixed.update(("b",))
+    assert fixed.next("b", 100) is None
 
 
 def test_random_sweep_survives_round_boundaries_and_unchanged_refresh():

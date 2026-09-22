@@ -14,6 +14,7 @@ import base64
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -510,9 +511,11 @@ def test_an_in_network_source_url_is_refused_before_any_fetch(home):
 
 
 @pytest.mark.timeout(CASE_TIMEOUT)
-@pytest.mark.parametrize("container,scheme", [("uri", scheme) for scheme in sorted(_contract.NODE_VARIABLES)]
-                         + [("provider", scheme) for scheme in sorted(PROVIDER_TYPES)])
-def test_live_recovery_hot_reloads_each_protocol(container, scheme, home, unused_port, isolated_sentinel):
+@pytest.mark.parametrize("container,scheme,fault",
+                         [("uri", scheme, "health") for scheme in sorted(_contract.NODE_VARIABLES)]
+                         + [("provider", scheme, "health") for scheme in sorted(PROVIDER_TYPES)]
+                         + [("uri", "ss", "crash")])
+def test_live_recovery_hot_reloads_each_protocol(container, scheme, fault, home, unused_port, isolated_sentinel):
     """Use the real private sentinel before and after a forced health outage.
 
     Only the outage verdict is injected. Provider publication, native reload,
@@ -550,7 +553,7 @@ def test_live_recovery_hot_reloads_each_protocol(container, scheme, home, unused
 
         def check(self, port, username, password):
             self.calls += 1
-            if 2 <= self.calls <= 4:
+            if fault == "health" and 2 <= self.calls <= 4:
                 return HealthSnapshot((), 0, 1, time.monotonic())
             endpoint = "http://%s:%s@127.0.0.1:%d" % (quote(username, safe=""), quote(password, safe=""), port)
             with requests.Session() as transport:
@@ -576,6 +579,8 @@ def test_live_recovery_hot_reloads_each_protocol(container, scheme, home, unused
     def event_sink(event):
         if event["event"] == "session.ready":
             events.append((event, runtime._loaded_identity))
+            if fault == "crash" and len(events) == 1:
+                os.kill(runtime.process.backend_pid, signal.SIGKILL)
 
     def sleeper(delay):
         if len(events) == 2:
@@ -590,11 +595,17 @@ def test_live_recovery_hot_reloads_each_protocol(container, scheme, home, unused
     try:
         runtime.start("reload", initial.node_id, install_missing=False)
         assert runtime.wait() == 130
-        assert len(observations) == 2
-        assert observations[0] == observations[1], "hot reload changed backend, listener or credentials"
+        assert len(observations) == 2 if fault == "health" else len(observations) >= 2
+        assert all(item[1:] == observations[0][1:] for item in observations), (
+            "recovery changed listener or credentials"
+        )
+        assert all(item[0] == observations[1][0] for item in observations[1:]), (
+            "the recovered backend did not remain stable"
+        )
+        assert (observations[0][0] == observations[1][0]) == (fault == "health")
         assert len(events) == 2 and events[0][1] != events[1][1], "provider generation did not change"
         assert events[0][0]["data"]["node"] == initial.node_id
-        assert events[1][0]["data"]["node"] == alternate.node_id
+        assert events[1][0]["data"]["node"] == (alternate if fault == "health" else initial).node_id
         assert events[1][0]["data"]["preference_node"] == initial.node_id
         assert events[1][0]["data"]["health"]["ok"]
         rendered = json.dumps([item[0] for item in events])

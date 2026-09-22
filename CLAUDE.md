@@ -33,8 +33,11 @@ subscription state below `JERRYPROXY_HOME`, probes the global health quorum,
 keeps the backend running across connectivity failures, retries within the
 selected subscription, and hot-reloads alternate single-node providers without
 rewriting the saved preference. Recovery uses repeated bounded rounds; healthy
-sessions do not explore. Refresh retains verified cache on explicitly transient
-transport failures, propagates network budgets and observes independent backoff
+sessions do not explore. TLS/authentication refusals obey health quorum; failed
+backend, listener and control verification require confirmed isolation before
+rebuilding. A missing fixed identity waits for a future refresh. Refresh retains
+verified cache on remote transport or source-content rejection, propagates
+network budgets and observes independent backoff
 and Retry-After. Explicit and guided CLI support none, fixed, random, adaptive
 and fallback strategies with a closed optional fallback chain. Scoped SIGINT
 and SIGTERM handlers unwind foreground sessions. Default health probes run in
