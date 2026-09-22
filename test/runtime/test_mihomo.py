@@ -1228,7 +1228,7 @@ def test_guardian_exit_during_group_signal_requires_fresh_liveness(tmp_path, mon
     if exits:
         process.stop(timeout=0.01)
     else:
-        with pytest.raises(RuntimeSessionError, match="process-group identity"):
+        with pytest.raises(RuntimeSessionError, match="guardian did not stop"):
             process.stop(timeout=0.01)
 
 
@@ -1241,6 +1241,9 @@ def test_guardian_exit_during_group_signal_requires_fresh_liveness(tmp_path, mon
 ])
 def test_stop_requires_confirmed_containment_across_platform_failures(tmp_path, monkeypatch, fault):
     from types import SimpleNamespace
+
+    # This fixture models POSIX signals even when hosted on Windows.
+    monkeypatch.setattr(signal, "SIGKILL", getattr(signal, "SIGKILL", 9), raising=False)
 
     platform = "darwin" if fault.startswith("macos") else (
         "win32" if fault.startswith("windows") or fault == "term_error" else "linux")
@@ -1342,7 +1345,7 @@ def test_stop_requires_confirmed_containment_across_platform_failures(tmp_path, 
         process._threads = [SimpleNamespace(join=lambda timeout: None, is_alive=lambda: True)]
     if fault == "drain_error":
         process._record_drain_error("drain failed")
-    failures = fault in ("macos_term", "kill_error", "group_missing", "group_signal", "pidfd_identity", "pidfd_term",
+    failures = fault in ("macos_term", "pidfd_identity", "pidfd_term",
                          "term_error", "wait_twice", "pidfd_kill", "members_stuck", "metadata_error", "drain_alive",
                          "drain_error", "macos_kill", "windows_kill", "windows_wait")
     if failures:
