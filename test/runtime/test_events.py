@@ -80,7 +80,6 @@ def test_periodic_events_keep_last_healthy_node_until_recovery(tmp_path):
 
     def healthy():
         if driver.loaded == wanted:
-            session.process.process.returncode = 0
             return True
         return clock.now == 0
 
@@ -91,7 +90,13 @@ def test_periodic_events_keep_last_healthy_node_until_recovery(tmp_path):
     session.event_sink = events.append
     try:
         session.start("main", record.nodes[0].node_id, install_missing=False)
-        assert session.wait() == 0
+        def finish(delay):
+            if driver.loaded == wanted:
+                raise KeyboardInterrupt
+            clock.sleep(delay)
+
+        session.sleeper = finish
+        assert session.wait() == 130
     finally:
         session.stop()
     names = [event["event"] for event in events]

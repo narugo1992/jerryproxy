@@ -518,8 +518,11 @@ Healthy sessions keep their node, listener and credentials, and automatic
 recovery never rewrites the saved preference. Temporary subscription transport
 failures retain verified cache, with separate refresh backoff and Retry-After
 handling. Cache older than 12 hours requests refresh without disqualifying its
-nodes. Control, TLS, authentication, integrity and unclassified failures remain
-terminal. Lifecycle events report starting, degradation, retry attempts,
+nodes. TLS and authentication refusals count as failed health targets; quorum
+determines whether to keep the node or recover. Backend exit and failed control
+verification trigger cleanup and rebuild. Local integrity, permission and
+unconfirmed cleanup failures remain terminal. A removed fixed node waits for
+its identity to return on refresh. Network outages have no total retry limit. Lifecycle events report starting, degradation, retry attempts,
 refresh outcomes, readiness and completed cleanup. JSONL sends events to stdout
 and ordinary logs to stderr; event visibility is independent of log level.
 Both log producers retain recent redacted diagnostics within a 4 MiB file.

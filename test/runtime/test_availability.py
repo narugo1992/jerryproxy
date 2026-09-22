@@ -151,3 +151,131 @@ def test_remote_source_refusal_keeps_cache_and_recovers(tmp_path):
         assert session.last_health.ok
     finally:
         session.stop()
+
+
+def test_periodic_control_refusal_rebuilds_before_claiming_health(tmp_path):
+    from jerryproxy.errors import RuntimeSessionError
+
+    from .test_persistent import Probe
+
+    clock = Clock()
+
+    class Driver(ReloadingDriver):
+        def loaded_nodes(self, *args):
+            if clock.now > 0 and self.launches == 1:
+                raise RuntimeSessionError('control authentication refused')
+            return super(Driver, self).loaded_nodes(*args)
+
+    driver = Driver()
+    record = _record(nodes=1)
+    session = _session(tmp_path, record, Probe(lambda: True), clock=clock, sleeper=clock.sleep,
+                       policy=RecoveryPolicy(health_interval=1))
+    session.driver = driver
+    session.start('main', record.nodes[0].node_id, install_missing=False)
+
+    def finish(delay):
+        if driver.launches > 1:
+            raise KeyboardInterrupt
+        assert clock.now < 5, 'control was never revalidated'
+        clock.sleep(delay)
+
+    session.sleeper = finish
+    try:
+        assert session.wait() == 130
+        assert driver.launches == 2
+    finally:
+        session.stop()
+
+
+def test_repeated_backend_crash_uses_backoff_then_recovers(tmp_path):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    from .test_persistent import Probe
+
+    clock = Clock()
+    record = _record(nodes=1)
+
+    class Driver(ReloadingDriver):
+        def create_process(self, *args, **kwargs):
+            child = super(Driver, self).create_process(*args, **kwargs)
+            if clock.now < 180:
+                def crash():
+                    child.process.returncode = 23
+                    raise RuntimeCandidateError('backend exited before ready')
+                child.start = crash
+            return child
+
+    driver = Driver()
+    session = _session(tmp_path, record, Probe(lambda: True), clock=clock, sleeper=clock.sleep)
+    session.driver = driver
+    try:
+        session.start('main', record.nodes[0].node_id, install_missing=False)
+        assert clock.now >= 180
+        assert 2 < driver.launches < 20
+        assert session.last_health.ok
+        assert max(clock.delays) <= 60
+    finally:
+        session.stop()
+
+
+def test_backend_flapping_is_rate_limited_even_when_probes_pass(tmp_path):
+    from .test_persistent import Probe
+    record = _record(nodes=1)
+    clock = Clock()
+    driver = ReloadingDriver()
+
+    def healthy():
+        session.process.process.returncode = 23
+        return True
+
+    session = _session(tmp_path, record, Probe(healthy), clock=clock, sleeper=clock.sleep)
+    session.driver = driver
+    session.start('main', record.nodes[0].node_id, install_missing=False)
+
+    def finish(delay):
+        if driver.launches >= 6:
+            raise KeyboardInterrupt
+        clock.sleep(delay)
+
+    session.sleeper = finish
+    try:
+        assert session.wait() == 130
+        assert clock.now >= 40
+        assert driver.launches == 6
+    finally:
+        session.stop()
+
+
+@pytest.mark.parametrize("phase", ["launch", "control"])
+def test_exhausted_candidate_deadline_recovers_without_ending_session(tmp_path, phase):
+    from .test_persistent import Probe
+
+    clock = Clock()
+
+    class Driver(ReloadingDriver):
+        def create_process(self, *args, **kwargs):
+            process = super(Driver, self).create_process(*args, **kwargs)
+            original = process.start
+
+            def start():
+                original()
+                if self.launches == 1 and phase == "launch":
+                    clock.now += 121
+
+            process.start = start
+            return process
+
+        def wait_ready(self, *args, **kwargs):
+            super(Driver, self).wait_ready(*args, **kwargs)
+            if self.launches == 1 and phase == "control":
+                clock.now += 121
+
+    record = _record(nodes=2)
+    session = _session(tmp_path, record, Probe(lambda: True), clock=clock, sleeper=clock.sleep)
+    session.driver = Driver()
+    try:
+        session.start("main", record.nodes[0].node_id, install_missing=False)
+        assert session.driver.launches == 2
+        assert session.last_health.ok
+    finally:
+        session.stop()

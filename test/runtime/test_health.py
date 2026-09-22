@@ -343,21 +343,32 @@ def test_probe_close_waits_for_real_worker_completion_and_cancels_pending_target
     probe.close(timeout=0)
 
 
-def test_session_retains_lock_when_health_worker_cleanup_is_unconfirmed(tmp_path):
+def test_session_retains_lock_when_health_worker_cleanup_is_unconfirmed(tmp_path, monkeypatch):
     from jerryproxy.errors import JerryProxyBusyError
     from jerryproxy.lock import JerryProxyOperationLock
     from test.runtime.test_session import _record, _session
 
     release = threading.Event()
+    entered = threading.Event()
 
     class Stalled(FakeSession):
         def get(self, *args, **kwargs):
+            entered.set()
             assert release.wait(10)
             return FakeResponse()
 
     record = _record(nodes=1)
     probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),),
-                              quorum=1, timeout=0.001, session_factory=lambda: Stalled(None))
+                              quorum=1, timeout=0.001, session_factory=lambda: Stalled(None),
+                              clock=lambda: 1.0 if entered.is_set() else 0.0)
+    start_thread = threading.Thread.start
+
+    def start_and_wait(worker):
+        start_thread(worker)
+        if worker.name.startswith("jerryproxy-health-"):
+            assert entered.wait(2), "health worker did not reach the blocked transport"
+
+    monkeypatch.setattr(threading.Thread, "start", start_and_wait)
     runtime = _session(tmp_path, record, probe, policy=RecoveryPolicy(retry_policy="none", confirmation_delay=0.001))
     events = []
     runtime.event_sink = events.append
@@ -452,7 +463,7 @@ def test_probe_close_requires_thread_exit_after_target_completion(monkeypatch):
 
 
 @pytest.mark.parametrize("fault, detail", [("tls", "tls_failed"), ("proxy_auth", "proxy_authentication_failed")])
-def test_session_does_not_retry_tls_or_proxy_authentication_failures(tmp_path, fault, detail):
+def test_explicit_none_disables_tls_and_authentication_recovery(tmp_path, fault, detail):
     from test.runtime.test_session import _record, _session
 
     calls = []
@@ -460,7 +471,7 @@ def test_session_does_not_retry_tls_or_proxy_authentication_failures(tmp_path, f
     class Refused(FakeSession):
         def get(self, *args, **kwargs):
             calls.append(1)
-            assert len(calls) == 1, "terminal probe failures must not be retried"
+            assert len(calls) <= 2, "none permits confirmation but not recovery"
             if fault == "tls":
                 raise requests.exceptions.SSLError("private TLS context")
             return FakeResponse(status_code=407)
@@ -468,13 +479,12 @@ def test_session_does_not_retry_tls_or_proxy_authentication_failures(tmp_path, f
     record = _record(nodes=1)
     probe = ConnectivityProbe(targets=(HealthTarget("one", "https://example.invalid", 204),), quorum=1,
                               session_factory=lambda: Refused(None))
-    def no_retry_sleep(delay):
-        pytest.fail("terminal probe failure must not enter retry waits")
-
-    session = _session(tmp_path, record, probe, sleeper=no_retry_sleep)
-    with pytest.raises(RuntimeSessionError, match=detail) as failure:
+    session = _session(tmp_path, record, probe, sleeper=lambda delay: None,
+                       policy=RecoveryPolicy(retry_policy="none"))
+    with pytest.raises(RuntimeSessionError, match="retry policy is none") as failure:
         session.start("main", record.nodes[0].node_id, install_missing=False)
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert session.last_health.targets[0].detail == detail
     assert "private TLS context" not in str(failure.value)
     assert session._operation_lock is None
     assert not session.session_root.exists()

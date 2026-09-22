@@ -340,7 +340,7 @@ def test_no_secret_reaches_a_runtime_refusal_message(tmp_path):
         subscription_manager=manager,
         health_probe=_Probe(),
         driver=_Bypassing(process_factory=_Process),
-        recovery_policy=RecoveryPolicy(recovery_deadline=5.0),
+        recovery_policy=RecoveryPolicy(retry_policy="none", recovery_deadline=5.0),
         sleeper=lambda delay: None,
     )
 

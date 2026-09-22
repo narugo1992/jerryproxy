@@ -1120,3 +1120,44 @@ def test_public_add_never_persists_plaintext_source(tmp_path):
     with pytest.raises(SubscriptionFetchError, match="HTTP subscription sources cannot be persisted"):
         manager.add("main", "http://provider.invalid/sub", allow_http=True)
     assert manager.list() == ()
+
+
+@pytest.mark.parametrize("failure", ["tls", "authentication", "content", "integrity"])
+def test_rejected_remote_refresh_preserves_cache_and_classifies_boundary(tmp_path, monkeypatch, failure):
+    from jerryproxy.errors import SubscriptionSourceError
+
+    paths = JerryProxyPaths(tmp_path / ".jerryproxy")
+    manager = SubscriptionManager(paths)
+    original = build_record("main", "a" * 32, parse_subscription_body(SS, format_hint="uri-lines"),
+                            source_url="https://provider.example/sub")
+    manager.store.publish(original)
+
+    def fetch(*args, **kwargs):
+        if failure == "content":
+            return FetchedSubscription(b"not a subscription", original.source_url)
+        if failure == "integrity":
+            raise IntegrityError("local integrity refusal")
+        raise SubscriptionFetchError("private remote rejection")
+
+    monkeypatch.setattr(manager_module, "fetch_subscription", fetch)
+    expected = IntegrityError if failure == "integrity" else SubscriptionSourceError
+    with pytest.raises(expected) as caught:
+        manager.refresh("main")
+    assert "private remote rejection" not in str(caught.value)
+    assert manager.get("main").revision == original.revision
+    assert manager.get("main").body == original.body
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_source_refusal_envelope_is_distinct_from_worker_corruption(tmp_path, valid):
+    from jerryproxy.errors import SubscriptionSourceError
+
+    result = tmp_path / "result.json"
+    envelope = {"ok": False, "error": "subscription source fetch failed"}
+    if not valid:
+        envelope["unexpected"] = "private remote diagnostic"
+    _write_fetch_result(str(result), envelope)
+    with pytest.raises(SubscriptionFetchError) as caught:
+        _read_fetch_result(str(result))
+    assert isinstance(caught.value, SubscriptionSourceError) == valid
+    assert "private remote diagnostic" not in str(caught.value)

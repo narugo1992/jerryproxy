@@ -135,21 +135,20 @@ def test_none_stops_after_confirmation_without_reload_or_refresh(tmp_path):
     assert not session.session_root.exists()
 
 
-def test_acknowledged_reload_with_old_identity_fails_closed(tmp_path):
+def test_acknowledged_reload_with_old_identity_rebuilds_before_health(tmp_path):
     clock = Clock()
     record = _record(nodes=2)
-    events = []
-    session = _session(tmp_path, record, Probe(lambda: False), clock=clock, sleeper=clock.sleep,
-                       log_sink=lambda *event: events.append(event),
-                       policy=RecoveryPolicy(retry_policy="fallback"))
     driver = ReloadingDriver()
     driver.stale_reload = True
+    session = _session(tmp_path, record, Probe(lambda: driver.launches > 1), clock=clock, sleeper=clock.sleep)
     session.driver = driver
-    with pytest.raises(RuntimeSessionError, match="previous provider identity"):
+    try:
         session.start("main", record.nodes[0].node_id, install_missing=False)
-    assert driver.reloads == 1
-    assert not any("backend accepted node %s" % record.nodes[1].node_id in event[2] for event in events)
-    assert not session.session_root.exists()
+        assert driver.reloads == 1
+        assert driver.launches == 2
+        assert session.last_health.ok
+    finally:
+        session.stop()
 
 
 def test_periodic_outage_recovers_after_multiple_rounds(tmp_path):
@@ -159,7 +158,6 @@ def test_periodic_outage_recovers_after_multiple_rounds(tmp_path):
 
     def healthy():
         if clock.now >= 180:
-            session.process.process.returncode = 0
             return True
         return clock.now == 0
 
@@ -169,7 +167,13 @@ def test_periodic_outage_recovers_after_multiple_rounds(tmp_path):
     session.driver = driver
     try:
         session.start("main", record.nodes[0].node_id, install_missing=False)
-        assert session.wait() == 0
+        def finish(delay):
+            if clock.now >= 180 and session.last_health.ok:
+                raise KeyboardInterrupt
+            clock.sleep(delay)
+
+        session.sleeper = finish
+        assert session.wait() == 130
         assert clock.now >= 180
         assert session.last_health.ok
         assert driver.launches == 1
@@ -277,37 +281,50 @@ def test_unhealthy_loaded_candidate_does_not_become_effective(tmp_path):
         session.stop()
 
 
-def test_bypassed_candidate_is_terminal_before_a_health_probe(tmp_path):
+def test_bypassed_candidate_is_isolated_before_a_health_probe(tmp_path):
     class BypassingDriver(ReloadingDriver):
         def loaded_nodes(self, *args):
-            if self.reloads:
+            if self.reloads and self.launches == 1:
                 return LoadedNodes((), "COMPATIBLE", True)
             return super(BypassingDriver, self).loaded_nodes(*args)
 
     record = _record(nodes=2)
     clock = Clock()
     driver = BypassingDriver()
-    probe = Probe(lambda: driver.reloads > 0)
-    session = _session(tmp_path, record, probe, clock=clock, sleeper=clock.sleep,
-                       policy=RecoveryPolicy(retry_policy="fallback"))
+    probe = Probe(lambda: driver.launches > 1)
+    session = _session(tmp_path, record, probe, clock=clock, sleeper=clock.sleep)
     session.driver = driver
-    with pytest.raises(RuntimeSessionError, match="route traffic directly"):
+    try:
         session.start("main", record.nodes[0].node_id, install_missing=False)
-    assert probe.calls == 3
-    assert not session.session_root.exists()
+        assert driver.launches == 2
+        assert probe.calls == 4
+        assert session.last_health.ok
+    finally:
+        session.stop()
 
 
-def test_fixed_node_removal_is_actionable_and_cleans_the_session(tmp_path):
+def test_fixed_node_removal_waits_until_identity_returns(tmp_path):
     original = _record(nodes=1, source_url="https://example.invalid/sub")
     refreshed = _record(nodes=2, source_url="https://example.invalid/sub")
     clock = Clock()
-    session = _session(tmp_path, original, Probe(lambda: False),
-                       manager=FakeSubscriptionManager(original, refreshed), clock=clock, sleeper=clock.sleep,
+
+    class Manager(FakeSubscriptionManager):
+        def refresh(self, name, timeout=None):
+            self.refresh_calls += 1
+            return refreshed if self.refresh_calls == 1 else original
+
+    manager = Manager(original)
+    session = _session(tmp_path, original, Probe(lambda: manager.refresh_calls >= 2),
+                       manager=manager, clock=clock, sleeper=clock.sleep,
                        policy=RecoveryPolicy(retry_policy="fixed"))
     session.driver = ReloadingDriver()
-    with pytest.raises(RuntimeSessionError, match="fixed node.*node list"):
+    try:
         session.start("main", original.nodes[0].node_id, install_missing=False)
-    assert not session.session_root.exists()
+        assert session.node.node_id == original.nodes[0].node_id
+        assert manager.refresh_calls >= 2
+        assert session.driver.reloads == 0
+    finally:
+        session.stop()
 
 
 @pytest.mark.parametrize("policy", ["fixed", "random", "adaptive", "fallback"])
@@ -317,8 +334,6 @@ def test_healthy_periodic_checks_never_explore_or_switch(tmp_path, policy):
     driver = ReloadingDriver()
 
     def healthy():
-        if clock.now >= 90:
-            session.process.process.returncode = 0
         return True
 
     session = _session(tmp_path, record, Probe(healthy), clock=clock, sleeper=clock.sleep,
@@ -326,7 +341,13 @@ def test_healthy_periodic_checks_never_explore_or_switch(tmp_path, policy):
     session.driver = driver
     try:
         session.start("main", record.nodes[0].node_id, install_missing=False)
-        assert session.wait() == 0
+        def finish(delay):
+            if clock.now >= 90:
+                raise KeyboardInterrupt
+            clock.sleep(delay)
+
+        session.sleeper = finish
+        assert session.wait() == 130
         assert driver.launches == 1 and driver.reloads == 0
         assert session.node.node_id == record.nodes[0].node_id
     finally:
@@ -337,7 +358,6 @@ def test_healthy_periodic_checks_never_explore_or_switch(tmp_path, policy):
     ("no_identity", "establish a provider identity"),
     ("no_provider", "reloadable provider"),
     ("config_change", "change the session configuration"),
-    ("child_exit", "exited during connectivity recovery"),
 ])
 def test_recovery_contract_failures_are_terminal_and_cleaned(tmp_path, fault, message):
     from dataclasses import replace
@@ -403,12 +423,15 @@ def test_unchanged_refreshed_content_cannot_change_backend_identity(tmp_path):
                              source_url=original.source_url)
     manager = FakeSubscriptionManager(original, refreshed)
     clock = Clock()
-    session = _session(tmp_path, original, Probe(lambda: False), manager=manager,
+    session = _session(tmp_path, original, Probe(lambda: session.driver.launches > 1), manager=manager,
                        clock=clock, sleeper=clock.sleep, policy=RecoveryPolicy())
     session.driver = UnstableDriver()
-    with pytest.raises(RuntimeSessionError, match="unchanged provider identity"):
+    try:
         session.start("main", original.nodes[0].node_id, install_missing=False)
-    assert not session.session_root.exists()
+        assert session.driver.launches == 2
+        assert session.last_health.ok
+    finally:
+        session.stop()
 
 
 def test_transient_refresh_failure_keeps_cache_and_retries_nodes(tmp_path):
@@ -441,12 +464,12 @@ def test_unclassified_refresh_error_stays_terminal(tmp_path):
 
     class Refused(FakeSubscriptionManager):
         def refresh(self, name, timeout=None):
-            raise SubscriptionFetchError("TLS verification failed")
+            raise SubscriptionFetchError("worker envelope invalid")
 
     session = _session(tmp_path, record, Probe(lambda: False), manager=Refused(record),
                        clock=clock, sleeper=clock.sleep, policy=RecoveryPolicy())
     session.driver = ReloadingDriver()
-    with pytest.raises(SubscriptionFetchError, match="TLS"):
+    with pytest.raises(SubscriptionFetchError, match="envelope"):
         session.start("main", record.nodes[0].node_id, install_missing=False)
     assert not session.session_root.exists()
 

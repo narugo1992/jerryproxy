@@ -535,7 +535,7 @@ class RuntimeSession(object):
             self.process.start()
             remaining = deadline.remaining()
             if remaining <= 0:
-                raise RuntimeSessionError("proxy recovery deadline exhausted")
+                raise RuntimeCandidateError("proxy recovery deadline exhausted")
             try:
                 self.driver.wait_ready(self.process, self.port, timeout=min(5.0, remaining))
             except RuntimeSessionError as error:
@@ -618,7 +618,7 @@ class RuntimeSession(object):
         # overrun the recovery deadline once per swept candidate.
         remaining = deadline.remaining()
         if remaining <= 0:
-            raise RuntimeSessionError("proxy recovery deadline exhausted")
+            raise RuntimeCandidateError("proxy recovery deadline exhausted")
         timeout = min(5.0, remaining / 2.0)
         try:
             loaded = self.driver.loaded_nodes(self.control_port, self.control_secret, timeout)
@@ -700,6 +700,8 @@ class RuntimeSession(object):
             except RuntimeCandidateError:
                 # A failed initial route is isolated just like a later candidate.
                 self._stop_process()
+                if self.recovery_policy.retry_policy == "none":
+                    raise
                 self._schedule.record(self.node.node_id, False, self.clock())
                 self._recover()
             else:
@@ -940,11 +942,30 @@ class RuntimeSession(object):
                         return return_code
                     self._stop_process()
                     self._loaded_node = None
+                    delay = self._backoff.failed(self.clock())
+                    self._event("retrying", "backend_exited", delay=delay)
+                    self.sleeper(delay)
                     self._recover()
                     self._event("ready", "backend_restored")
                     next_health = self.clock() + self.recovery_policy.health_interval
                 now = self.clock()
                 if now >= next_health:
+                    try:
+                        self._require_node_in_use(
+                            RecoveryDeadline(min(5.0, self.recovery_policy.recovery_deadline), clock=self.clock),
+                            node=self._loaded_node,
+                        )
+                    except RuntimeCandidateError:
+                        # Stop an unverified route before rebuilding; never use
+                        # successful egress as a substitute for route validation.
+                        self._stop_process()
+                        self._loaded_node = None
+                        if self.recovery_policy.retry_policy != "none":
+                            delay = self._backoff.failed(self.clock())
+                            self._event("retrying", "control_unverified", delay=delay)
+                            self.sleeper(delay)
+                        self._recover()
+                        self._event("ready", "backend_restored")
                     snapshot = self._check_health()
                     if snapshot.ok:
                         self._log_health(

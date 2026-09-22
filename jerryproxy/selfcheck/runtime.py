@@ -259,7 +259,7 @@ def _check_runtime_driver_contract():
                 driver=bypassing,
                 health_probe=_ProbeHealth(),
                 recovery_policy=RecoveryPolicy(
-
+                    retry_policy="none",
                     recovery_deadline=5.0,
                 ),
                 sleeper=lambda delay: None,

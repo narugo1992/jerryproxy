@@ -525,7 +525,7 @@ def test_runtime_health_check_rejects_invalid_probe_result(tmp_path):
 
 def test_runtime_wait_returns_backend_exit_code(tmp_path):
     record = _record(nodes=1)
-    runtime = _session(tmp_path, record, FakeProbe([True]))
+    runtime = _session(tmp_path, record, FakeProbe([True]), policy=RecoveryPolicy(retry_policy="none"))
     runtime.process = FakeProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log", "INFO")
     runtime.process.process.returncode = 17
     assert runtime.wait() == 17
@@ -856,8 +856,13 @@ def test_health_recovery_refreshes_through_the_session_home_lock(tmp_path, monke
     runtime.health_probe = FakeProbe([False] * 40)
     runtime._next_health_at = clock.value
 
-    with pytest.raises(RuntimeSessionError):
-        runtime.wait()
+    def finish(delay):
+        if runtime.subscription.revision != record.revision:
+            raise KeyboardInterrupt
+        clock.sleep(delay)
+
+    runtime.sleeper = finish
+    assert runtime.wait() == 130
     runtime.stop()
 
     assert manager.get("main").revision != record.revision
@@ -929,6 +934,7 @@ def test_a_backend_that_bypasses_the_node_is_refused(tmp_path):
         record,
         FakeProbe([True]),
         inspector=_control_documents(accepted=(), selected="COMPATIBLE"),
+        policy=RecoveryPolicy(retry_policy="none"),
     )
 
     with pytest.raises(RuntimeSessionError) as failure:
@@ -953,6 +959,7 @@ def test_a_backend_that_loads_more_than_the_published_node_is_refused(tmp_path):
         record,
         FakeProbe([True]),
         inspector=_control_documents(accepted=("a", "b"), selected="a"),
+        policy=RecoveryPolicy(retry_policy="none"),
     )
 
     with pytest.raises(RuntimeSessionError, match="parsed 2 nodes"):
@@ -975,7 +982,8 @@ def test_a_selection_matching_the_backend_empty_fallback_is_refused(tmp_path):
                                  "provider-name": "jerryproxy"}]}
         return {"now": "placeholder", "all": ["placeholder"], "emptyFallback": "placeholder"}
 
-    runtime = _session(tmp_path, record, FakeProbe([True]), inspector=inspector)
+    runtime = _session(tmp_path, record, FakeProbe([True]), inspector=inspector,
+                       policy=RecoveryPolicy(retry_policy="none"))
 
     with pytest.raises(RuntimeSessionError, match="route traffic directly"):
         runtime.start("main", node_id=record.nodes[0].node_id)

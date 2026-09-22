@@ -103,10 +103,11 @@ absence of direct bypass must be checked before connectivity can establish
 readiness. Each control request has an absolute wall deadline covering response
 headers and body, including slow trickles. A standard-library buffered reader
 clamps each underlying socket read to the remaining time; no deadline worker
-is allocated. Ambiguous control state, authentication, integrity, TLS, permission
-and unsafe cleanup failures remain terminal. Health probes report certificate
-validation failure and explicit HTTP 407 responses as closed terminal
-verdicts, never as ordinary target outages. CONNECT 407 refusals are recognized
+is allocated. Failed control verification isolates the child before rebuilding.
+Local integrity, permission and unconfirmed cleanup failures remain terminal.
+Health probes reject invalid certificates and explicit HTTP 407 responses, but
+these are target failures: a passing quorum keeps the current node; a failed
+quorum enters the configured recovery policy. CONNECT 407 refusals are recognized
 only through the pinned Requests/urllib3/standard-library exception chain and
 the locally generated status prefix; arbitrary exception messages are never
 searched or logged. Other proxy connection failures remain retryable. A real
@@ -115,11 +116,11 @@ boundary. Confirmed child exit must not be confused with inability to stop a chi
 
 Cache age requests a refresh but does not disqualify verified cached nodes.
 Temporary refresh failure preserves the last good revision. Successful refresh
-prunes removed identities and statistics; removing the fixed identity produces
-an actionable error. Recovery refresh receives an independent budget and respects its
+prunes removed identities and statistics; a missing fixed identity waits for
+a later refresh to restore it, without selecting another node. Recovery refresh receives an independent budget and respects its
 own minimum interval, backoff and server Retry-After. Retry-After is bounded
 to one day; malformed values are discarded. Refresh starts no more often than
-once per 60 seconds by default, doubles its delay after consecutive transport
+once per 60 seconds by default, doubles its delay after consecutive source
 failures up to one hour, and resets after success. Mandatory worker cleanup has
 separate bounded stop intervals and must complete even after the network
 budget expires; inability to prove cleanup is terminal. A standalone

@@ -1,6 +1,7 @@
 """Mihomo 1.19.29 foreground projection for an opaque NodeSet."""
 
 import base64
+import errno
 import io
 import json
 import math
@@ -18,7 +19,7 @@ from http.client import HTTPConnection, HTTPException, HTTPResponse
 from pathlib import Path
 
 from ..backend.durable import flush_directory
-from ..errors import RuntimeSessionError
+from ..errors import RuntimeCandidateError, RuntimeSessionError
 from ..home import is_path_alias
 from ..subscription.redaction import redact_bytes, redact_text, terminal_safe_text
 from ._logs import append_recent
@@ -1485,7 +1486,10 @@ class MihomoProcess(object):
             self._cancel_start_gate()
             _windows_close_job(self._windows_job)
             self._windows_job = None
-            # Executable/guardian launch failures are terminal runtime errors.
+            # Resource contention may recover; permissions, missing binaries,
+            # and containment setup failures still require local intervention.
+            if isinstance(error, OSError) and error.errno in (errno.EAGAIN, errno.ENOMEM, errno.ETXTBSY):
+                raise RuntimeCandidateError("mihomo backend launch temporarily unavailable") from error
             raise RuntimeSessionError("mihomo backend launch failed") from error
         except RuntimeSessionError:
             self._cancel_start_gate()
@@ -1563,7 +1567,10 @@ class MihomoProcess(object):
                 break
             time.sleep(0.01)
         if not isinstance(value, dict):
+            exited = self.process.poll() is not None
             self._abort_start()
+            if exited:
+                raise RuntimeCandidateError("mihomo backend exited before publishing identity")
             raise RuntimeSessionError("mihomo guardian did not publish identity")
         pid = value.get("pid")
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:

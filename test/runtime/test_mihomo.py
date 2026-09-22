@@ -982,3 +982,36 @@ def test_provider_config_rejects_an_unapproved_bind_address(tmp_path):
             "password",
             bind_address="192.0.2.1",
         )
+
+
+@pytest.mark.parametrize("error_number,retryable", [(11, True), (12, True), (13, False)])
+def test_launch_resource_failure_is_retryable_but_permission_failure_is_not(tmp_path, monkeypatch,
+                                                                          error_number, retryable):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    class RefusedPopen:
+        def __init__(self, *args, **kwargs):
+            raise OSError(error_number, "private diagnostic")
+
+    monkeypatch.setattr(mihomo_module.subprocess, "Popen", RefusedPopen)
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    with pytest.raises(RuntimeSessionError) as caught:
+        process.start()
+    assert isinstance(caught.value, RuntimeCandidateError) == retryable
+    assert "private diagnostic" not in str(caught.value)
+    assert process.process is None
+    assert process._start_gate_write is None
+
+
+@pytest.mark.parametrize("exited", [True, False])
+def test_missing_guardian_record_requires_exit_before_candidate_retry(tmp_path, monkeypatch, exited):
+    from jerryproxy.errors import RuntimeCandidateError
+
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = type("Child", (), {"poll": lambda self: 1 if exited else None})()
+    aborted = []
+    monkeypatch.setattr(process, "_abort_start", lambda: aborted.append(True))
+    with pytest.raises(RuntimeSessionError) as caught:
+        process._load_guardian_identity(timeout=0.01)
+    assert isinstance(caught.value, RuntimeCandidateError) == exited
+    assert aborted == [True]

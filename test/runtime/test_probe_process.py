@@ -164,3 +164,72 @@ def test_connect_authentication_refusal_is_terminal_across_process_boundary():
         server.shutdown()
         server.server_close()
         thread.join(2)
+
+
+@pytest.mark.parametrize("certificate", [False, True])
+@pytest.mark.timeout(30)
+def test_tls_refusal_is_a_failed_target_across_process_boundary(tmp_path, certificate):
+    import shutil
+    import ssl
+    import subprocess
+
+    if certificate and shutil.which("openssl") is None:
+        pytest.skip("openssl is needed for a real untrusted certificate")
+    context = None
+    if certificate:
+        key, cert = tmp_path / "key.pem", tmp_path / "cert.pem"
+        subprocess.run(["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+                        "-keyout", str(key), "-out", str(cert), "-days", "1", "-subj", "/CN=example.invalid"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(cert), str(key))
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(15)
+    handshakes = []
+    failures = []
+
+    def serve():
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(5)
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        return
+                    request += chunk
+                connection.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                if context is not None:
+                    try:
+                        with context.wrap_socket(connection, server_side=True):
+                            handshakes.append("accepted-untrusted-certificate")
+                    except ssl.SSLError:
+                        # Strict client validation must reject this certificate.
+                        handshakes.append("rejected-certificate")
+                else:
+                    connection.recv(4096)
+                    handshakes.append("closed-during-handshake")
+        except OSError as error:
+            # Surface fixture transport failures on the parent test thread.
+            failures.append(type(error).__name__)
+
+    worker = threading.Thread(target=serve)
+    worker.start()
+    probe = ConnectivityProbe(targets=(HealthTarget("tls-target", "https://example.invalid/", 204),),
+                              quorum=1, timeout=10)
+    try:
+        snapshot = probe.check(listener.getsockname()[1], None, None)
+        assert not snapshot.ok
+        assert snapshot.targets[0].detail == "tls_failed"
+        worker.join(5)
+        assert not worker.is_alive()
+        assert not failures
+        assert handshakes == ["rejected-certificate" if certificate else "closed-during-handshake"]
+        assert "example.invalid" not in repr(snapshot)
+    finally:
+        probe.close()
+        listener.close()
+        worker.join(5)
