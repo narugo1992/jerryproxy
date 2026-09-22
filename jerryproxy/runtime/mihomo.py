@@ -1776,7 +1776,8 @@ class MihomoProcess(object):
                         process.terminate()
                     except OSError as error:
                         note("guardian termination failed: %s" % error)
-                elif guardian_alive and sys.platform.startswith("linux"):
+                elif guardian_alive and sys.platform.startswith("linux") and process.poll() is None:
+                    # The guardian can exit between the initial poll and group census.
                     note("guardian process-group identity is unavailable")
         elif guardian_alive:
             try:

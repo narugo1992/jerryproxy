@@ -1205,3 +1205,149 @@ def test_guardian_local_failure_is_not_downgraded_to_node_failure(tmp_path, monk
     assert not isinstance(caught.value, RuntimeCandidateError)
     assert "private path" not in str(caught.value)
     assert aborted == [True]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux group census")
+@pytest.mark.parametrize("exits", [True, False])
+def test_guardian_exit_during_group_signal_requires_fresh_liveness(tmp_path, monkeypatch, exits):
+    class Child:
+        pid = 456
+        calls = 0
+
+        def poll(self):
+            self.calls += 1
+            return 0 if exits and self.calls > 1 else None
+
+        def wait(self, timeout):
+            return 0
+
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = Child()
+    process._backend_pgid = process._backend_sid = 456
+    monkeypatch.setattr(mihomo_module, "_linux_process_group_members", lambda *args: ())
+    if exits:
+        process.stop(timeout=0.01)
+    else:
+        with pytest.raises(RuntimeSessionError, match="process-group identity"):
+            process.stop(timeout=0.01)
+
+
+@pytest.mark.parametrize("fault", [
+    "linux", "macos", "windows", "group_missing", "group_signal", "pidfd_identity", "pidfd_term",
+    "term_error", "wait_timeout", "kill_error", "wait_twice", "pidfd_kill", "pidfd_reused",
+    "backend_pidfd", "members_disappear", "members_stuck", "close_error", "metadata_error",
+    "drain_alive", "drain_error", "macos_kill", "windows_kill", "windows_wait", "fallback_group",
+    "macos_term", "windows_stopped", "members_killed",
+])
+def test_stop_requires_confirmed_containment_across_platform_failures(tmp_path, monkeypatch, fault):
+    from types import SimpleNamespace
+
+    platform = "darwin" if fault.startswith("macos") else (
+        "win32" if fault.startswith("windows") or fault == "term_error" else "linux")
+    native_os = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+    native_os.name = "nt" if platform == "win32" else "posix"
+    monkeypatch.setattr(mihomo_module, "os", native_os)
+    monkeypatch.setattr(mihomo_module, "sys", SimpleNamespace(platform=platform))
+    calls = []
+    timed_out = fault in ("wait_timeout", "kill_error", "wait_twice", "pidfd_kill", "pidfd_reused",
+                          "macos_kill", "windows_kill", "windows_wait")
+
+    class Child:
+        pid = 456
+        stopped = False
+        waits = 0
+
+        def poll(self):
+            return 0 if self.stopped else None
+
+        def terminate(self):
+            if fault in ("term_error", "macos_term"):
+                raise OSError("termination refused")
+
+        def kill(self):
+            if fault in ("macos_kill", "windows_kill"):
+                raise OSError("kill refused")
+
+        def wait(self, timeout):
+            self.waits += 1
+            if timed_out and (self.waits == 1 or fault in ("wait_twice", "windows_wait")):
+                raise subprocess.TimeoutExpired("backend", timeout)
+            self.stopped = True
+            return 0
+
+    process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
+    process.process = Child()
+    process.process.stopped = fault == "windows_stopped"
+    process._backend_pgid = process._backend_sid = 456
+    process.backend_pid = 789
+    process._backend_start_time = process._linux_start_time = 1
+    if fault == "fallback_group":
+        process._backend_pgid = None
+    if fault.startswith("pidfd"):
+        process._pidfd = 123
+    if fault in ("backend_pidfd", "close_error"):
+        process._backend_pidfd = 124
+    if fault == "close_error":
+        process._pidfd = 123
+
+    def identity(pid, token):
+        if fault == "pidfd_identity":
+            return False
+        if fault == "pidfd_reused" and process.process.waits:
+            return False
+        return fault not in ("group_missing", "group_signal", "macos_kill")
+
+    monkeypatch.setattr(mihomo_module, "_linux_process_identity_matches", identity)
+    monkeypatch.setattr(mihomo_module, "_linux_process_group", lambda pid: 456)
+    monkeypatch.setattr(mihomo_module, "_linux_process_session", lambda pid: 456)
+    census = []
+
+    def members(*args):
+        census.append(1)
+        if fault == "members_stuck" or (fault == "members_killed" and signal.SIGKILL not in calls):
+            return (789,)
+        if fault == "members_disappear" and len(census) == 1:
+            return (789,)
+        return ()
+
+    monkeypatch.setattr(mihomo_module, "_linux_process_group_members", members)
+
+    def killpg(group, signum):
+        calls.append(signum)
+        if fault in ("group_signal", "macos", "macos_kill", "macos_term", "kill_error"):
+            raise OSError("group unavailable")
+
+    native_os.killpg = killpg
+
+    def pidfd(fd, signum):
+        if fault == "pidfd_term" or (fault == "pidfd_kill" and signum == signal.SIGKILL) or fd == 124:
+            raise OSError("pidfd unavailable")
+
+    monkeypatch.setattr(mihomo_module, "_linux_pidfd_send_signal", pidfd)
+
+    def close(fd):
+        if fault == "close_error":
+            raise OSError("descriptor refused")
+
+    native_os.close = close
+    if fault == "metadata_error":
+        process._guardian_metadata_path = SimpleNamespace(exists=lambda: True, unlink=lambda: None)
+
+        def unlink():
+            raise OSError("metadata refused")
+
+        process._guardian_metadata_path.unlink = unlink
+        monkeypatch.setattr(mihomo_module, "is_path_alias", lambda path: False)
+    if fault == "drain_alive":
+        process._threads = [SimpleNamespace(join=lambda timeout: None, is_alive=lambda: True)]
+    if fault == "drain_error":
+        process._record_drain_error("drain failed")
+    failures = fault in ("macos_term", "kill_error", "group_missing", "group_signal", "pidfd_identity", "pidfd_term",
+                         "term_error", "wait_twice", "pidfd_kill", "members_stuck", "metadata_error", "drain_alive",
+                         "drain_error", "macos_kill", "windows_kill", "windows_wait")
+    if failures:
+        with pytest.raises(RuntimeSessionError):
+            process.stop(timeout=0.01)
+    else:
+        process.stop(timeout=0.01)
+        assert process.process.poll() == 0
