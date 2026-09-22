@@ -5,7 +5,7 @@ switching, and eventually orchestrating multiple external proxy backends. The
 PyPI distribution, Python import, GitHub repository, CLI command, and default
 home directory all use the same name: `jerryproxy`.
 
-> **0.2.0 release preparation (alpha quality):** the current runtime slice implements bounded
+> **0.2.1 (alpha quality):** the current runtime slice implements bounded
 > `V2RAY_SUBSCRIPTION` ingestion for Base64/plain SS, VMess, VLESS, Trojan,
 > Hysteria2, TUIC, and AnyTLS URI
 > lines and Mihomo/Clash provider YAML, which keeps the supported nodes of a
@@ -89,8 +89,7 @@ Python.
 
 ## Installation
 
-The source tree is prepared for `0.2.0`; publication is pending. The first
-public release was `0.1.0`. This remains an alpha-quality `0.x` project, so
+JerryProxy `0.2.1` remains an alpha-quality `0.x` project, so
 the API and managed-state formats may change between releases. Install it from
 PyPI with:
 
