@@ -223,7 +223,11 @@ def test_tls_refusal_is_a_failed_target_across_process_boundary(tmp_path, certif
     try:
         snapshot = probe.check(listener.getsockname()[1], None, None)
         assert not snapshot.ok
-        assert snapshot.targets[0].detail == "tls_failed"
+        # Older Windows/OpenSSL may surface an abrupt handshake close as a
+        # transport reset. Both are failed targets; invalid certificates must
+        # still be positively classified as TLS refusals.
+        expected = ("tls_failed",) if certificate else ("tls_failed", "transport_failed")
+        assert snapshot.targets[0].detail in expected
         worker.join(5)
         assert not worker.is_alive()
         assert not failures
