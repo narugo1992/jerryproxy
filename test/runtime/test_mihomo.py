@@ -1,3 +1,4 @@
+import errno
 import io
 import json
 import os
@@ -984,7 +985,7 @@ def test_provider_config_rejects_an_unapproved_bind_address(tmp_path):
         )
 
 
-@pytest.mark.parametrize("error_number,retryable", [(11, True), (12, True), (13, False)])
+@pytest.mark.parametrize("error_number,retryable", [(errno.EAGAIN, True), (errno.ENOMEM, True), (errno.EACCES, False)])
 def test_launch_resource_failure_is_retryable_but_permission_failure_is_not(tmp_path, monkeypatch,
                                                                           error_number, retryable):
     from jerryproxy.errors import RuntimeCandidateError
@@ -993,6 +994,7 @@ def test_launch_resource_failure_is_retryable_but_permission_failure_is_not(tmp_
         def __init__(self, *args, **kwargs):
             raise OSError(error_number, "private diagnostic")
 
+    monkeypatch.setattr(mihomo_module, "_posix_process_start_time", lambda pid: 1)
     monkeypatch.setattr(mihomo_module.subprocess, "Popen", RefusedPopen)
     process = MihomoProcess(tmp_path / "mihomo", tmp_path / "config", tmp_path, tmp_path / "log")
     with pytest.raises(RuntimeSessionError) as caught:
@@ -1135,6 +1137,10 @@ def test_launch_platform_and_containment_boundaries(tmp_path, monkeypatch, fault
     if fault == "safe_log":
         process.log_path.write_bytes(b"")
         process.log_path.chmod(0o600)
+        if os.name == "nt":
+            # This case models POSIX permissions on a Windows host.
+            monkeypatch.setattr(mihomo_module, "stat",
+                                SimpleNamespace(S_IMODE=lambda mode: 0o600))
     refused = fault in ("logdir", "gate", "containment", "release", "identity",
                         "macos_parent", "windows_assign")
     try:
