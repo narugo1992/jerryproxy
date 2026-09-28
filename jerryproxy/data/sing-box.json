@@ -1,8 +1,248 @@
 {
   "backend": "sing-box",
-  "generated_at": "2026-09-15T00:06:50Z",
+  "generated_at": "2026-09-24T11:47:08Z",
   "repository": "SagerNet/sing-box",
   "versions": [
+    {
+      "artifacts": {
+        "darwin-amd64": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840633,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-darwin-amd64.tar.gz",
+          "sha256": "b0bfb0dc70a5fc708710b9f5ea98b9ee76d40fa4169928d25d73edc4331df2fe",
+          "size": 31480803,
+          "updated_at": "2026-09-24T11:43:22Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-darwin-amd64.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "darwin-arm64": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840639,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-darwin-arm64.tar.gz",
+          "sha256": "925c5382eca8492b0150f868a6db20b18290a38700e621724b3703fd453e032d",
+          "size": 29161521,
+          "updated_at": "2026-09-24T11:43:23Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-darwin-arm64.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-386-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840677,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-386-glibc.tar.gz",
+          "sha256": "f875c9f4675e3f7497735cc469a4f423a9e6171f98b1470a89df9110178a06da",
+          "size": 31164615,
+          "updated_at": "2026-09-24T11:43:24Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-386-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-386-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840682,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-386-musl.tar.gz",
+          "sha256": "e84faef6ccf47d9b7ffc071b1061b1dc8f38e747ce8f4d4543f200c2d1f6f845",
+          "size": 31179849,
+          "updated_at": "2026-09-24T11:43:26Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-386-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-amd64-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840737,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-amd64-glibc.tar.gz",
+          "sha256": "5c7bc18461827b28d0e5ee7e89d33b276d3ff7c818531104c8e8d26d85b0656e",
+          "size": 32500990,
+          "updated_at": "2026-09-24T11:43:26Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-amd64-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-amd64-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840769,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-amd64-musl.tar.gz",
+          "sha256": "8f6cb4bcf94d2b33c65d52e0d5b142db29a938336f1ff7267f397ac3758fc297",
+          "size": 32525286,
+          "updated_at": "2026-09-24T11:43:27Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-amd64-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-arm64-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840820,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-arm64-glibc.tar.gz",
+          "sha256": "87db5c3a96ebad1c44c0be1fe7955db2f76b8c97bbc0ed62173063d675e078cf",
+          "size": 29691063,
+          "updated_at": "2026-09-24T11:43:29Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-arm64-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-arm64-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840822,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-arm64-musl.tar.gz",
+          "sha256": "675297394f9430cebb72b3c48ba8bce0d6f7c750a9d68a8f7f88c515c8255cd1",
+          "size": 29725690,
+          "updated_at": "2026-09-24T11:43:29Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-arm64-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-armv5": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840844,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-armv5.tar.gz",
+          "sha256": "508431ad7870d4d879a01374692a54a70e141a96ac99f51a96bae84c0808ed49",
+          "size": 25358071,
+          "updated_at": "2026-09-24T11:43:30Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-armv5.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-armv6": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840848,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-armv6.tar.gz",
+          "sha256": "6df28ef1a6f86aea4f8f90086500590c504e5668ca298b572e0513b97d2e7348",
+          "size": 25345469,
+          "updated_at": "2026-09-24T11:43:30Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-armv6.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-armv7-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840849,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-armv7-glibc.tar.gz",
+          "sha256": "550431f271700aa25b266093ac7549568dbc4174d2b36fbfcdc2613504dd1a1a",
+          "size": 29857302,
+          "updated_at": "2026-09-24T11:43:30Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-armv7-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-armv7-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840857,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-armv7-musl.tar.gz",
+          "sha256": "ba873d9e1eaff53dd6f678ecc315ac6fcb9d28b32b550e1ecc8227634955b56f",
+          "size": 29883006,
+          "updated_at": "2026-09-24T11:43:31Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-armv7-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-loong64-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840881,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-loong64-glibc.tar.gz",
+          "sha256": "ad7b4640f0d127a1680b91e476467d46122873870382fc524bbd42ddc75b0b62",
+          "size": 31349126,
+          "updated_at": "2026-09-24T11:43:32Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-loong64-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-loong64-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840892,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-loong64-musl.tar.gz",
+          "sha256": "04ca99455dbe045940b41c0e9bebac88b7fd4306141aec15df6e31b2cb1928ab",
+          "size": 31378181,
+          "updated_at": "2026-09-24T11:43:32Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-loong64-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-ppc64le": {
+          "archive_format": "tar.gz",
+          "asset_id": 585840992,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-ppc64le.tar.gz",
+          "sha256": "b59b16b24514780f9bd65330e418be5d9537f3b4cb1172bd4c53745bcd0a95d4",
+          "size": 24839858,
+          "updated_at": "2026-09-24T11:43:35Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-ppc64le.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-riscv64-glibc": {
+          "archive_format": "tar.gz",
+          "asset_id": 585841006,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-riscv64-glibc.tar.gz",
+          "sha256": "fbdd2c11f24b3f9801c2a2b07aeac4f415ff35709a434d79f7d094351eb8b29f",
+          "size": 30509407,
+          "updated_at": "2026-09-24T11:43:35Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-riscv64-glibc.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-riscv64-musl": {
+          "archive_format": "tar.gz",
+          "asset_id": 585841024,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-riscv64-musl.tar.gz",
+          "sha256": "95bda0a4fec8a5a0df8464e36d6aa03ac5df8aaf05d8141f7b5cb50e2e86dd91",
+          "size": 30538036,
+          "updated_at": "2026-09-24T11:43:36Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-riscv64-musl.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "linux-s390x": {
+          "archive_format": "tar.gz",
+          "asset_id": 585841050,
+          "executable": "sing-box",
+          "name": "sing-box-1.14.2-linux-s390x.tar.gz",
+          "sha256": "94141d84eb442d7919a3be259355579e740b69aa47b51aba5e3663fd60a67b77",
+          "size": 26789968,
+          "updated_at": "2026-09-24T11:43:37Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-s390x.tar.gz",
+          "verification": "github-release-digest"
+        },
+        "windows-386": {
+          "archive_format": "zip",
+          "asset_id": 585841066,
+          "executable": "sing-box.exe",
+          "name": "sing-box-1.14.2-windows-386.zip",
+          "sha256": "745b3ae034972244396414a54a1518aaa46fa55b6b9c4690dc7a4c2b71bac69b",
+          "size": 26666342,
+          "updated_at": "2026-09-24T11:43:38Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-386.zip",
+          "verification": "github-release-digest"
+        },
+        "windows-amd64": {
+          "archive_format": "zip",
+          "asset_id": 585841082,
+          "executable": "sing-box.exe",
+          "name": "sing-box-1.14.2-windows-amd64.zip",
+          "sha256": "c2d8bfff918755808781dfdeeb8581b6c91eb3a243d9a7b55483cfc0c0684d32",
+          "size": 32857903,
+          "updated_at": "2026-09-24T11:43:38Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-amd64.zip",
+          "verification": "github-release-digest"
+        },
+        "windows-arm64": {
+          "archive_format": "zip",
+          "asset_id": 585841133,
+          "executable": "sing-box.exe",
+          "name": "sing-box-1.14.2-windows-arm64.zip",
+          "sha256": "2bb467039310452380958b821983d5bb4f78fb70a2583914e4bea8b011582b64",
+          "size": 29420921,
+          "updated_at": "2026-09-24T11:43:40Z",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-arm64.zip",
+          "verification": "github-release-digest"
+        }
+      },
+      "published_at": "2026-09-24T11:47:08Z",
+      "release_id": 395615206,
+      "release_url": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
+      "tag": "v1.14.2",
+      "version": "1.14.2"
+    },
     {
       "artifacts": {
         "darwin-amd64": {
